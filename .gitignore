@@ -2,3 +2,8 @@
 credentials.json
 fb_session.json
 __pycache__/
+
+chrome_profile/
+chrome_profile_test/
+debug_fb.png
+test_*.py

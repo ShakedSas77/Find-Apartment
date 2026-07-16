@@ -24,6 +24,12 @@ from config import (
     NEGATIVE_KEYWORDS, EXCLUDED_LOCATIONS, MAX_WALKING_DISTANCE_METERS,
     SHEET_HEADERS
 )
+from prompts import get_apartment_prompt_improved
+
+def map_bool(val):
+    if val is True: return "כן"
+    if val is False: return "לא"
+    return "לא צוין"
 
 # --- Load environment variables ---
 load_dotenv()
@@ -60,15 +66,22 @@ def setup_google_sheet():
     sheet = gc.open_by_key(SHEET_ID).sheet1
 
     try:
-        # Check if the sheet is completely empty
+        # Check if the sheet is empty or missing headers
         existing_data = sheet.get_all_values()
         
         if not existing_data:
-            print("📝 Google Sheet is empty. Adding column headers...")
+            print("📝 Missing column headers in Google Sheet. Adding them to row 1...")
             sheet.insert_row(SHEET_HEADERS, 1)
-            seen_urls = set()
-        else:
-            seen_urls = set()
+            existing_data = sheet.get_all_values()
+        elif len(existing_data[0]) != len(SHEET_HEADERS) or existing_data[0][0] != "לינק למודעה":
+            print("📝 Outdated column headers in Google Sheet. Updating row 1...")
+            if existing_data[0] and existing_data[0][0] == "לינק למודעה":
+                sheet.delete_rows(1)
+            sheet.insert_row(SHEET_HEADERS, 1)
+            existing_data = sheet.get_all_values()
+            
+        seen_urls = set()
+        if len(existing_data) > 1:
             for row in existing_data[1:]:
                 if row and row[0] and row[0] != "לינק למודעה":
                     seen_urls.add(row[0])
@@ -79,42 +92,35 @@ def setup_google_sheet():
         print(f"    ❌ Error reading Google Sheet: {e}")
         return sheet, set()
 
-def extract_post_url(article) -> str:
+def extract_post_info(article) -> tuple[str, str]:
     try:
         links = article.locator('a[role="link"]').all()
         for link in links:
             href = link.get_attribute("href") or ""
             if any(seg in href for seg in ("/posts/", "/permalink/", "/marketplace/item/")):
+                if "comment_id" in href:
+                    continue
                 clean = href.split("?")[0]
                 if clean.startswith("/"):
                     clean = "https://www.facebook.com" + clean
-                return clean
+                
+                # Extract the post date directly from the Facebook timestamp link
+                post_date = "לא צוין"
+                try:
+                    link_text = link.inner_text().strip()
+                    if link_text:
+                        post_date = link_text
+                except Exception:
+                    pass
+                    
+                return clean, post_date
     except Exception:
         pass
-    return "Link not extracted"
+    return "Link not extracted", "לא צוין"
 
 def analyze_post_with_llm(text: str) -> dict | None:
     global GEMINI_EXHAUSTED
-    prompt = f"""
-קרא את מודעת הנדל"ן הבאה והוצא ממנה את הנתונים במדויק.
-החזר אך ורק אובייקט JSON חוקי. אם נתון חסר, החזר null (למספרים) או "לא צוין" (למחרוזות).
-
-- "rooms": מספר החדרים כעשרוני (למשל 3.0, 3.5. מספר בלבד).
-- "price": שכר דירה חודשי בשקלים (מספר בלבד. חפש סכומים של אלפי שקלים, אל תתבלבל עם מ"ר!).
-- "arnona": עלות ארנונה (מחרוזת).
-- "vaad": עלות ועד בית (מחרוזת).
-- "shelter": האם יש ממ"ד או מקלט? (כן / לא / לא צוין).
-- "parking": חניה בבניין או ברחוב? (מחרוזת, פרט מה שכתוב).
-- "entry_date": תאריך כניסה (מחרוזת).
-- "post_date": תאריך פרסום המודעה מתוך הטקסט אם רשום (מחרוזת).
-- "is_agent": תיווך? (כן / ללא תיווך / לא צוין).
-- "address": שם הרחוב, מספר והעיר. (חובה לכלול עיר! אם לא רשום מפורשות, הנח שזה "רמת גן" או "גבעתיים" והוסף לכתובת).
-
-הטקסט:
----
-{text[:3000]}
----
-"""
+    prompt = get_apartment_prompt_improved(text)
     if not GEMINI_EXHAUSTED:
         try:
             response = client.models.generate_content(
@@ -174,10 +180,10 @@ def get_walking_distance(address: str):
             dist_meters = element["distance"]["value"]
             duration = element["duration"]["text"]
             return f"{dist_text} ({duration} walk)", dist_meters
-        return "Not found on Maps", 999999
+        return "", float('inf')
     except Exception as e:
         print(f"\n    [Google Maps API Error]: {e}")
-        return "Calculation error", 999999
+        return "", float('inf')
 
 def _dismiss_popups(page):
     for selector in [
@@ -197,23 +203,40 @@ def run_scraper(headless: bool = False):
     sheet, seen_urls = setup_google_sheet()
     
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
-        context = browser.new_context()
-        page = context.new_page()
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=os.path.join(os.getcwd(), "chrome_profile"),
+            channel="chrome",
+            headless=headless,
+            no_viewport=True,
+            ignore_default_args=["--no-sandbox", "--enable-automation"],
+            args=["--disable-blink-features=AutomationControlled"]
+        )
+        page = context.pages[0] if context.pages else context.new_page()
 
         print("🌐 Opening Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
         
         if headless:
-            print("❌ Cannot login manually in headless mode! Please run without --headless.")
-            browser.close()
-            sys.exit(1)
-            
-        print("\n┌─────────────────────────────────────────────┐")
-        print("│  Please log in to Facebook manually in the  │")
-        print("│  browser window that just opened.           │")
-        print("└─────────────────────────────────────────────┘\n")
-        input("  → Press ENTER here in the terminal ONLY AFTER you have fully logged in and see your feed... ")
+            if page.locator('input[name="email"]').is_visible():
+                print("❌ Cannot login manually in headless mode! Please run without --headless first.")
+                context.close()
+                sys.exit(1)
+        else:
+            if page.locator('input[name="email"]').is_visible():
+                print("\n┌─────────────────────────────────────────────┐")
+                print("│  Please log in to Facebook manually in the  │")
+                print("│  browser window that just opened.           │")
+                print("└─────────────────────────────────────────────┘\n")
+                
+                while page.locator('input[name="email"]').is_visible():
+                    input("  → Press ENTER here in the terminal ONLY AFTER you have fully logged in and see your feed... ")
+                    page.wait_for_timeout(2000)
+                    if page.locator('input[name="email"]').is_visible():
+                        print("❌ Facebook login form is still visible! Please complete login first.")
+            else:
+                print("✅ Already logged into Facebook! Skipping manual login.")
+                
         print("✔  Continuing to scan groups...")
 
         # Shuffle the target URLs to scan groups in a random order
@@ -221,8 +244,27 @@ def run_scraper(headless: bool = False):
 
         for group_idx, target_url in enumerate(shuffled_urls, 1):
             print(f"\n{'='*50}\n📄 Scanning group {group_idx} of {len(shuffled_urls)}\n{target_url}\n{'='*50}")
-            page.goto(target_url, wait_until="domcontentloaded")
+            
+            try:
+                page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+            except Exception as e:
+                print("    ⚠️ Navigation interrupted by Facebook. Checking for security checkpoints...")
+            
             page.wait_for_timeout(3000)
+            
+            # Check if Facebook is demanding a re-login, security check, or CAPTCHA
+            while (page.locator('input[name="email"]').is_visible() or 
+                   page.locator('input[name="pass"]').is_visible() or 
+                   "checkpoint" in page.url or 
+                   page.locator('iframe[title*="recaptcha"]').is_visible() or 
+                   page.get_by_text("I'm not a robot").is_visible()):
+                print("\n⛔ Facebook is asking for a password, 2FA, or CAPTCHA security check!")
+                input("  → Please complete it in the browser, then press ENTER here to resume... ")
+                try:
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(3000)
+                except Exception:
+                    pass
             
             _dismiss_popups(page)
 
@@ -236,11 +278,12 @@ def run_scraper(headless: bool = False):
 
             # לחץ על "קרא עוד" כדי לחשוף את כל הטקסט של הפוסטים הארוכים
             print("📖  Expanding 'See more' buttons...")
-            for btn_text in ["See more", "קרא עוד", "ראה עוד"]:
-                btns = page.locator(f'div[role="button"]:has-text("{btn_text}")').all()
-                for btn in btns:
+            for text_pattern in ["See more", "קרא עוד", "ראה עוד", "עוד"]:
+                for el in page.locator(f'div[role="button"]:has-text("{text_pattern}"), span:has-text("{text_pattern}")').all():
                     try:
-                        btn.click(timeout=1000)
+                        if el.is_visible():
+                            el.click(timeout=1000)
+                            page.wait_for_timeout(300)
                     except Exception:
                         pass
             page.wait_for_timeout(1500)
@@ -283,8 +326,14 @@ def run_scraper(headless: bool = False):
                 article = item["element"]
                 text = item["text"]
                 
-                post_url = extract_post_url(article)
-                if post_url in seen_urls and post_url != "Link not extracted":
+                # מחיקת תווים שקופים (BIDI) שפייסבוק שותל והורסים ביטויים רגולריים
+                text = re.sub(r'[\u200e\u200f\u202a-\u202e\u2066-\u2069]', '', text)
+                
+                post_url, fb_post_date = extract_post_info(article)
+                if post_url == "Link not extracted":
+                    continue  # מדלגים על תגובות או אלמנטים שאינם פוסט אמיתי
+                
+                if post_url in seen_urls:
                     print("    Pre-filtered: Post already exists in Google Sheets (Duplicate).")
                     continue
 
@@ -293,12 +342,6 @@ def run_scraper(headless: bool = False):
                     print(f"    Pre-filtered: Contains excluded location '{excluded_found[0]}'.")
                     continue
 
-                # --- Pre-filter: Check for room counts explicitly before heavy LLM processing ---
-                if not re.search(ROOMS_PRE_FILTER_REGEX, text):
-                    clean_snip = text[:100].replace('\n', ' ')
-                    print(f"    Pre-filtered: No mention of matching room count.\n      ↳ URL: {post_url}\n      ↳ Text: {clean_snip}...")
-                    continue
-                    
                 # --- Pre-filter: Remove obvious non-relevant posts (Sublets, Roommates, Commercial) ---
                 neg_match = re.search(NEGATIVE_KEYWORDS, text)
                 if neg_match:
@@ -306,12 +349,23 @@ def run_scraper(headless: bool = False):
                     continue
 
                 # --- Pre-filter: Identify Sales instead of Rentals ---
-                if "למכירה" in text:
-                    # Look for prices > 1,000,000 or the word "מיליון"
-                    sale_price_match = re.search(r'(?<!\d)[1-9](?:\d{6}|\d{0,2},\d{3},\d{3})(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
+                if re.search(r'ל\s*מ\s*כ\s*י\s*ר\s*ה', text):
+                    # Look for prices >= 1,000,000 in any format (commas, dots, spaces) or the word "מיליון"
+                    sale_price_match = re.search(r'(?<!\d)[1-9](?:[.,\s]?\d{3}){2,}(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
                     if sale_price_match:
-                        print(f"    Pre-filtered: Apartment for sale (found 'למכירה' + {sale_price_match.group(0)}).")
+                        print(f"    Pre-filtered: Apartment for sale (found 'למכירה' + {sale_price_match.group(0).strip()}).")
                         continue
+
+                # --- Pre-filter: Check for room counts explicitly before heavy LLM processing ---
+                if not re.search(ROOMS_PRE_FILTER_REGEX, text):
+                    clean_snip = text[:100].replace('\n', ' ')
+                    actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
+                    if actual_rooms_match:
+                        found_val = actual_rooms_match.group(1)
+                        print(f"    Pre-filtered: Post is for {found_val} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS}).\n      ↳ URL: {post_url}\n      ↳ Text: {clean_snip}...")
+                    else:
+                        print(f"    Pre-filtered: No mention of matching room count.\n      ↳ URL: {post_url}\n      ↳ Text: {clean_snip}...")
+                    continue
 
                 sys.stdout.write(f"\n🤖 Analyzing post (URL: {post_url if post_url != 'Link not extracted' else 'Unknown'})... ")
                 sys.stdout.flush()
@@ -365,24 +419,29 @@ def run_scraper(headless: bool = False):
 
                 address = data.get("address", "לא צוין")
                 
-                # Validation - Distance
+                # Calculate Distance (No filtering, just display)
                 dist_text, dist_meters = get_walking_distance(address)
-                if dist_meters > MAX_WALKING_DISTANCE_METERS:
-                    print(f"    Skipped: Too far ({dist_text} walking from {address}).")
-                    continue
+
+                # Prefer LLM's date if valid, otherwise fallback to Facebook's timestamp
+                llm_post_date = data.get("post_date")
+                final_post_date = fb_post_date
+                if llm_post_date and llm_post_date != "לא צוין" and len(str(llm_post_date)) > 2:
+                    final_post_date = llm_post_date
 
                 new_row = [
                     post_url,
                     price,
-                    data.get("rooms", "לא צוין"),
+                    data.get("rooms") or "לא צוין",
                     dist_text,
-                    data.get("entry_date", "לא צוין"),
-                    data.get("parking", "לא צוין"),
-                    data.get("arnona", "לא צוין"),
-                    data.get("vaad", "לא צוין"),
-                    data.get("shelter", "לא צוין"),
-                    data.get("is_agent", "לא צוין"),
-                    data.get("post_date", "לא צוין"),
+                    data.get("entry_date") or "לא צוין",
+                    data.get("floor") or "לא צוין",
+                    map_bool(data.get("elevator")),
+                    data.get("parking") or "לא צוין",
+                    data.get("arnona") or "לא צוין",
+                    data.get("vaad") or "לא צוין",
+                    map_bool(data.get("shelter")),
+                    map_bool(data.get("is_agent")),
+                    final_post_date,
                     address
                 ]
                 
