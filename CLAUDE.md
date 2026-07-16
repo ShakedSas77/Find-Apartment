@@ -67,13 +67,13 @@ ollama pull llama3
 ## Hebrew / Locale Rules
 
 - **Never translate or reformat** `ROOMS_PRE_FILTER_REGEX`, `NEGATIVE_KEYWORDS`, `EXCLUDED_LOCATIONS` in `config.py`, or the prompt in `prompts.py`
-- **BIDI strip is mandatory** before any regex: FB injects `‎‏‪–‮⁦–⁩` — stripped at `apartment_bot.py:330, 396`
+- **BIDI strip is mandatory** before any regex: FB injects `‎‏‪–‮⁦–⁩` — stripped via the module-level `BIDI_RE` constant in `apartment_bot.py`
 - `map_bool()` → "כן" / "לא" / "לא צוין" — keep as-is
 - `DESTINATION_ADDRESS` is Hebrew; distance function auto-appends "רמת גן, גבעתיים, ישראל" if no local city found
 
 ## Anti-Bot / FB Fragility
 
-- CAPTCHA/checkpoint loop (lines 256–267) requires human intervention — cannot be automated away
+- CAPTCHA/checkpoint loop in `run_scraper` requires human intervention — cannot be automated away
 - URL order shuffled via `random.sample` each run
 - `time.sleep(2)` per post — do not remove; removes human pacing
 - 6-selector fallback chain for article extraction (lines 293–299) — FB DOM changes without warning
@@ -89,5 +89,5 @@ ollama pull llama3
 
 ## Sensitive Files
 
-- `credentials.json` and `.env` are gitignored going forward
-- Commits `336dcd5` and `1ed42b9` may predate gitignore addition — audit before making repo public
+- `credentials.json` and `.env` are gitignored
+- Verified via `git log --all -- credentials.json .env` (2026-07-17): neither file has ever been committed. History is clean.

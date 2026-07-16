@@ -14,14 +14,15 @@ import googlemaps
 from google import genai
 from google.genai import types
 from google.oauth2.service_account import Credentials
-from playwright.sync_api import sync_playwright, TimeoutError as PwTimeout
+from playwright.sync_api import sync_playwright
 
 from config import (
-    CREDENTIALS_FILE, SHEET_ID, TARGET_URLS, TARGET_ROOMS,
+    CREDENTIALS_FILE, SHEET_ID, TARGET_URLS,
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     SCROLL_COUNT, SCROLL_DELAY_MS, LOCATIONS,
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
-    NEGATIVE_KEYWORDS, EXCLUDED_LOCATIONS, MAX_WALKING_DISTANCE_METERS,
+    NEGATIVE_KEYWORDS, EXCLUDED_LOCATIONS,
+    GEMINI_MAX_CONSECUTIVE_ERRORS, LOGIN_MAX_ATTEMPTS,
     SHEET_HEADERS
 )
 from prompts import get_apartment_prompt_improved
@@ -45,8 +46,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
 
 GEMINI_EXHAUSTED = False
+GEMINI_ERROR_COUNT = 0
+
+# מחיקת תווים שקופים (BIDI) שפייסבוק שותל והורסים ביטויים רגולריים
+BIDI_RE = re.compile(r'[‎‏‪-‮⁦-⁩]')
 
 # ─── Helper Functions ─────────────────────────────────────────────────────────────
+
+def _is_visible(locator) -> bool:
+    try:
+        return locator.first.is_visible()
+    except Exception:
+        return False
 
 def setup_google_sheet():
     """
@@ -85,7 +96,8 @@ def setup_google_sheet():
         return sheet, seen_urls
     except Exception as e:
         print(f"    ❌ Error reading Google Sheet: {e}")
-        return sheet, set()
+        print("    Aborting: cannot dedupe or write results without the sheet.")
+        sys.exit(1)
 
 def extract_post_info(article) -> tuple[str, str]:
     try:
@@ -114,7 +126,7 @@ def extract_post_info(article) -> tuple[str, str]:
     return "Link not extracted", "לא צוין"
 
 def analyze_post_with_llm(text: str) -> dict | None:
-    global GEMINI_EXHAUSTED
+    global GEMINI_EXHAUSTED, GEMINI_ERROR_COUNT
     prompt = get_apartment_prompt_improved(text)
     if not GEMINI_EXHAUSTED:
         try:
@@ -123,7 +135,9 @@ def analyze_post_with_llm(text: str) -> dict | None:
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json"),
             )
-            return json.loads(response.text)
+            result = json.loads(response.text)
+            GEMINI_ERROR_COUNT = 0
+            return result
         except Exception as gemini_err:
             error_msg = str(gemini_err)
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
@@ -131,8 +145,13 @@ def analyze_post_with_llm(text: str) -> dict | None:
                 sys.stdout.flush()
                 GEMINI_EXHAUSTED = True
             else:
+                GEMINI_ERROR_COUNT += 1
                 sys.stdout.write(f"\n    ⚠ Gemini Error ({error_msg}). Falling back to Ollama... ")
                 sys.stdout.flush()
+                if GEMINI_ERROR_COUNT >= GEMINI_MAX_CONSECUTIVE_ERRORS:
+                    sys.stdout.write(f"\n    ⏳ {GEMINI_ERROR_COUNT} consecutive Gemini errors. Switching permanently to Ollama... ")
+                    sys.stdout.flush()
+                    GEMINI_EXHAUSTED = True
     else:
         sys.stdout.write("[Local Ollama] ")
         sys.stdout.flush()
@@ -190,7 +209,7 @@ def _dismiss_popups(page):
     ]:
         try:
             page.locator(selector).first.click(timeout=2000)
-        except (PwTimeout, Exception):
+        except Exception:
             pass
 
 # ─── Core Scraper ────────────────────────────────────────────────────────
@@ -214,22 +233,27 @@ def run_scraper(headless: bool = False):
         page.wait_for_timeout(3000)
         
         if headless:
-            if page.locator('input[name="email"]').is_visible():
+            if _is_visible(page.locator('input[name="email"]')):
                 print("❌ Cannot login manually in headless mode! Please run without --headless first.")
                 context.close()
                 sys.exit(1)
         else:
-            if page.locator('input[name="email"]').is_visible():
+            if _is_visible(page.locator('input[name="email"]')):
                 print("\n┌─────────────────────────────────────────────┐")
                 print("│  Please log in to Facebook manually in the  │")
                 print("│  browser window that just opened.           │")
                 print("└─────────────────────────────────────────────┘\n")
-                
-                while page.locator('input[name="email"]').is_visible():
+
+                for attempt in range(LOGIN_MAX_ATTEMPTS):
                     input("  → Press ENTER here in the terminal ONLY AFTER you have fully logged in and see your feed... ")
                     page.wait_for_timeout(2000)
-                    if page.locator('input[name="email"]').is_visible():
-                        print("❌ Facebook login form is still visible! Please complete login first.")
+                    if not _is_visible(page.locator('input[name="email"]')):
+                        break
+                    print("❌ Facebook login form is still visible! Please complete login first.")
+                else:
+                    print("❌ Login not completed after several attempts. Exiting.")
+                    context.close()
+                    sys.exit(1)
             else:
                 print("✅ Already logged into Facebook! Skipping manual login.")
                 
@@ -249,11 +273,11 @@ def run_scraper(headless: bool = False):
             page.wait_for_timeout(3000)
             
             # Check if Facebook is demanding a re-login, security check, or CAPTCHA
-            while (page.locator('input[name="email"]').is_visible() or 
-                   page.locator('input[name="pass"]').is_visible() or 
-                   "checkpoint" in page.url or 
-                   page.locator('iframe[title*="recaptcha"]').is_visible() or 
-                   page.get_by_text("I'm not a robot").is_visible()):
+            while (_is_visible(page.locator('input[name="email"]')) or
+                   _is_visible(page.locator('input[name="pass"]')) or
+                   "checkpoint" in page.url or
+                   _is_visible(page.locator('iframe[title*="recaptcha"]')) or
+                   _is_visible(page.get_by_text("I'm not a robot"))):
                 print("\n⛔ Facebook is asking for a password, 2FA, or CAPTCHA security check!")
                 input("  → Please complete it in the browser, then press ENTER here to resume... ")
                 try:
@@ -274,7 +298,7 @@ def run_scraper(headless: bool = False):
 
             # לחץ על "קרא עוד" כדי לחשוף את כל הטקסט של הפוסטים הארוכים
             print("📖  Expanding 'See more' buttons...")
-            for text_pattern in ["See more", "קרא עוד", "ראה עוד", "עוד"]:
+            for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
                 for el in page.locator(f'div[role="button"]:has-text("{text_pattern}"), span:has-text("{text_pattern}")').all():
                     try:
                         if el.is_visible():
@@ -327,7 +351,7 @@ def run_scraper(headless: bool = False):
                     article.scroll_into_view_if_needed(timeout=500)
                     clicked = article.evaluate(
                         """el => {
-                            const patterns = ['See more', 'קרא עוד', 'ראה עוד', 'עוד'];
+                            const patterns = ['See more', 'קרא עוד', 'ראה עוד'];
                             for (const btn of el.querySelectorAll('div[role="button"], span, a')) {
                                 if (patterns.includes(btn.textContent.trim())) { btn.click(); return true; }
                             }
@@ -340,9 +364,8 @@ def run_scraper(headless: bool = False):
                 except Exception:
                     pass
 
-                # מחיקת תווים שקופים (BIDI) שפייסבוק שותל והורסים ביטויים רגולריים
-                text = re.sub(r'[‎‏‪-‮⁦-⁩]', '', text)
-                
+                text = BIDI_RE.sub('', text)
+
                 post_url, fb_post_date = extract_post_info(article)
                 if post_url == "Link not extracted":
                     continue  # מדלגים על תגובות או אלמנטים שאינם פוסט אמיתי
@@ -365,7 +388,7 @@ def run_scraper(headless: bool = False):
                 # --- Pre-filter: Identify Sales instead of Rentals ---
                 if re.search(r'ל\s*מ\s*כ\s*י\s*ר\s*ה', text):
                     # Look for prices >= 1,000,000 in any format (commas, dots, spaces) or the word "מיליון"
-                    sale_price_match = re.search(r'(?<!\d)[1-9](?:[.,\s]?\d{3}){2,}(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
+                    sale_price_match = re.search(r'(?<!\d)[1-9]\d{0,2}(?:[.,]\d{3}){2,}(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
                     if sale_price_match:
                         print(f"    Pre-filtered: Apartment for sale (found 'למכירה' + {sale_price_match.group(0).strip()}).")
                         continue
@@ -405,9 +428,9 @@ def run_scraper(headless: bool = False):
 
                 # --- תיקון שגיאות והזדמנות שנייה למחיר ---
                 # אם המחיר שהמודל מצא לא נמצא בתקציב שלנו, או שהוא הזוי (כמו מ"ר), נחפש בטקסט עצמו!
-                if not (MIN_PRICE <= price_val <= MAX_PRICE) or price_val < 3000 or price_val > 30000:
+                if not (MIN_PRICE <= price_val <= MAX_PRICE):
                     # 1. Clean invisible BIDI characters often inserted by Facebook
-                    clean_text = re.sub(r'[\u200e\u200f\u202a-\u202e\u2066-\u2069]', '', text)
+                    clean_text = BIDI_RE.sub('', text)
                     
                     # 2. Remove commas, dots, or spaces ONLY if they act as thousands separators (e.g., "5 900" -> "5900")
                     clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
@@ -434,7 +457,7 @@ def run_scraper(headless: bool = False):
                 address = data.get("address", "לא צוין")
                 
                 # Calculate Distance (No filtering, just display)
-                dist_text, dist_meters = get_walking_distance(address)
+                dist_text, _ = get_walking_distance(address)
 
                 # Prefer LLM's date if valid, otherwise fallback to Facebook's timestamp
                 llm_post_date = data.get("post_date")
@@ -444,8 +467,8 @@ def run_scraper(headless: bool = False):
 
                 new_row = [
                     post_url,
-                    price,
-                    data.get("rooms") or "לא צוין",
+                    int(price_val),
+                    rooms_val,
                     dist_text,
                     data.get("entry_date") or "לא צוין",
                     data.get("floor") or "לא צוין",
@@ -478,7 +501,7 @@ if __name__ == "__main__":
     print("  🏠  Apartment Search Bot – Real-time updates")
     print("=======================================================")
     print(f"  Groups:      {len(TARGET_URLS)}")
-    print(f"  Locations:   {', '.join(LOCATIONS)}")
+    print(f"  Areas (info): {', '.join(LOCATIONS)}")
     print(f"  Price range: ₪{MIN_PRICE:,} – ₪{MAX_PRICE:,}")
     print(f"  Distance to: {DESTINATION_ADDRESS}")
     print("=======================================================")

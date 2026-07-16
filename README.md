@@ -10,9 +10,10 @@ All configurable in `config.py`.
 |-----------|---------------|
 | Rooms | 3.0 – 3.5 |
 | Price | ₪5,500 – ₪6,700 |
-| Max walking distance | 4 km from רחוב הדוגמה 1, Tel Aviv |
 | Excluded locations | Bnei Brak, etc. |
 | Disqualifying keywords | roommates, sublet, short-term, commercial |
+
+Walking distance to רחוב הדוגמה 1, Tel Aviv is computed and shown in the sheet for information only — it is not a filter.
 
 ## Google Sheets Columns
 
@@ -21,6 +22,8 @@ All configurable in `config.py`.
 - Rooms
 - Walking distance
 - Entry date
+- Floor
+- Elevator
 - Parking
 - Arnona (municipal tax)
 - Vaad bayit (building fee)
@@ -28,8 +31,6 @@ All configurable in `config.py`.
 - Agent or private
 - Post date
 - Address
-- Floor
-- Elevator
 
 Headers are auto-inserted on first run if the sheet is empty. Duplicate URLs are skipped automatically.
 
@@ -98,7 +99,7 @@ run_bot.bat
 4. Per post:
    - Pre-filters by excluded locations, negative keywords, sale indicators, room count
    - Parses with Gemini 2.0 Flash (`gemini-2.0-flash`) → strict JSON
-   - Falls back to local Ollama `llama3` if Gemini quota is exhausted (429)
+   - Falls back to local Ollama `llama3` if Gemini quota is exhausted (429) or after repeated errors
    - Secondary price fallback: regex scan if LLM price is out of range
    - Computes walking distance via Google Distance Matrix
    - Appends row to sheet only if all filters pass
