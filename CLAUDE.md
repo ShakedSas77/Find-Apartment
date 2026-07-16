@@ -49,7 +49,7 @@ ollama pull qwen2.5:7b
 - **Primary**: `gemini-2.0-flash` via `google-genai`, forced JSON via `response_mime_type="application/json"`
 - **Fallback**: `ollama.chat(model='qwen2.5:7b', format='json', options={'temperature': 0})` — triggers permanently within run on Gemini 429, or after `GEMINI_MAX_CONSECUTIVE_ERRORS` non-quota errors
 - **Global flag**: `GEMINI_EXHAUSTED` (module-level bool in `apartment_bot.py`)
-- **Prompt**: `prompts.py` → Hebrew, strict JSON, keys: `rooms, price, arnona, vaad, shelter, parking, entry_date, floor, elevator, post_date, is_agent, address`
+- **Prompt**: `prompts.py` → Hebrew, strict JSON, keys: `rooms, price, arnona, vaad, shelter, parking, entry_date, floor, elevator, is_agent, address`. Post date is computed in Python from Facebook's relative timestamp (`relative_to_date`), not asked of the LLM.
 - **Text cap**: 3000 chars (prompt truncates at line 29 of `prompts.py`)
 
 ## Google Sheets

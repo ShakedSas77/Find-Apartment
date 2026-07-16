@@ -77,6 +77,26 @@ def relative_to_date(rel: str) -> str:
     value, unit = int(match.group(1)), match.group(2).lower()
     return (datetime.now() - _RELATIVE_DATE_UNITS[unit](value)).strftime("%d/%m")
 
+def _normalize_bimonthly_fee(raw: str) -> str:
+    """ארנונה/ועד בית משולמים סטנדרטית אחת לחודשיים בישראל — אם הפוסט נקב בסכום חודשי, מכפילים לערך הדו-חודשי."""
+    if not raw or raw == "לא צוין":
+        return raw
+    digits = re.sub(r'[^\d]', '', raw)
+    if not digits:
+        return raw
+    if re.search(r'לחודש(?!יים)', raw):
+        return f"{int(digits) * 2}₪ לחודשיים"
+    return raw
+
+def _warn_if_fee_implausible(label: str, raw: str, max_bimonthly: int):
+    if not raw or raw == "לא צוין":
+        return
+    digits = re.sub(r'[^\d]', '', raw)
+    if not digits:
+        return
+    if int(digits) > max_bimonthly:
+        print(f"\n    ⚠ {label} looks unusually high ({raw}) — verify manually.")
+
 def setup_google_sheet():
     """
     Connects to Google Sheets, checks existing data,
@@ -466,6 +486,14 @@ def run_scraper(headless: bool = False):
                             # לא מצאנו משהו בתקציב, אבל המחיר של המודל הזוי אז נחליף כדי שהלוג יהיה הגיוני
                             price_val = float(possible_prices[0])
 
+                # --- הזדמנות שנייה לחדרים: אם המודל טעה אך הטקסט מכיל ספירה תואמת ---
+                if not (MIN_ROOMS <= rooms_val <= MAX_ROOMS):
+                    clean_text_rooms = BIDI_RE.sub('', text)
+                    room_matches = [float(r) for r in re.findall(r'([1-9](?:\.5)?)\s*חד', clean_text_rooms)]
+                    valid_rooms = [r for r in room_matches if MIN_ROOMS <= r <= MAX_ROOMS]
+                    if valid_rooms:
+                        rooms_val = valid_rooms[0]
+
                 if not (MIN_ROOMS <= rooms_val <= MAX_ROOMS):
                     print(f"    Skipped: Room count is not suitable ({rooms_val}).")
                     continue
@@ -473,16 +501,15 @@ def run_scraper(headless: bool = False):
                     print(f"    Skipped: Price is not suitable ({int(price_val):,} ₪).")
                     continue
 
+                arnona = _normalize_bimonthly_fee(data.get("arnona") or "לא צוין")
+                vaad = _normalize_bimonthly_fee(data.get("vaad") or "לא צוין")
+                _warn_if_fee_implausible("Vaad bayit", vaad, 2400)
+                _warn_if_fee_implausible("Arnona", arnona, 3000)
+
                 address = data.get("address", "לא צוין")
-                
+
                 # Calculate Distance (No filtering, just display)
                 dist_text, _ = get_walking_distance(address)
-
-                # Prefer LLM's date if valid, otherwise fallback to Facebook's timestamp
-                llm_post_date = data.get("post_date")
-                final_post_date = fb_post_date
-                if llm_post_date and llm_post_date != "לא צוין" and len(str(llm_post_date)) > 2:
-                    final_post_date = relative_to_date(str(llm_post_date))
 
                 new_row = [
                     post_url,
@@ -493,11 +520,11 @@ def run_scraper(headless: bool = False):
                     data.get("floor") or "לא צוין",
                     map_bool(data.get("elevator")),
                     data.get("parking") or "לא צוין",
-                    data.get("arnona") or "לא צוין",
-                    data.get("vaad") or "לא צוין",
+                    arnona,
+                    vaad,
                     map_bool(data.get("shelter")),
                     map_bool(data.get("is_agent")),
-                    final_post_date,
+                    fb_post_date,
                     address
                 ]
                 
