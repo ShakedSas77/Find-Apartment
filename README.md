@@ -1,71 +1,104 @@
-# 🏠 בוט חיפוש דירות בפייסבוק (גרסה עדכנית)
+# Facebook Apartment Scraper
 
-בוט חכם שסורק **קבוצות פייסבוק** של דירות, פותח כל פוסט, מנתח אותו באמצעות מודל AI, ומחשב **מרחק הליכה** ליעד מדויק (כמו רחוב הדוגמה 1, ת"א) בעזרת Google Maps API. כל דירה רלוונטית שעומדת בקריטריונים תתווסף ישירות למסמך **Google Sheets**.
+Scrapes Facebook apartment listing groups, parses each post with an AI model, computes walking distance to a target address via Google Maps, and appends matching listings to Google Sheets.
 
-## ⚙️ הקריטריונים הנוכחיים
-*(ניתן לערוך בקלות את הכל מתוך קובץ ה-`config.py`)*
+## Current Filters
 
-| קריטריון | הגדרה נוכחית ב-Config |
-|-----------|------------------------|
-| **מיקומים פסולים** | בני ברק, וכו' |
-| **חדרים** | 3.0 עד 3.5 |
-| **מחיר** | ₪5,500 – ₪6,700 |
-| **מרחק מרבי** | עד 4 ק"מ הליכה מ"רחוב הדוגמה 1, תל אביב" |
-| **מילים פוסלות** | שותפים, סאבלט, טווח קצר, מסחרי |
+All configurable in `config.py`.
 
-## 📊 נתונים שנשמרים ב-Google Sheets
-- **לינק למודעה**
-- **מחיר**
-- **חדרים**
-- **מרחק הליכה**
-- **תאריך כניסה**
-- **חניה**
-- **ארנונה**
-- **ועד בית**
-- **ממ"ד/מקלט**
-- **תיווך/פרטי**
-- **תאריך פרסום**
-- **כתובת הדירה**
+| Criterion | Current value |
+|-----------|---------------|
+| Rooms | 3.0 – 3.5 |
+| Price | ₪5,500 – ₪6,700 |
+| Max walking distance | 4 km from רחוב הדוגמה 1, Tel Aviv |
+| Excluded locations | Bnei Brak, etc. |
+| Disqualifying keywords | roommates, sublet, short-term, commercial |
 
-*(הערה: הבוט מוסיף אוטומטית כותרות אלו לגיליון חדש/ריק בהרצה הראשונה)*
+## Google Sheets Columns
 
-## 🛠 הכנות
+- Listing URL
+- Price
+- Rooms
+- Walking distance
+- Entry date
+- Parking
+- Arnona (municipal tax)
+- Vaad bayit (building fee)
+- Shelter / safe room
+- Agent or private
+- Post date
+- Address
+- Floor
+- Elevator
 
-### 1. התקנת ספריות
+Headers are auto-inserted on first run if the sheet is empty. Duplicate URLs are skipped automatically.
+
+## Setup
+
+### 1. Install dependencies
 
 ```bash
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-### 2. מפתחות סודיים (קובץ `.env` ו-JSON)
-הבוט שואב את המפתחות מקובץ סודי הנקרא `.env`. צור קובץ זה בתיקייה הראשית והכנס את המפתחות:
+### 2. API keys
+
+Create `.env` in the project root:
+
 ```env
 GMAPS_API_KEY=your_google_maps_key
 GEMINI_API_KEY=your_gemini_key
 ```
 
-- **Google Sheets**: צור **Service Account** ב-Google Cloud Console, הורד את קובץ ה-JSON ושמור אותו בתיקייה בשם `credentials.json`. (זכור לשתף את ה-Google Sheet שלך עם האימייל של ה-Service Account).
-- **Google Maps**: ודא שהפעלת ב-Google Cloud את שירות ה-`Distance Matrix API` עבור המפתח שלך.
+For Google Sheets access:
+- Create a **Service Account** in Google Cloud Console
+- Download the JSON key and save it as `credentials.json` in the project root
+- Share your Google Sheet with the service account email
+- Enable the **Distance Matrix API** for your Google Maps key
 
-### 3. עריכת הגדרות הבוט (`config.py`)
-היכנס לקובץ `config.py` ושנה בו את כל הנתונים החשובים: כתובות קבוצות הפייסבוק, כתובת היעד שממנה מודדים מרחק (למשל רחוב הדוגמה 1), תקציב מחיר, מילות סינון וכו'.
+For the Gemini fallback (Ollama):
+```bash
+ollama pull llama3
+```
 
-## 🚀 איך מריצים?
+### 3. Configure `config.py`
 
-פשוט פתח את הטרמינל (Terminal) והרץ את הפקודה:
+Edit `config.py` to set your Facebook group URLs, target address, price/room range, excluded locations, and negative keywords.
+
+## Running
+
+**First run** — must be headful so you can log into Facebook manually:
 
 ```bash
 python apartment_bot.py
 ```
 
-### תהליך העבודה של הבוט:
-1. **התחברות ידנית (ללא שמירת נתונים):** הבוט יפתח דפדפן וייכנס לפייסבוק. תצטרך להכניס יוזר וסיסמה ידנית (כדי למנוע חסימות ובעיות עם אימות דו-שלבי). **הדפדפן אינו שומר את הסשן (Session) לריצות הבאות**.
-2. לאחר שהתחברת בהצלחה וראית את הפיד של פייסבוק, לחץ על **Enter** בטרמינל כדי להתחיל בסריקה.
-3. הבוט ייכנס לקבוצות אחת-אחת, יגלול למטה לחשוף פוסטים, וילחץ על כפתורי "קרא עוד" לרוחב העמוד.
-4. סינון חכם יפסול פוסטים מראש (לפי מילים, מיקומים ומספר חדרים).
-5. מודל ה-AI ישלוף נתונים (מחיר, ועד, ארנונה, חניה, ממ"ד, וכו'). במקרה של פספוס מחיר בגלל פייסבוק, יופעל מנגנון "הזדמנות שנייה" (Fallback) לחילוץ מחיר נקי.
-6. יחושב מרחק הליכה.
-7. רק אם הדירה עומדת בכל הכללים – **היא תתווסף לשורה חדשה ב-Google Sheets**.
+After you see the Facebook feed, press **Enter** in the terminal to start scraping.
 
-**הבוט מדלג אוטומטית על לינקים שכבר נשמרו בגיליון!** אם הגיליון ריק, הוא יוסיף לעצמו את הכותרות ויתחיל מאפס.
+> Note: The bot uses a persistent Chrome profile (`chrome_profile/`) so your login session is saved for subsequent runs.
+
+**Subsequent runs** — headless mode works once the profile is seeded:
+
+```bash
+python apartment_bot.py --headless
+```
+
+Or use the Windows launcher:
+
+```bash
+run_bot.bat
+```
+
+## How It Works
+
+1. Loads already-seen URLs from the sheet to skip duplicates
+2. Opens persistent Chromium; waits for manual FB login on first run
+3. Visits each group URL (shuffled order), scrolls, expands "See more" buttons
+4. Per post:
+   - Pre-filters by excluded locations, negative keywords, sale indicators, room count
+   - Parses with Gemini 2.0 Flash (`gemini-2.0-flash`) → strict JSON
+   - Falls back to local Ollama `llama3` if Gemini quota is exhausted (429)
+   - Secondary price fallback: regex scan if LLM price is out of range
+   - Computes walking distance via Google Distance Matrix
+   - Appends row to sheet only if all filters pass

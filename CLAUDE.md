@@ -1,0 +1,100 @@
+# Project: Facebook Apartment Scraper
+
+Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.0 Flash (Ollama llama3 fallback) to parse Hebrew posts into structured JSON, computes walking distance via Google Distance Matrix, and appends matching listings to a Google Sheet. Target: 3–3.5 room apartments, ₪5500–6700/month, within walking distance of רחוב הדוגמה 1, Tel Aviv. All user-facing text, regex patterns, prompts, and sheet headers are Hebrew.
+
+## Run Commands
+
+```bash
+# First run — headful required for manual FB login
+python apartment_bot.py
+
+# Subsequent runs
+python apartment_bot.py --headless
+# or
+run_bot.bat
+
+# Setup
+pip install -r requirements.txt
+playwright install chromium
+
+# Ollama fallback (if Gemini quota hit)
+ollama pull llama3
+```
+
+## Architecture
+
+| File | Purpose |
+|---|---|
+| `apartment_bot.py` | Entry point + all scraping, LLM parsing, Sheets writing logic |
+| `config.py` | All tunables: URLs, price/room filters, sheet ID, destination, negative keywords |
+| `prompts.py` | Single function `get_apartment_prompt_improved(text)` — Hebrew Gemini prompt |
+| `credentials.json` | Google Service Account key (gitignored) |
+| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY` (gitignored) |
+| `chrome_profile/` | Playwright persistent context — holds FB login session cookie |
+
+## Data Flow
+
+1. `setup_google_sheet()` — loads seen URLs from sheet for dedupe
+2. Playwright launches persistent Chromium; user logs into FB manually on first run
+3. Per group URL (shuffled for anti-bot): scroll, expand "קרא עוד"/"See more", collect `role="article"` elements
+4. Per post:
+   - Strip BIDI chars → extract URL + date
+   - Skip if URL already in sheet
+   - Pre-filter: excluded locations, negative keywords, sale detector, room-count regex
+   - LLM parse → price fallback regex (if LLM price out of range)
+   - Filter by rooms + price → compute walking distance → append row to sheet
+
+## LLM Details
+
+- **Primary**: `gemini-2.0-flash` via `google-genai`, forced JSON via `response_mime_type="application/json"`
+- **Fallback**: `ollama.chat(model='llama3', format='json')` — triggers permanently within run on Gemini 429
+- **Global flag**: `GEMINI_EXHAUSTED` (module-level bool in `apartment_bot.py`)
+- **Prompt**: `prompts.py` → Hebrew, strict JSON, keys: `rooms, price, arnona, vaad, shelter, parking, entry_date, floor, elevator, post_date, is_agent, address`
+- **Text cap**: 3000 chars (prompt truncates at line 29 of `prompts.py`)
+
+## Google Sheets
+
+- Sheet ID in `config.py:12` — must be shared with service account email from `credentials.json`
+- 14 Hebrew headers defined in `config.py:67-71`
+- `setup_google_sheet()` auto-seeds headers if sheet is empty
+- Uses `sheet1` (first tab)
+- Rows appended via `sheet.append_row(new_row)`
+
+## Known Bugs
+
+**1. Header/row length mismatch** (`apartment_bot.py:47`)
+`SHEET_HEADERS` import is overwritten with a 12-header list, but `new_row` (lines 431–446) writes 14 fields (floor + elevator added in last refactor). Result: columns misalign after "מחיר". Fix: delete lines 47–50 and use the 14-header `SHEET_HEADERS` from `config.py`.
+
+**2. Undefined `browser` at close** (`apartment_bot.py:455`)
+`browser.close()` → NameError. Variable is `context`, not `browser`. Fix: `context.close()`.
+
+**3. Stale README**
+README says session doesn't persist. Wrong — `launch_persistent_context` is used. Session does persist via `chrome_profile/`.
+
+## Hebrew / Locale Rules
+
+- **Never translate or reformat** `ROOMS_PRE_FILTER_REGEX`, `NEGATIVE_KEYWORDS`, `EXCLUDED_LOCATIONS` in `config.py`, or the prompt in `prompts.py`
+- **BIDI strip is mandatory** before any regex: FB injects `‎‏‪–‮⁦–⁩` — stripped at `apartment_bot.py:330, 396`
+- `map_bool()` → "כן" / "לא" / "לא צוין" — keep as-is
+- `DESTINATION_ADDRESS` is Hebrew; distance function auto-appends "רמת גן, גבעתיים, ישראל" if no local city found
+
+## Anti-Bot / FB Fragility
+
+- CAPTCHA/checkpoint loop (lines 256–267) requires human intervention — cannot be automated away
+- URL order shuffled via `random.sample` each run
+- `time.sleep(2)` per post — do not remove; removes human pacing
+- 6-selector fallback chain for article extraction (lines 293–299) — FB DOM changes without warning
+- `chrome_profile/` directory locks when Chrome is running — kill zombie Chrome processes before rerun
+
+## Conventions
+
+- English identifiers, Hebrew user-facing strings + emojis
+- Wrap every Playwright interaction in `try/except` — do not simplify
+- Multi-selector fallback lists preferred over single CSS/XPath locators
+- New tunables belong in `config.py`, not inline in `apartment_bot.py`
+- `sys.stdout.write` + `.flush()` for inline progress lines
+
+## Sensitive Files
+
+- `credentials.json` and `.env` are gitignored going forward
+- Commits `336dcd5` and `1ed42b9` may predate gitignore addition — audit before making repo public
