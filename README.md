@@ -60,7 +60,7 @@ For Google Sheets access:
 
 For the Gemini fallback (Ollama):
 ```bash
-ollama pull llama3
+ollama pull qwen2.5:7b
 ```
 
 ### 3. Configure `config.py`
@@ -99,7 +99,7 @@ run_bot.bat
 4. Per post:
    - Pre-filters by excluded locations, negative keywords, sale indicators, room count
    - Parses with Gemini 2.0 Flash (`gemini-2.0-flash`) → strict JSON
-   - Falls back to local Ollama `llama3` if Gemini quota is exhausted (429) or after repeated errors
+   - Falls back to local Ollama `qwen2.5:7b` if Gemini quota is exhausted (429) or after repeated errors
    - Secondary price fallback: regex scan if LLM price is out of range
    - Computes walking distance via Google Distance Matrix
    - Appends row to sheet only if all filters pass

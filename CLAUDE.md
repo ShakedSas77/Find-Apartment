@@ -1,6 +1,6 @@
 # Project: Facebook Apartment Scraper
 
-Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.0 Flash (Ollama llama3 fallback) to parse Hebrew posts into structured JSON, computes walking distance via Google Distance Matrix, and appends matching listings to a Google Sheet. Target: 3–3.5 room apartments, ₪5500–6700/month, within walking distance of רחוב הדוגמה 1, Tel Aviv. All user-facing text, regex patterns, prompts, and sheet headers are Hebrew.
+Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.0 Flash (Ollama qwen2.5:7b fallback) to parse Hebrew posts into structured JSON, computes walking distance via Google Distance Matrix, and appends matching listings to a Google Sheet. Target: 3–3.5 room apartments, ₪5500–6700/month, within walking distance of רחוב הדוגמה 1, Tel Aviv. All user-facing text, regex patterns, prompts, and sheet headers are Hebrew.
 
 ## Run Commands
 
@@ -18,7 +18,7 @@ pip install -r requirements.txt
 playwright install chromium
 
 # Ollama fallback (if Gemini quota hit)
-ollama pull llama3
+ollama pull qwen2.5:7b
 ```
 
 ## Architecture
@@ -47,7 +47,7 @@ ollama pull llama3
 ## LLM Details
 
 - **Primary**: `gemini-2.0-flash` via `google-genai`, forced JSON via `response_mime_type="application/json"`
-- **Fallback**: `ollama.chat(model='llama3', format='json')` — triggers permanently within run on Gemini 429
+- **Fallback**: `ollama.chat(model='qwen2.5:7b', format='json', options={'temperature': 0})` — triggers permanently within run on Gemini 429, or after `GEMINI_MAX_CONSECUTIVE_ERRORS` non-quota errors
 - **Global flag**: `GEMINI_EXHAUSTED` (module-level bool in `apartment_bot.py`)
 - **Prompt**: `prompts.py` → Hebrew, strict JSON, keys: `rooms, price, arnona, vaad, shelter, parking, entry_date, floor, elevator, post_date, is_agent, address`
 - **Text cap**: 3000 chars (prompt truncates at line 29 of `prompts.py`)

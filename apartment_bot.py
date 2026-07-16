@@ -6,6 +6,7 @@ import os
 import re
 import random
 from pathlib import Path
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 import ollama
@@ -58,6 +59,23 @@ def _is_visible(locator) -> bool:
         return locator.first.is_visible()
     except Exception:
         return False
+
+# ממיר תאריך יחסי שפייסבוק מציג ("6h", "1d", "3w") לתאריך אבסולוטי (DD/MM)
+_RELATIVE_DATE_RE = re.compile(r'^(\d+)\s*(s|m|h|d|w)$', re.IGNORECASE)
+_RELATIVE_DATE_UNITS = {
+    's': lambda v: timedelta(seconds=v),
+    'm': lambda v: timedelta(minutes=v),
+    'h': lambda v: timedelta(hours=v),
+    'd': lambda v: timedelta(days=v),
+    'w': lambda v: timedelta(weeks=v),
+}
+
+def relative_to_date(rel: str) -> str:
+    match = _RELATIVE_DATE_RE.match((rel or "").strip())
+    if not match:
+        return rel
+    value, unit = int(match.group(1)), match.group(2).lower()
+    return (datetime.now() - _RELATIVE_DATE_UNITS[unit](value)).strftime("%d/%m")
 
 def setup_google_sheet():
     """
@@ -116,7 +134,7 @@ def extract_post_info(article) -> tuple[str, str]:
                 try:
                     link_text = link.inner_text().strip()
                     if link_text:
-                        post_date = link_text
+                        post_date = relative_to_date(link_text)
                 except Exception:
                     pass
                     
@@ -158,9 +176,10 @@ def analyze_post_with_llm(text: str) -> dict | None:
 
     try:
         ollama_response = ollama.chat(
-            model='llama3',
+            model='qwen2.5:7b',
             messages=[{'role': 'user', 'content': prompt}],
-            format='json'
+            format='json',
+            options={'temperature': 0}
         )
         response_text = ollama_response['message']['content']
         
@@ -168,7 +187,7 @@ def analyze_post_with_llm(text: str) -> dict | None:
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             response_text = json_match.group(0)
-        # Repair common llama3 issues: trailing commas before } or ]
+        # Repair common local-model JSON issues: trailing commas before } or ]
         response_text = re.sub(r',\s*([}\]])', r'\1', response_text)
         return json.loads(response_text)
     except Exception as ollama_err:
@@ -463,7 +482,7 @@ def run_scraper(headless: bool = False):
                 llm_post_date = data.get("post_date")
                 final_post_date = fb_post_date
                 if llm_post_date and llm_post_date != "לא צוין" and len(str(llm_post_date)) > 2:
-                    final_post_date = llm_post_date
+                    final_post_date = relative_to_date(str(llm_post_date))
 
                 new_row = [
                     post_url,
