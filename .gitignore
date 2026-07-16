@@ -1,0 +1,4 @@
+.env
+credentials.json
+fb_session.json
+__pycache__/
