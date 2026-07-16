@@ -60,16 +60,9 @@ ollama pull llama3
 - Uses `sheet1` (first tab)
 - Rows appended via `sheet.append_row(new_row)`
 
-## Known Bugs
+## Known Issues
 
-**1. Header/row length mismatch** (`apartment_bot.py:47`)
-`SHEET_HEADERS` import is overwritten with a 12-header list, but `new_row` (lines 431–446) writes 14 fields (floor + elevator added in last refactor). Result: columns misalign after "מחיר". Fix: delete lines 47–50 and use the 14-header `SHEET_HEADERS` from `config.py`.
-
-**2. Undefined `browser` at close** (`apartment_bot.py:455`)
-`browser.close()` → NameError. Variable is `context`, not `browser`. Fix: `context.close()`.
-
-**3. Stale README**
-README says session doesn't persist. Wrong — `launch_persistent_context` is used. Session does persist via `chrome_profile/`.
+**Stale README** (fixed in translation): README previously claimed session doesn't persist. `launch_persistent_context` is used — session does persist via `chrome_profile/`.
 
 ## Hebrew / Locale Rules
 

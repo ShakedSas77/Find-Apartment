@@ -44,11 +44,6 @@ if not GEMINI_API_KEY or not GMAPS_API_KEY:
 client = genai.Client(api_key=GEMINI_API_KEY)
 gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
 
-SHEET_HEADERS = [
-    "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה ל-רחוב הדוגמה 1", "תאריך כניסה", 
-    "חניה", "ארנונה", "ועד", "מקלט/ממד", "תיווך", "פורסם ב", "כתובת"
-]
-
 GEMINI_EXHAUSTED = False
 
 # ─── Helper Functions ─────────────────────────────────────────────────────────────
@@ -154,7 +149,8 @@ def analyze_post_with_llm(text: str) -> dict | None:
         json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             response_text = json_match.group(0)
-            
+        # Repair common llama3 issues: trailing commas before } or ]
+        response_text = re.sub(r',\s*([}\]])', r'\1', response_text)
         return json.loads(response_text)
     except Exception as ollama_err:
         print(f"\n    ❌ Error in local Ollama analysis: {ollama_err}")
@@ -325,9 +321,27 @@ def run_scraper(headless: bool = False):
             for item in articles_data:
                 article = item["element"]
                 text = item["text"]
-                
+
+                # Per-article "See more" — JS click bypasses visibility/off-screen issues
+                try:
+                    article.scroll_into_view_if_needed(timeout=500)
+                    clicked = article.evaluate(
+                        """el => {
+                            const patterns = ['See more', 'קרא עוד', 'ראה עוד', 'עוד'];
+                            for (const btn of el.querySelectorAll('div[role="button"], span, a')) {
+                                if (patterns.includes(btn.textContent.trim())) { btn.click(); return true; }
+                            }
+                            return false;
+                        }"""
+                    )
+                    if clicked:
+                        page.wait_for_timeout(400)
+                        text = article.inner_text().strip()
+                except Exception:
+                    pass
+
                 # מחיקת תווים שקופים (BIDI) שפייסבוק שותל והורסים ביטויים רגולריים
-                text = re.sub(r'[\u200e\u200f\u202a-\u202e\u2066-\u2069]', '', text)
+                text = re.sub(r'[‎‏‪-‮⁦-⁩]', '', text)
                 
                 post_url, fb_post_date = extract_post_info(article)
                 if post_url == "Link not extracted":
@@ -452,7 +466,7 @@ def run_scraper(headless: bool = False):
                 except Exception as e:
                     print(f"\n    ❌ Error writing to sheet: {e}")
 
-        browser.close()
+        context.close()
         print("\n🎉 Scraping finished successfully!")
 
 if __name__ == "__main__":
