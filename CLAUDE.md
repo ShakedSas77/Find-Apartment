@@ -90,7 +90,7 @@ ollama pull qwen2.5:7b
 
 ## Conventions
 
-- English identifiers, Hebrew user-facing strings + emojis
+- English identifiers, Hebrew user-facing strings, English console/log output. No emojis in prints — plain text with `ERROR:`/`WARNING:`/`SUCCESS:` prefixes where relevant
 - Wrap every Playwright interaction in `try/except` — do not simplify
 - Multi-selector fallback lists preferred over single CSS/XPath locators
 - New tunables belong in `config.py`, not inline in `apartment_bot.py`

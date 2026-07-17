@@ -57,7 +57,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GMAPS_API_KEY = os.getenv("GMAPS_API_KEY")
 
 if not GEMINI_API_KEY or not GMAPS_API_KEY:
-    print("❌ Error: Missing API keys in .env file")
+    print("ERROR: Missing API keys in .env file")
     sys.exit(1)
 
 # --- API Clients ---
@@ -171,7 +171,7 @@ def _warn_if_fee_implausible(label: str, raw: str, max_bimonthly: int):
     if not digits:
         return
     if int(digits) > max_bimonthly:
-        print(f"\n    ⚠ {label} looks unusually high ({raw}) — verify manually.")
+        print(f"\n    WARNING: {label} looks unusually high ({raw}) - verify manually.")
 
 def setup_google_sheet():
     """
@@ -179,7 +179,7 @@ def setup_google_sheet():
     and creates headers if the sheet is empty.
     Returns the sheet object and a set of already seen URLs.
     """
-    print("\n📊 Connecting to Google Sheets and reading existing data...")
+    print("\nConnecting to Google Sheets and reading existing data...")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     gc = gspread.authorize(creds)
@@ -190,10 +190,10 @@ def setup_google_sheet():
         headers = sheet.row_values(1)
 
         if not headers:
-            print("📝 Missing column headers in Google Sheet. Adding them to row 1...")
+            print("Missing column headers in Google Sheet. Adding them to row 1...")
             sheet.insert_row(SHEET_HEADERS, 1)
         elif len(headers) != len(SHEET_HEADERS) or headers[0] != "לינק למודעה":
-            print("📝 Outdated column headers in Google Sheet. Updating row 1...")
+            print("Outdated column headers in Google Sheet. Updating row 1...")
             if headers and headers[0] == "לינק למודעה":
                 sheet.delete_rows(1)
             sheet.insert_row(SHEET_HEADERS, 1)
@@ -204,7 +204,7 @@ def setup_google_sheet():
         print(f"    Found {len(seen_urls)} existing apartments in the sheet. Will skip them.")
         return sheet, seen_urls
     except Exception as e:
-        print(f"    ❌ Error reading Google Sheet: {e}")
+        print(f"    ERROR: reading Google Sheet: {e}")
         print("    Aborting: cannot dedupe or write results without the sheet.")
         sys.exit(1)
 
@@ -254,16 +254,16 @@ def analyze_post_with_llm(text: str) -> dict | None:
         except Exception as gemini_err:
             error_msg = str(gemini_err)
             if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                _safe_print("\n    ⏳ Gemini quota exhausted. Switching permanently to Ollama... ")
+                _safe_print("\n    Gemini quota exhausted. Switching permanently to Ollama...")
                 with _gemini_lock:
                     GEMINI_EXHAUSTED = True
             else:
                 with _gemini_lock:
                     GEMINI_ERROR_COUNT += 1
                     current_count = GEMINI_ERROR_COUNT
-                _safe_print(f"\n    ⚠ Gemini Error ({error_msg}). Falling back to Ollama... ")
+                _safe_print(f"\n    WARNING: Gemini error ({error_msg}). Falling back to Ollama...")
                 if current_count >= GEMINI_MAX_CONSECUTIVE_ERRORS:
-                    _safe_print(f"\n    ⏳ {current_count} consecutive Gemini errors. Switching permanently to Ollama... ")
+                    _safe_print(f"\n    {current_count} consecutive Gemini errors. Switching permanently to Ollama...")
                     with _gemini_lock:
                         GEMINI_EXHAUSTED = True
     else:
@@ -286,7 +286,7 @@ def analyze_post_with_llm(text: str) -> dict | None:
         response_text = re.sub(r',\s*([}\]])', r'\1', response_text)
         return json.loads(response_text)
     except Exception as ollama_err:
-        print(f"\n    ❌ Error in local Ollama analysis: {ollama_err}")
+        print(f"\n    ERROR: local Ollama analysis failed: {ollama_err}")
         return None
 
 def _with_retries(fn, attempts: int = 3, base_delay: float = 1.0):
@@ -362,8 +362,8 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str):
                 page.bring_to_front()
             except Exception:
                 pass
-            _safe_print(f"\n⛔ [{group_label}] Facebook is asking for a password, 2FA, or CAPTCHA security check! Pausing ALL groups.")
-            input("  → Please complete it in the browser tab that was brought to front, then press ENTER here to resume all groups... ")
+            _safe_print(f"\n[{group_label}] Facebook is asking for a password, 2FA, or CAPTCHA security check. Pausing ALL groups.")
+            input("  -> Please complete it in the browser tab that was brought to front, then press ENTER here to resume all groups... ")
             _resume_event.set()
         else:
             _resume_event.wait()
@@ -393,24 +393,24 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
         context = browser.new_context(storage_state=storage_state_path, no_viewport=True)
         page = context.new_page()
         try:
-            _safe_print(f"\n{'='*50}\n📄 Scanning {group_label}\n{target_url}\n{'='*50}")
+            _safe_print(f"\n{'='*50}\nScanning {group_label}\n{target_url}\n{'='*50}")
 
             try:
                 page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
             except Exception:
-                _safe_print(f"    ⚠️ [{group_label}] Navigation interrupted by Facebook. Checking for security checkpoints...")
+                _safe_print(f"    WARNING: [{group_label}] Navigation interrupted by Facebook. Checking for security checkpoints...")
 
             page.wait_for_timeout(3000)
             _handle_checkpoint_if_present(page, target_url, group_label)
             _dismiss_popups(page)
 
-            _safe_print(f"📜  [{group_label}] Scrolling ({SCROLL_COUNT} times)...")
+            _safe_print(f"[{group_label}] Scrolling ({SCROLL_COUNT} times)...")
             for _ in range(SCROLL_COUNT):
                 page.mouse.wheel(0, 4000)
                 # ג'יטר על זמן ההמתנה — קצב גלילה קבוע לחלוטין נראה יותר בוטי
                 jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
                 page.wait_for_timeout(jittered_delay)
-            _safe_print(f"📜  [{group_label}] Done scrolling.")
+            _safe_print(f"[{group_label}] Done scrolling.")
 
             # לחץ על "קרא עוד" כדי לחשוף את כל הטקסט של הפוסטים הארוכים
             for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
@@ -450,10 +450,10 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                 except Exception:
                     continue
 
-            _safe_print(f"🔍  [{group_label}] Found {len(articles_data)} real posts.")
+            _safe_print(f"[{group_label}] Found {len(articles_data)} real posts.")
 
             if len(articles_data) == 0:
-                _safe_print(f"    📸 [{group_label}] No posts detected. Saving debug_fb.png...")
+                _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
                 page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
                 return added_count
 
@@ -516,12 +516,12 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                     actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
                     if actual_rooms_match:
                         found_val = actual_rooms_match.group(1)
-                        _safe_print(f"    [{group_label}] Pre-filtered: Post is for {found_val} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS}).\n      ↳ URL: {post_url}\n      ↳ Text: {clean_snip}...")
+                        _safe_print(f"    [{group_label}] Pre-filtered: Post is for {found_val} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS}).\n      URL: {post_url}\n      Text: {clean_snip}...")
                     else:
-                        _safe_print(f"    [{group_label}] Pre-filtered: No mention of matching room count.\n      ↳ URL: {post_url}\n      ↳ Text: {clean_snip}...")
+                        _safe_print(f"    [{group_label}] Pre-filtered: No mention of matching room count.\n      URL: {post_url}\n      Text: {clean_snip}...")
                     continue
 
-                _safe_print(f"🤖 [{group_label}] Analyzing post (URL: {post_url})...")
+                _safe_print(f"[{group_label}] Analyzing post (URL: {post_url})...")
                 time.sleep(2)
 
                 data = analyze_post_with_llm(text)
@@ -611,9 +611,9 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                         _with_retries(lambda: sheet.append_row(new_row))
                         seen_urls.add(post_url)
                         added_count += 1
-                        _safe_print(f"    🌟 [{group_label}] SUCCESS! Apartment added: {rooms_val} rooms | {int(price_val):,} ₪ | {dist_text} | Address: {address}")
+                        _safe_print(f"    SUCCESS: [{group_label}] Apartment added: {rooms_val} rooms | {int(price_val):,} ₪ | {dist_text} | Address: {address}")
                     except Exception as e:
-                        _safe_print(f"    ❌ [{group_label}] Error writing to sheet: {e}")
+                        _safe_print(f"    ERROR: [{group_label}] writing to sheet: {e}")
         finally:
             try:
                 context.close()
@@ -643,41 +643,38 @@ def run_scraper(headless: bool = False):
         )
         page = context.pages[0] if context.pages else context.new_page()
 
-        print("🌐 Opening Facebook...")
+        print("Opening Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
         if headless:
             if _is_visible(page.locator('input[name="email"]')):
-                print("❌ Cannot login manually in headless mode! Please run without --headless first.")
+                print("ERROR: Cannot login manually in headless mode. Please run without --headless first.")
                 context.close()
                 sys.exit(1)
         else:
             if _is_visible(page.locator('input[name="email"]')):
-                print("\n┌─────────────────────────────────────────────┐")
-                print("│  Please log in to Facebook manually in the  │")
-                print("│  browser window that just opened.           │")
-                print("└─────────────────────────────────────────────┘\n")
+                print("\nPlease log in to Facebook manually in the browser window that just opened.\n")
 
                 for attempt in range(LOGIN_MAX_ATTEMPTS):
-                    input("  → Press ENTER here in the terminal ONLY AFTER you have fully logged in and see your feed... ")
+                    input("  -> Press ENTER here in the terminal ONLY AFTER you have fully logged in and see your feed... ")
                     page.wait_for_timeout(2000)
                     if not _is_visible(page.locator('input[name="email"]')):
                         break
-                    print("❌ Facebook login form is still visible! Please complete login first.")
+                    print("ERROR: Facebook login form is still visible. Please complete login first.")
                 else:
-                    print("❌ Login not completed after several attempts. Exiting.")
+                    print("ERROR: Login not completed after several attempts. Exiting.")
                     context.close()
                     sys.exit(1)
             else:
-                print("✅ Already logged into Facebook! Skipping manual login.")
+                print("Already logged into Facebook. Skipping manual login.")
 
         # מייצאים cookies/session לקובץ כדי ש-threads עצמאיים יוכלו להשתמש בהם —
         # לא ניתן לשתף context/browser אחד בין threads (Playwright sync API אינו thread-safe)
         context.storage_state(path=storage_state_path)
         context.close()
 
-    print(f"✔  Continuing to scan groups ({MAX_CONCURRENT_GROUPS} in parallel)...")
+    print(f"Continuing to scan groups ({MAX_CONCURRENT_GROUPS} in parallel)...")
 
     # Shuffle the target URLs to scan groups in a random order
     shuffled_urls = random.sample(TARGET_URLS, len(TARGET_URLS))
@@ -694,9 +691,9 @@ def run_scraper(headless: bool = False):
             try:
                 total_added += future.result()
             except Exception as e:
-                _safe_print(f"\n❌ [Group {idx}/{total}] crashed: {e}")
+                _safe_print(f"\nERROR: [Group {idx}/{total}] crashed: {e}")
 
-    print(f"\n🎉 Scraping finished successfully! {total_added} apartments added.")
+    print(f"\nScraping finished successfully. {total_added} apartments added.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
@@ -704,7 +701,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("\n=======================================================")
-    print("  🏠  Apartment Search Bot – Real-time updates")
+    print("  Apartment Search Bot - Real-time updates")
     print("=======================================================")
     print(f"  Groups:      {len(TARGET_URLS)}")
     print(f"  Areas (info): {', '.join(LOCATIONS)}")
