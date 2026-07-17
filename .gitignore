@@ -1,9 +1,11 @@
 .env
 credentials.json
 fb_session.json
+bot_data.db
 __pycache__/
 
 chrome_profile/
 chrome_profile_test/
-debug_fb.png
+debug_fb*.png
+checkpoint_*.png
 test_*.py
