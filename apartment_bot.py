@@ -70,6 +70,13 @@ GEMINI_ERROR_COUNT = 0
 # מחיקת תווים שקופים (BIDI) שפייסבוק שותל והורסים ביטויים רגולריים
 BIDI_RE = re.compile(r'[‎‏‪-‮⁦-⁩]')
 
+# מחיר ל"הזדמנות שנייה" — רק מספר הצמוד למילת/סימן מחיר, לא כל מספר 4-5 ספרות בטקסט
+# (כדי לא לתפוס מספר טלפון, תגובה של מישהו אחר וכו')
+_PRICE_CONTEXT_RE = re.compile(
+    r'(?:מחיר|שכ["״]?ד|שכירות)\s*:?\s*(?<![0-9])([0-9]{4,5})(?![0-9])'
+    r'|(?<![0-9])([0-9]{4,5})(?![0-9])\s*(?:₪|ש["״]?ח)'
+)
+
 # ─── Concurrency primitives (groups scan in parallel tabs) ────────────────────────
 _print_lock = threading.Lock()
 _sheet_lock = threading.Lock()  # guards seen_urls reads/writes AND sheet.append_row together
@@ -220,6 +227,16 @@ def _strip_latin_address(address: str) -> str:
     cleaned = _LATIN_LETTERS_RE.sub('', address)
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' \t-–—,/')
     return cleaned
+
+def _reject_hallucinated_address(address: str, source_text: str) -> str:
+    """
+    qwen2.5 repeatedly invents "נמל התעופה" (airport) as an address for posts that
+    never mention an airport at all — even with an explicit anti-invention prompt
+    rule. Deterministic denylist: reject it unless the source text actually says so.
+    """
+    if address and "נמל התעופה" in address and "נמל התעופה" not in source_text and "שדה תעופה" not in source_text:
+        return ""
+    return address
 
 def _warn_if_fee_implausible(label: str, value, max_bimonthly: int):
     if not value:
@@ -671,9 +688,14 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                     # 2. Remove commas, dots, or spaces ONLY if they act as thousands separators (e.g., "5 900" -> "5900")
                     clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
 
-                    # 3. Extract standalone 4-5 digit numbers (explicit [0-9] to avoid unicode digit matching issues),
-                    #    then filter by MIN_PRICE/MAX_PRICE in Python — not hardcoded in the regex, so config changes stay in sync
-                    possible_prices = [int(p) for p in re.findall(r'(?<![0-9])[0-9]{4,5}(?![0-9])', clean_text)]
+                    # 3. Extract 4-5 digit numbers, but ONLY ones adjacent to a price marker (מחיר/שכ"ד prefix or
+                    #    ₪/ש"ח suffix) — a bare number anywhere in the text can be a comment reply, phone digits,
+                    #    etc. (e.g. a comment "אם 6000 רלוונטי" was previously picked up as the listing's price).
+                    #    Filtered by MIN_PRICE/MAX_PRICE in Python, not hardcoded in the regex, so config stays in sync.
+                    possible_prices = [
+                        int(m.group(1) or m.group(2))
+                        for m in _PRICE_CONTEXT_RE.finditer(clean_text)
+                    ]
 
                     if possible_prices:
                         valid_prices = [p for p in possible_prices if MIN_PRICE <= p <= MAX_PRICE]
@@ -705,6 +727,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                 _warn_if_fee_implausible("Arnona", arnona, 3000)
 
                 address = _strip_latin_address(data.get("address") or "")
+                address = _reject_hallucinated_address(address, text)
                 floor = _parse_floor(data.get("floor") or "")
                 is_agent = _detect_agent(text, data.get("is_agent"))
                 parking = _classify_parking(data.get("parking") or "")
