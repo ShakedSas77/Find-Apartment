@@ -100,12 +100,38 @@ _RELATIVE_DATE_UNITS = {
     'w': lambda v: timedelta(weeks=v),
 }
 
-def relative_to_date(rel: str) -> str:
-    match = _RELATIVE_DATE_RE.match((rel or "").strip())
+# מזהה תאריכים אבסולוטיים באנגלית שפייסבוק לפעמים מציג במקום טקסט יחסי (למשל "July 9 at 5:50 PM")
+_MONTH_NAMES = {
+    'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
+    'apr': 4, 'april': 4, 'may': 5, 'jun': 6, 'june': 6, 'jul': 7, 'july': 7,
+    'aug': 8, 'august': 8, 'sep': 9, 'sept': 9, 'september': 9, 'oct': 10, 'october': 10,
+    'nov': 11, 'november': 11, 'dec': 12, 'december': 12,
+}
+_ABSOLUTE_DATE_RE = re.compile(r'\b([A-Za-z]+)\s+(\d{1,2})\b')
+
+def _parse_absolute_fb_date(text: str) -> str | None:
+    match = _ABSOLUTE_DATE_RE.search(text)
     if not match:
-        return rel
-    value, unit = int(match.group(1)), match.group(2).lower()
-    return (datetime.now() - _RELATIVE_DATE_UNITS[unit](value)).strftime("%d/%m")
+        return None
+    month = _MONTH_NAMES.get(match.group(1).lower())
+    if not month:
+        return None
+    try:
+        now = datetime.now()
+        dt = datetime(now.year, month, int(match.group(2)))
+        if dt > now:
+            dt = dt.replace(year=now.year - 1)
+        return dt.strftime("%d/%m")
+    except ValueError:
+        return None
+
+def relative_to_date(rel: str) -> str:
+    text = (rel or "").strip()
+    match = _RELATIVE_DATE_RE.match(text)
+    if match:
+        value, unit = int(match.group(1)), match.group(2).lower()
+        return (datetime.now() - _RELATIVE_DATE_UNITS[unit](value)).strftime("%d/%m")
+    return _parse_absolute_fb_date(text) or rel
 
 def _normalize_bimonthly_fee(raw: str) -> str:
     """ארנונה/ועד בית משולמים סטנדרטית אחת לחודשיים בישראל — אם הפוסט נקב בסכום חודשי, מכפילים לערך הדו-חודשי."""

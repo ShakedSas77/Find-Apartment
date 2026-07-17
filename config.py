@@ -27,6 +27,12 @@ TARGET_URLS = [
     "https://www.facebook.com/groups/1092766584127776",
     "https://www.facebook.com/groups/115046608513246",
     "https://www.facebook.com/groups/520940308003364",
+    "https://www.facebook.com/groups/175757842565733",
+    "https://www.facebook.com/groups/1424244737803677",
+    "https://www.facebook.com/groups/647901439404148",
+    "https://www.facebook.com/groups/564985183576779",
+    "https://www.facebook.com/groups/253957624766723",
+    "https://www.facebook.com/groups/1774413905909921"
 ]
 
 # ─── מיקומים ───────────────────────────────────────────────────────────────────
@@ -47,7 +53,7 @@ MAX_PRICE = 6700
 ROOMS_PRE_FILTER_REGEX = r'(3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד'
 
 # מילים שפוסלות את הפוסט אוטומטית:
-NEGATIVE_KEYWORDS = r'שותפ|סאבלט|סטודיו|קליניקה'
+NEGATIVE_KEYWORDS = r'שותפ|סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות'
 
 # מיקומים שאנחנו רוצים לפסול מיד (שלא נמצאים בתל אביב/רמת גן למשל)
 EXCLUDED_LOCATIONS = ["בני ברק"]
@@ -63,13 +69,13 @@ LOGIN_MAX_ATTEMPTS = 5
 DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
 
 # ─── גלילה ──────────────────────────────────────────────────────────────────────
-SCROLL_COUNT = 14
-SCROLL_DELAY_MS = 1500
+SCROLL_COUNT = 20
+SCROLL_DELAY_MS = 1000
 
 # ─── מקביליות ────────────────────────────────────────────────────────────────────
 # כמה קבוצות נסרקות בו-זמנית (טאבים מקבילים). יותר טאבים = מהיר יותר, אבל גם
 # יותר בקשות בו-זמניות מאותו חשבון פייסבוק = סיכון גבוה יותר לחסימה/CAPTCHA.
-MAX_CONCURRENT_GROUPS = 3
+MAX_CONCURRENT_GROUPS = 4
 
 # ─── גוגל שיטס ─────────────────────────────────────────────────────────────────
 SHEET_HEADERS = [
