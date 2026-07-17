@@ -66,7 +66,11 @@ ollama pull qwen2.5:7b
 - 14 Hebrew headers defined in `config.py:67-71`
 - `setup_google_sheet()` auto-seeds headers if sheet is empty
 - Uses `sheet1` (first tab)
-- Rows appended via `sheet.append_row(new_row)`
+- Rows appended via `sheet.append_row(new_row)` during scanning
+- After each run, `dedupe_and_sort_sheet()` rewrites the whole data range: collapses cross-posted duplicates (same normalized street + rooms + price, different URL — keeps the newest post date) and sorts by post date, newest first. Callable standalone against an existing sheet, not just at the end of a scrape.
+- Walking distance is stored as a plain km number (e.g. `"1.4"`), not the full Google-provided text — computed from `dist_meters` in `get_walking_distance()`, not string-parsed
+- Posts older than `RELEVANT_SINCE_DATE` (config.py, `DD/MM`) are pre-filtered before LLM analysis
+- Floor (`_parse_floor`), arnona/vaad (`_normalize_bimonthly_fee`), and agent/private (`_detect_agent`) are all normalized in Python after the LLM call, not trusted as free text: floor becomes an integer ("קרקע" = 0, explicit digit wins over an incidental "קרקע" mention), fees become bi-monthly integers with no currency/unit text, and agent detection adds a deterministic "תיווך"/"נדל\"ן" text-signal check on top of the LLM's `is_agent` judgment (explicit negations like "ללא תיווך" are excluded from triggering it)
 
 ## Known Issues
 
@@ -76,7 +80,7 @@ ollama pull qwen2.5:7b
 
 - **Never translate or reformat** `ROOMS_PRE_FILTER_REGEX`, `NEGATIVE_KEYWORDS`, `EXCLUDED_LOCATIONS` in `config.py`, or the prompt in `prompts.py`
 - **BIDI strip is mandatory** before any regex: FB injects `‎‏‪–‮⁦–⁩` — stripped via the module-level `BIDI_RE` constant in `apartment_bot.py`
-- `map_bool()` → "כן" / "לא" / "לא צוין" — keep as-is
+- `map_bool()` → "כן" / "לא" / "" (blank for unknown) — keep as-is. Unknown/missing values throughout the sheet are blank, not "לא צוין" text.
 - `DESTINATION_ADDRESS` is Hebrew; distance function auto-appends "רמת גן, גבעתיים, ישראל" if no local city found
 
 ## Anti-Bot / FB Fragility

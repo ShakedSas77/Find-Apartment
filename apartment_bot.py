@@ -28,7 +28,7 @@ from config import (
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, EXCLUDED_LOCATIONS,
     GEMINI_MAX_CONSECUTIVE_ERRORS, LOGIN_MAX_ATTEMPTS,
-    MAX_CONCURRENT_GROUPS, SHEET_HEADERS
+    MAX_CONCURRENT_GROUPS, RELEVANT_SINCE_DATE, SHEET_HEADERS
 )
 from prompts import get_apartment_prompt_improved
 
@@ -49,7 +49,7 @@ class ApartmentData(BaseModel):
 def map_bool(val):
     if val is True: return "כן"
     if val is False: return "לא"
-    return "לא צוין"
+    return ""
 
 # --- Load environment variables ---
 load_dotenv()
@@ -133,16 +133,42 @@ def relative_to_date(rel: str) -> str:
         return (datetime.now() - _RELATIVE_DATE_UNITS[unit](value)).strftime("%d/%m")
     return _parse_absolute_fb_date(text) or rel
 
-def _normalize_bimonthly_fee(raw: str) -> str:
-    """ארנונה/ועד בית משולמים סטנדרטית אחת לחודשיים בישראל — אם הפוסט נקב בסכום חודשי, מכפילים לערך הדו-חודשי."""
-    if not raw or raw == "לא צוין":
-        return raw
+def _normalize_bimonthly_fee(raw: str):
+    """
+    ארנונה/ועד בית משולמים סטנדרטית אחת לחודשיים בישראל — אם הפוסט נקב בסכום חודשי,
+    מכפילים לערך הדו-חודשי. מחזיר מספר שלם (לא מחרוזת) בלבד, בלי סימני מטבע/יחידה.
+    """
+    if not raw:
+        return ""
     digits = re.sub(r'[^\d]', '', raw)
     if not digits:
-        return raw
+        return 0 if "כלול" in raw else ""
+    value = int(digits)
     if re.search(r'לחודש(?!יים)', raw):
-        return f"{int(digits) * 2}₪ לחודשיים"
-    return raw
+        value *= 2
+    return value
+
+_FLOOR_ORDINALS = {
+    'קרקע': 0, 'ראשונה': 1, 'שניה': 2, 'שנייה': 2, 'שלישית': 3, 'רביעית': 4,
+    'חמישית': 5, 'שישית': 6, 'שביעית': 7, 'שמינית': 8, 'תשיעית': 9, 'עשירית': 10,
+}
+_FLOOR_DIGIT_RE = re.compile(r'\d+')
+
+def _parse_floor(raw: str):
+    """
+    מחזיר קומה כמספר שלם. 'קרקע' = 0. מילות סדר בעברית (ראשונה/שנייה/...) ותבנית
+    'X מתוך Y' נתמכות. מספר מפורש (אם קיים) גובר על 'קרקע' — "1 מעל קומת קרקע" = 1, לא 0.
+    """
+    if not raw:
+        return ""
+    raw = raw.strip()
+    match = _FLOOR_DIGIT_RE.search(raw)
+    if match:
+        return int(match.group(0))
+    for word, num in _FLOOR_ORDINALS.items():
+        if word in raw:
+            return num
+    return ""
 
 def _clean_post_for_llm(raw_text: str) -> str:
     """מסיר URLs (חסרי ערך לחילוץ נתונים) וצפיפות רווחים/שורות מיותרת — חוסך טוקנים."""
@@ -151,6 +177,20 @@ def _clean_post_for_llm(raw_text: str) -> str:
     clean = re.sub(r'[ \t]{2,}', ' ', clean)
     return clean.strip()
 
+_NOT_AGENT_RE = re.compile(r'ללא\s+תיווך|לא\s+מתיווך|בלי\s+תיווך|לא\s+תיווך')
+_AGENT_SIGNAL_RE = re.compile(r'תיווך|נדל["״]?ן')
+
+def _detect_agent(text: str, llm_is_agent):
+    """
+    מוסיף אות דטרמיניסטי מעל שיפוט המודל: מילה 'תיווך' או שם קבוצת נדל"ן בטקסט = ודאי
+    תיווך. ביטויי שלילה מפורשים ("ללא תיווך" וכו') לא נספרים כאות חיובי — משאירים למודל.
+    """
+    if _NOT_AGENT_RE.search(text):
+        return llm_is_agent
+    if _AGENT_SIGNAL_RE.search(text):
+        return True
+    return llm_is_agent
+
 _LATIN_LETTERS_RE = re.compile(r'[A-Za-zÀ-ɏ]+')
 
 def _strip_latin_address(address: str) -> str:
@@ -158,20 +198,17 @@ def _strip_latin_address(address: str) -> str:
     גיבוי דטרמיניסטי לכלל 'עברית בלבד' בפרומפט — qwen2.5 עדיין דולף לפעמים תעתיק
     לועזי (למשל "רamat Gan", "Białik") למרות ההנחיה. מוחק כל רצף אותיות לטיניות.
     """
-    if not address or address == "לא צוין":
+    if not address:
         return address
     cleaned = _LATIN_LETTERS_RE.sub('', address)
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' \t-–—,/')
-    return cleaned if cleaned else "לא צוין"
+    return cleaned
 
-def _warn_if_fee_implausible(label: str, raw: str, max_bimonthly: int):
-    if not raw or raw == "לא צוין":
+def _warn_if_fee_implausible(label: str, value, max_bimonthly: int):
+    if not value:
         return
-    digits = re.sub(r'[^\d]', '', raw)
-    if not digits:
-        return
-    if int(digits) > max_bimonthly:
-        print(f"\n    WARNING: {label} looks unusually high ({raw}) - verify manually.")
+    if value > max_bimonthly:
+        print(f"\n    WARNING: {label} looks unusually high ({value}) - verify manually.")
 
 def setup_google_sheet():
     """
@@ -208,6 +245,68 @@ def setup_google_sheet():
         print("    Aborting: cannot dedupe or write results without the sheet.")
         sys.exit(1)
 
+# ─── Cross-post dedup + sort ────────────────────────────────────────────────
+# פוסטים לפעמים מתפרסמים מחדש או בכמה קבוצות תחת URL שונה — לא נתפס ע"י seen_urls.
+# מזהים כפילות לפי (רחוב מנורמל, חדרים, מחיר) ושומרים את הפרסום העדכני ביותר.
+_CITY_TOKENS_RE = re.compile(r'רמת[\s-]?גן|גבעתיים|תל[\s-]?אביב|ר["״]?ג\b|\bרג\b')
+_ADDRESS_PUNCT_RE = re.compile(r'[",./\-–—_]')
+_POST_DATE_DDMM_RE = re.compile(r'^(\d{1,2})/(\d{1,2})$')
+
+def _normalize_address_key(address: str) -> str:
+    if not address or address == "לא צוין":
+        return ""
+    norm = _CITY_TOKENS_RE.sub('', address)
+    norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
+    return re.sub(r'\s+', ' ', norm).strip()
+
+def _post_date_sort_key(date_str: str) -> tuple:
+    match = _POST_DATE_DDMM_RE.match((date_str or "").strip())
+    if not match:
+        return (-1, -1)
+    return (int(match.group(2)), int(match.group(1)))  # (month, day)
+
+_RELEVANT_SINCE_KEY = _post_date_sort_key(RELEVANT_SINCE_DATE)
+
+def _listing_key(row: list) -> tuple:
+    address_key = _normalize_address_key(row[13] if len(row) > 13 else "")
+    try:
+        rooms = f"{float(row[2]):.1f}"
+    except (ValueError, IndexError):
+        rooms = row[2] if len(row) > 2 else ""
+    try:
+        price = str(int(float(row[1])))
+    except (ValueError, IndexError):
+        price = row[1] if len(row) > 1 else ""
+    return (address_key, rooms, price)
+
+def dedupe_and_sort_sheet(sheet) -> tuple[int, int]:
+    """
+    מסירה כפילויות (אותה דירה, URL שונה) ושומרת רק את הפרסום העדכני ביותר לפי
+    'תאריך פרסום', ואז ממיינת את כל השורות מהחדש לישן. מריצים בסוף כל ריצה,
+    ואפשר גם ידנית מול טבלה קיימת. מחזירה (מספר שהוסרו, מספר שנשמרו).
+    """
+    data = sheet.get_all_values()
+    if len(data) <= 1:
+        return 0, len(data) - 1 if data else 0
+    rows = data[1:]
+
+    best_by_key = {}
+    for row in rows:
+        key = _listing_key(row)
+        existing = best_by_key.get(key)
+        if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
+            best_by_key[key] = row
+
+    deduped_rows = list(best_by_key.values())
+    deduped_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
+
+    removed = len(rows) - len(deduped_rows)
+    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
+    _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{len(rows) + 1}"]))
+    if deduped_rows:
+        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(deduped_rows) + 1}", values=deduped_rows))
+    return removed, len(deduped_rows)
+
 def extract_post_info(article) -> tuple[str, str]:
     try:
         links = article.locator('a[role="link"]').all()
@@ -221,18 +320,18 @@ def extract_post_info(article) -> tuple[str, str]:
                     clean = "https://www.facebook.com" + clean
                 
                 # Extract the post date directly from the Facebook timestamp link
-                post_date = "לא צוין"
+                post_date = ""
                 try:
                     link_text = link.inner_text().strip()
                     if link_text:
                         post_date = relative_to_date(link_text)
                 except Exception:
                     pass
-                    
+
                 return clean, post_date
     except Exception:
         pass
-    return "Link not extracted", "לא צוין"
+    return "Link not extracted", ""
 
 def analyze_post_with_llm(text: str) -> dict | None:
     global GEMINI_EXHAUSTED, GEMINI_ERROR_COUNT
@@ -304,11 +403,12 @@ def _with_retries(fn, attempts: int = 3, base_delay: float = 1.0):
 _CITY_ONLY_ADDRESSES = {"רמת גן", "רמת-גן", "גבעתיים", "תל אביב", 'ר"ג', "ר״ג"}
 
 def get_walking_distance(address: str):
-    if not address or address == "לא צוין" or len(address) < 3:
-        return "No street specified", 999999
+    """מחזיר (מרחק בק"מ כמחרוזת מספרית בלבד, למשל '1.4', או '' אם לא ניתן לחשב; מרחק במטרים)."""
+    if not address or len(address) < 3:
+        return "", 999999
     if address.strip() in _CITY_ONLY_ADDRESSES:
         # אין רחוב, רק שם עיר — לא שווה לבזבז קריאת API על זה
-        return "No street specified", 999999
+        return "", 999999
 
     # תוספת רשת ביטחון ל-Google Maps: הבטחת אזור החיפוש
     if not any(city in address for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
@@ -322,10 +422,8 @@ def get_walking_distance(address: str):
         ))
         element = result["rows"][0]["elements"][0]
         if element["status"] == "OK":
-            dist_text = element["distance"]["text"]
             dist_meters = element["distance"]["value"]
-            duration = element["duration"]["text"]
-            return f"{dist_text} ({duration} walk)", dist_meters
+            return f"{dist_meters / 1000:.1f}", dist_meters
         return "", float('inf')
     except Exception as e:
         print(f"\n    [Google Maps API Error]: {e}")
@@ -485,6 +583,11 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                 if post_url == "Link not extracted":
                     continue  # מדלגים על תגובות או אלמנטים שאינם פוסט אמיתי
 
+                post_date_key = _post_date_sort_key(fb_post_date)
+                if post_date_key != (-1, -1) and post_date_key < _RELEVANT_SINCE_KEY:
+                    _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is before cutoff ({RELEVANT_SINCE_DATE}).")
+                    continue
+
                 with _sheet_lock:
                     already_seen = post_url in seen_urls
                 if already_seen:
@@ -579,12 +682,14 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                     _safe_print(f"    [{group_label}] Skipped: Price is not suitable ({int(price_val):,} ₪).")
                     continue
 
-                arnona = _normalize_bimonthly_fee(data.get("arnona") or "לא צוין")
-                vaad = _normalize_bimonthly_fee(data.get("vaad") or "לא צוין")
+                arnona = _normalize_bimonthly_fee(data.get("arnona") or "")
+                vaad = _normalize_bimonthly_fee(data.get("vaad") or "")
                 _warn_if_fee_implausible("Vaad bayit", vaad, 2400)
                 _warn_if_fee_implausible("Arnona", arnona, 3000)
 
-                address = _strip_latin_address(data.get("address") or "לא צוין")
+                address = _strip_latin_address(data.get("address") or "")
+                floor = _parse_floor(data.get("floor") or "")
+                is_agent = _detect_agent(text, data.get("is_agent"))
 
                 # Calculate Distance (No filtering, just display)
                 dist_text, _ = get_walking_distance(address)
@@ -594,14 +699,14 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                     int(price_val),
                     rooms_val,
                     dist_text,
-                    data.get("entry_date") or "לא צוין",
-                    data.get("floor") or "לא צוין",
+                    data.get("entry_date") or "",
+                    floor,
                     map_bool(data.get("elevator")),
-                    data.get("parking") or "לא צוין",
+                    data.get("parking") or "",
                     arnona,
                     vaad,
                     map_bool(data.get("shelter")),
-                    map_bool(data.get("is_agent")),
+                    map_bool(is_agent),
                     fb_post_date,
                     address
                 ]
@@ -694,6 +799,10 @@ def run_scraper(headless: bool = False):
                 _safe_print(f"\nERROR: [Group {idx}/{total}] crashed: {e}")
 
     print(f"\nScraping finished successfully. {total_added} apartments added.")
+
+    print("Deduplicating cross-posted listings and sorting by post date...")
+    removed, kept = dedupe_and_sort_sheet(sheet)
+    print(f"Removed {removed} duplicate repost(s). Sheet now has {kept} listings, sorted by post date (newest first).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")

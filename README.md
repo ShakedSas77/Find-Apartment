@@ -20,15 +20,15 @@ Walking distance to רחוב הדוגמה 1, Tel Aviv is computed and shown in t
 - Listing URL
 - Price
 - Rooms
-- Walking distance
+- Walking distance (km, numeric only)
 - Entry date
-- Floor
+- Floor (integer; "קרקע"/ground floor = 0)
 - Elevator
 - Parking
-- Arnona (municipal tax)
-- Vaad bayit (building fee)
+- Arnona (municipal tax, bi-monthly, numeric only)
+- Vaad bayit (building fee, bi-monthly, numeric only)
 - Shelter / safe room
-- Agent or private
+- Agent or private (checks for an explicit "תיווך"/agency-name signal in the post text, on top of the LLM's own judgment)
 - Post date
 - Address
 
@@ -97,9 +97,10 @@ run_bot.bat
 2. Opens persistent Chromium; waits for manual FB login on first run
 3. Scans group URLs in parallel tabs (shuffled order, `MAX_CONCURRENT_GROUPS` at a time in `config.py`), scrolls, expands "See more" buttons
 4. Per post:
-   - Pre-filters by excluded locations, negative keywords, sale indicators, room count
+   - Pre-filters by excluded locations, negative keywords, sale indicators, room count, and post date (posts before `RELEVANT_SINCE_DATE` in `config.py` are skipped)
    - Parses with Gemini 2.0 Flash (`gemini-2.0-flash`) → strict JSON
    - Falls back to local Ollama `qwen2.5:7b` if Gemini quota is exhausted (429) or after repeated errors
    - Secondary price fallback: regex scan if LLM price is out of range
-   - Computes walking distance via Google Distance Matrix
-   - Appends row to sheet only if all filters pass
+   - Computes walking distance via Google Distance Matrix (stored as a plain km number, e.g. `1.4`)
+   - Appends row to sheet only if all filters pass; unknown/missing fields are left blank
+5. After scanning, deduplicates cross-posted listings (same street/rooms/price, different URL — keeps the newest post date) and sorts the sheet by post date, newest first
