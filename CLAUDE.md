@@ -64,7 +64,7 @@ ollama pull qwen2.5:7b
 - **Validation**: both paths' raw output is validated against the `ApartmentData` Pydantic model in `analyze_post_with_llm()` — on failure, one retry (fresh LLM call), then `None` (verdict `parse_failed`)
 - **Prompt**: `prompts.py` → strict JSON, keys: `rooms, price, arnona, vaad, shelter, parking, entry_date, floor, elevator, is_agent, address`. Post date is computed in Python from Facebook's relative timestamp (`relative_to_date`), not asked of the LLM. Assumes an English-locale FB UI: handles both short (`6h`, `1d`, `3w`) and long (`3 hrs`, `1 day`, `2 wks`) relative forms plus `Yesterday` and absolute dates (`July 9 at 5:50 PM`, via `_parse_absolute_fb_date`). An unrecognized format passes through unchanged (never crashes) and logs one `_safe_print` warning per run (`_unparsed_date_logged` flag) rather than degrading silently — if that warning starts appearing, the FB account's UI locale likely changed.
 - **Text cap**: 3000 chars (prompt truncates the input text, not the instructions)
-- **Test fixtures**: `test_posts/*.txt` — 5 fabricated Hebrew posts covering full/partial fields, agent vs. private, street vs. landmark vs. no address; used to sanity-check both prompt variants against the Ollama path
+- **Test fixtures**: `test_posts/*.txt` — 8 fabricated Hebrew posts covering full/partial fields, agent vs. private, street vs. landmark vs. no address, an old-price distractor, and roommate/couple-flexibility edge cases; used to sanity-check both prompt variants against the Ollama path
 
 ## Google Sheets
 
@@ -94,7 +94,8 @@ ollama pull qwen2.5:7b
 
 ## Hebrew / Locale Rules
 
-- **Never translate or reformat** `ROOMS_PRE_FILTER_REGEX`, `NEGATIVE_KEYWORDS`, `EXCLUDED_LOCATIONS` in `config.py`, or the prompt in `prompts.py`
+- **Never translate or reformat** `ROOMS_PRE_FILTER_REGEX`, `NEGATIVE_KEYWORDS`, `ROOMMATE_KEYWORDS`, `EXCLUDED_LOCATIONS` in `config.py`, or the prompt in `prompts.py`
+- `ROOMMATE_KEYWORDS` (`שות[פף]`, split out of `NEGATIVE_KEYWORDS`) is checked separately from the rest of the negative-keyword list, with a negation-style exception: `_ROOMMATE_COUPLE_EXCEPTION_RE` in `apartment_bot.py` suppresses the filter when "זוג" appears within ~30 chars (either order) — a landlord describing tenant-type flexibility ("מתאים לזוג או ל-2 שותפים"), not an actual room-share offer. Anchored with `(?<!מי)`/`(?!י)` to avoid false hits on `מיזוג` (A/C) and `זוגי`/`זוגית` (double bed). The two checks (roommate, then the rest of `NEGATIVE_KEYWORDS`) run independently and sequentially, so a post that's genuinely seeking a roommate but happens to mention "זוג" for an unrelated reason still gets caught by the other branch if it also matches e.g. `מחפש`
 - **BIDI strip is mandatory** before any regex: FB injects `‎‏‪–‮⁦–⁩` — stripped via the module-level `BIDI_RE` constant in `apartment_bot.py`
 - `map_bool()` → "כן" / "לא" / "" (blank for unknown) — keep as-is. Unknown/missing values throughout the sheet are blank, not "לא צוין" text.
 - `DESTINATION_ADDRESS` is Hebrew; distance function auto-appends "רמת גן, גבעתיים, ישראל" if no local city found

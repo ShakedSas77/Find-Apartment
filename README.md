@@ -13,6 +13,8 @@ All configurable in `config.py`.
 | Excluded locations | Bnei Brak, etc. |
 | Disqualifying keywords | roommates, sublet, short-term, commercial |
 
+Roommate-related posts are disqualified unless the post also mentions a couple ("זוג") nearby — e.g. "מתאים לזוג או ל-2 שותפים" (suitable for a couple or 2 roommates) still passes, since that's a landlord describing tenant-type flexibility for a whole apartment, not an actual room-share offer.
+
 Walking distance to רחוב הדוגמה 1, Tel Aviv is computed and shown in the sheet for information only — it is not a filter. If the monthly Google Maps quota (`GMAPS_MONTHLY_CAP` in `config.py`) is reached, the distance column shows `מכסה חודשית הסתיימה` and the listing is still added (or, if `GMAPS_ON_CAP = "halt"`, the run stops entirely).
 
 ## Google Sheets Columns

@@ -26,7 +26,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     SCROLL_COUNT, SCROLL_DELAY_MS, LOCATIONS,
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
-    NEGATIVE_KEYWORDS, EXCLUDED_LOCATIONS,
+    NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS,
     GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_MODEL, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, RELEVANT_SINCE_DATE, SHEET_HEADERS,
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP
@@ -250,6 +250,15 @@ def _detect_agent(text: str, llm_is_agent):
     if _AGENT_SIGNAL_RE.search(text):
         return True
     return llm_is_agent
+
+# 'שותפ'/'שותף' לבד פוסל שותפים, אבל בעל דירה שכותב "מתאים לזוג או ל-2 שותפים" מתאר
+# גמישות דיירים — לא שכירת חדר. אם 'זוג' מופיע בסמוך (עד ~30 תווים), לא פוסלים.
+# lookbehind (?<!מי) מונע התאמה על 'מיזוג' (מיזוג אוויר, שכיח מאוד במודעות);
+# lookahead (?!י) מונע 'זוגי'/'זוגית' (מיטה זוגית). [פף] מכסה גם צורת היחיד "שותף".
+_ROOMMATE_COUPLE_EXCEPTION_RE = re.compile(
+    r'(?<!מי)זוג(?!י).{0,30}שות[פף]|שות[פף].{0,30}(?<!מי)זוג(?!י)',
+    re.DOTALL
+)
 
 _PARKING_NONE_RE = re.compile(r'אין\s*חניה|בלי\s*חניה|ללא\s*חניה|^אין$')
 _PARKING_PRIVATE_RE = re.compile(r'פרטי|טאבו|מקור|צמוד|תת\s*קרקעי|חניון')
@@ -841,7 +850,15 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 stats["prefiltered"] += 1
                 continue
 
-            # --- Pre-filter: Remove obvious non-relevant posts (Sublets, Roommates, Commercial) ---
+            # --- Pre-filter: roommate/shared-room posts, unless explicitly also couple-friendly ---
+            roommate_match = re.search(ROOMMATE_KEYWORDS, text)
+            if roommate_match and not _ROOMMATE_COUPLE_EXCEPTION_RE.search(text):
+                _safe_print(f"    [{group_label}] Pre-filtered: Contains negative keyword '{roommate_match.group(0)}'.")
+                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
+                stats["prefiltered"] += 1
+                continue
+
+            # --- Pre-filter: Remove other obvious non-relevant posts (Sublets, Studio, Commercial, Seekers) ---
             neg_match = re.search(NEGATIVE_KEYWORDS, text)
             if neg_match:
                 _safe_print(f"    [{group_label}] Pre-filtered: Contains negative keyword '{neg_match.group(0)}'.")
