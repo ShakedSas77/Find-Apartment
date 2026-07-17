@@ -95,7 +95,7 @@ run_bot.bat
 
 1. Loads already-seen URLs from the sheet to skip duplicates
 2. Opens persistent Chromium; waits for manual FB login on first run
-3. Visits each group URL (shuffled order), scrolls, expands "See more" buttons
+3. Scans group URLs in parallel tabs (shuffled order, `MAX_CONCURRENT_GROUPS` at a time in `config.py`), scrolls, expands "See more" buttons
 4. Per post:
    - Pre-filters by excluded locations, negative keywords, sale indicators, room count
    - Parses with Gemini 2.0 Flash (`gemini-2.0-flash`) → strict JSON

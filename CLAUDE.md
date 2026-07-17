@@ -35,14 +35,22 @@ ollama pull qwen2.5:7b
 ## Data Flow
 
 1. `setup_google_sheet()` — loads seen URLs from sheet for dedupe
-2. Playwright launches persistent Chromium; user logs into FB manually on first run
-3. Per group URL (shuffled for anti-bot): scroll, expand "קרא עוד"/"See more", collect `role="article"` elements
-4. Per post:
+2. Playwright launches persistent Chromium; user logs into FB manually on first run (single tab, closed once logged in)
+3. Groups are then scanned in parallel: `MAX_CONCURRENT_GROUPS` (config.py) worker threads, each running `_scan_group()` on its own `context.new_page()` tab, shuffled group order for anti-bot
+4. Per group: scroll, expand "קרא עוד"/"See more", collect `role="article"` elements
+5. Per post:
    - Strip BIDI chars → extract URL + date
    - Skip if URL already in sheet
    - Pre-filter: excluded locations, negative keywords, sale detector, room-count regex
-   - LLM parse → price fallback regex (if LLM price out of range)
+   - LLM parse → price/room-count fallback regex (if LLM value out of range)
    - Filter by rooms + price → compute walking distance → append row to sheet
+
+## Concurrency
+
+- Groups scan in parallel via `ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS)` — one Playwright tab (`context.new_page()`) per worker, same persistent context/session
+- Shared state guarded by module-level locks in `apartment_bot.py`: `_sheet_lock` (covers both `seen_urls` reads/writes and `sheet.append_row`, kept together to avoid duplicate-URL races), `_gemini_lock` (guards `GEMINI_EXHAUSTED`/`GEMINI_ERROR_COUNT`), `_print_lock` (via `_safe_print`, prevents interleaved terminal output)
+- Checkpoint/CAPTCHA on any tab pauses **all** tabs: `_checkpoint_lock` + `_resume_event` elect one thread as "leader" to prompt once; other threads block on the event, then all retry navigation once resolved (`_handle_checkpoint_if_present`)
+- Raising `MAX_CONCURRENT_GROUPS` speeds up a run but increases simultaneous requests from one FB account — real risk of triggering a checkpoint faster
 
 ## LLM Details
 
@@ -73,11 +81,12 @@ ollama pull qwen2.5:7b
 
 ## Anti-Bot / FB Fragility
 
-- CAPTCHA/checkpoint loop in `run_scraper` requires human intervention — cannot be automated away
+- CAPTCHA/checkpoint loop (`_handle_checkpoint_if_present`) requires human intervention — cannot be automated away; pauses all parallel tabs, not just the one that hit it
 - URL order shuffled via `random.sample` each run
 - `time.sleep(2)` per post — do not remove; removes human pacing
-- 6-selector fallback chain for article extraction (lines 293–299) — FB DOM changes without warning
+- 6-selector fallback chain for article extraction in `_scan_group` — FB DOM changes without warning
 - `chrome_profile/` directory locks when Chrome is running — kill zombie Chrome processes before rerun
+- `MAX_CONCURRENT_GROUPS` (config.py) trades speed for detection risk — multiple simultaneous tabs from one FB account is a more bot-like pattern than sequential scanning
 
 ## Conventions
 
@@ -85,7 +94,7 @@ ollama pull qwen2.5:7b
 - Wrap every Playwright interaction in `try/except` — do not simplify
 - Multi-selector fallback lists preferred over single CSS/XPath locators
 - New tunables belong in `config.py`, not inline in `apartment_bot.py`
-- `sys.stdout.write` + `.flush()` for inline progress lines
+- All output goes through `_safe_print()` (lock-protected, prefixed with `[Group N/M]`) — plain `print`/`sys.stdout.write` from within `_scan_group` will interleave garbled across threads
 
 ## Sensitive Files
 
