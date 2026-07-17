@@ -125,6 +125,19 @@ def _clean_post_for_llm(raw_text: str) -> str:
     clean = re.sub(r'[ \t]{2,}', ' ', clean)
     return clean.strip()
 
+_LATIN_LETTERS_RE = re.compile(r'[A-Za-zÀ-ɏ]+')
+
+def _strip_latin_address(address: str) -> str:
+    """
+    גיבוי דטרמיניסטי לכלל 'עברית בלבד' בפרומפט — qwen2.5 עדיין דולף לפעמים תעתיק
+    לועזי (למשל "רamat Gan", "Białik") למרות ההנחיה. מוחק כל רצף אותיות לטיניות.
+    """
+    if not address or address == "לא צוין":
+        return address
+    cleaned = _LATIN_LETTERS_RE.sub('', address)
+    cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' \t-–—,/')
+    return cleaned if cleaned else "לא צוין"
+
 def _warn_if_fee_implausible(label: str, raw: str, max_bimonthly: int):
     if not raw or raw == "לא צוין":
         return
@@ -545,7 +558,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                 _warn_if_fee_implausible("Vaad bayit", vaad, 2400)
                 _warn_if_fee_implausible("Arnona", arnona, 3000)
 
-                address = data.get("address", "לא צוין")
+                address = _strip_latin_address(data.get("address") or "לא צוין")
 
                 # Calculate Distance (No filtering, just display)
                 dist_text, _ = get_walking_distance(address)
