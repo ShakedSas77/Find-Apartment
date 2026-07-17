@@ -191,6 +191,23 @@ def _detect_agent(text: str, llm_is_agent):
         return True
     return llm_is_agent
 
+_PARKING_NONE_RE = re.compile(r'אין\s*חניה|בלי\s*חניה|ללא\s*חניה|^אין$')
+_PARKING_PRIVATE_RE = re.compile(r'פרטי|טאבו|מקור|צמוד|תת\s*קרקעי|חניון')
+_PARKING_STREET_RE = re.compile(r'רחוב|ציבור|חופשית')
+
+def _classify_parking(raw: str) -> str:
+    """מסווג את שדה החניה החופשי מהמודל לאחת משלוש קטגוריות קבועות, או ריק אם לא ברור/לא צוין."""
+    if not raw:
+        return ""
+    raw = raw.strip()
+    if _PARKING_NONE_RE.search(raw):
+        return "לא"
+    if _PARKING_PRIVATE_RE.search(raw):
+        return "פרטית"
+    if _PARKING_STREET_RE.search(raw):
+        return "ברחוב"
+    return ""
+
 _LATIN_LETTERS_RE = re.compile(r'[A-Za-zÀ-ɏ]+')
 
 def _strip_latin_address(address: str) -> str:
@@ -690,6 +707,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                 address = _strip_latin_address(data.get("address") or "")
                 floor = _parse_floor(data.get("floor") or "")
                 is_agent = _detect_agent(text, data.get("is_agent"))
+                parking = _classify_parking(data.get("parking") or "")
 
                 # Calculate Distance (No filtering, just display)
                 dist_text, _ = get_walking_distance(address)
@@ -702,7 +720,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
                     data.get("entry_date") or "",
                     floor,
                     map_bool(data.get("elevator")),
-                    data.get("parking") or "",
+                    parking,
                     arnona,
                     vaad,
                     map_bool(data.get("shelter")),
