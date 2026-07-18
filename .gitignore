@@ -9,3 +9,6 @@ chrome_profile_test/
 debug_fb*.png
 checkpoint_*.png
 test_*.py
+
+.idea/
+.claude/

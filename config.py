@@ -1,112 +1,130 @@
 """
-=== הגדרות בוט דירות ===
+=== Apartment Bot Settings ===
 
-ערוך את הערכים למטה כדי להתאים את הסריקה לצרכים שלך.
+Edit the values below to tailor the scan to your needs.
 """
 
-# ─── מפתחות API ─────────────────────────────────────────────────────────────────
-# Google Sheets – קובץ JSON של Service Account (הורד מ-Google Cloud Console)
+# ─── API keys ─────────────────────────────────────────────────────────────────
+# Google Sheets – Service Account JSON key (downloaded from Google Cloud Console)
 CREDENTIALS_FILE = "credentials.json"
 
-# Google Sheets – מזהה הטבלה (מתוך כתובת ה-URL). עבר ל-.env (SHEET_ID=...) כי
-# הריפו ציבורי — אל תחזיר את זה לכאן. נטען דרך os.getenv ב-apartment_bot.py.
+# Google Sheets – spreadsheet ID (from the sheet's URL). Moved to .env (SHEET_ID=...)
+# since the repo is public — don't put it back here. Loaded via os.getenv in apartment_bot.py.
 
-# Google Maps – מפתח API עבור Distance Matrix
-# צור ב: https://console.cloud.google.com/apis/credentials
+# Google Maps – API key for Distance Matrix
+# Create one at: https://console.cloud.google.com/apis/credentials
 
-# Gemini LLM – מפתח API לניתוח מודעות
-# צור ב: https://aistudio.google.com/app/apikey
+# Gemini LLM – API key for parsing listings
+# Create one at: https://aistudio.google.com/app/apikey
 
-# Gemini LLM – שם המודל. gemini-2.5-flash-lite נבחר בגלל מכסת free-tier גדולה יותר.
-# gemini-2.5-flash הוא האלטרנטיבה האיכותית יותר (מכסה קטנה יותר).
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+# Gemini LLM – model name. Dated snapshot names (gemini-2.5-flash, gemini-2.5-flash-lite)
+# get pulled from new users without warning (404, verified 2026-07-18). "-latest"
+# is an alias that auto-updates to the active version and isn't blocked the same way.
+# gemini-flash-latest is the higher-quality alternative (smaller free-tier quota).
+GEMINI_MODEL = "gemini-flash-lite-latest"
 
-# ─── כתובות יעד ────────────────────────────────────────────────────────────────
-# רשימת קבוצות פייסבוק לסריקה
+# ─── Target locations ────────────────────────────────────────────────────────────
+# Facebook groups to scan — placeholder examples, replace with groups you're a member of
+# (each group's URL is in the browser address bar when it's open). See README for details.
 TARGET_URLS = [
-    "https://www.facebook.com/groups/1870209196564360",
-    "https://www.facebook.com/groups/1380680752778760",
-    "https://www.facebook.com/groups/2098391913533248",
-    "https://www.facebook.com/groups/402682483445663",
-    "https://www.facebook.com/groups/1092766584127776",
-    "https://www.facebook.com/groups/115046608513246",
-    "https://www.facebook.com/groups/520940308003364",
-    "https://www.facebook.com/groups/175757842565733",
-    "https://www.facebook.com/groups/1424244737803677",
-    "https://www.facebook.com/groups/647901439404148",
-    "https://www.facebook.com/groups/564985183576779",
-    "https://www.facebook.com/groups/253957624766723",
-    "https://www.facebook.com/groups/1774413905909921"
+    "https://www.facebook.com/groups/000000000000001",
+    "https://www.facebook.com/groups/000000000000002",
+    "https://www.facebook.com/groups/000000000000003",
 ]
 
-# ─── מיקומים ───────────────────────────────────────────────────────────────────
-# לתצוגה בלבד במסך הפתיחה — לא משמש לסינון.
+# ─── Locations ────────────────────────────────────────────────────────────────
+# Display only, on the startup banner — not used for filtering.
 LOCATIONS = [
     "רמת גן", "רמת-גן", 'ר"ג', "ר״ג",
     "גבעתיים",
 ]
 
-# ─── קריטריונים (סינון לפי ה-AI) ───────────────────────────────────────────────────
+# ─── Criteria (AI-based filtering) ───────────────────────────────────────────────
 MIN_ROOMS = 3.0
 MAX_ROOMS = 3.5
 MIN_PRICE = 5500
 MAX_PRICE = 6700
 
-# פוסטים שתאריך הפרסום שלהם (DD/MM) קודם לתאריך הזה נחשבים לא רלוונטיים ומדולגים
-RELEVANT_SINCE_DATE = "01/07"
+# A post that passed every filter (rooms/address/distance) but never stated a price
+# in the text at all (both the LLM and the regex "second chance" found nothing) —
+# usually "contact for details," not a real rejection.
+# True = added to the sheet with a blank price cell; False = rejected (verdict price_unknown)
+# like an unsuitable price.
+INCLUDE_PRICE_UNKNOWN = False
 
-# ─── סינונים ראשוניים (לפני ה-AI) ────────────────────────────────────────────────
-# חובה על הפוסט להכיל לפחות אחד מהביטויים האלו כדי לעבור בדיקה (חוסך המון זמן)
+
+# Posts older than this are skipped. The sheet still displays DD/MM, but filtering
+# internally uses the full date.
+MAX_POST_AGE_DAYS = 21
+
+# ─── Pre-filters (before the AI) ──────────────────────────────────────────────────
+# The post must contain at least one of these phrases to pass the check (saves a lot of time)
 ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|(?<!\d)3\s*וחצי\s*חד'
 
-# מילים שפוסלות את הפוסט אוטומטית:
+# Words that automatically disqualify a post:
 NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות'
 
-# 'שותפ'/'שותף' מטופל בנפרד: פוסל שותפים, אלא אם מוזכר 'זוג' בסמוך (בעל דירה שמתאר
-# גמישות דיירים, למשל "מתאים לזוג או ל-2 שותפים") — ראה _ROOMMATE_COUPLE_EXCEPTION_RE
-# ב-apartment_bot.py. [פף] מכסה גם צורת יחיד "שותף" (פ סופית) וגם שותפה/שותפים/שותפות.
+# 'שותפ'/'שותף' (roommate) is handled separately: disqualifies roommate posts, unless
+# 'זוג' (couple) is mentioned nearby — e.g. a landlord describing tenant-type flexibility
+# ("suitable for a couple or 2 roommates") — see _ROOMMATE_COUPLE_EXCEPTION_RE
+# in apartment_bot.py. [פף] also covers the singular form "שותף" (final פ) as well as
+# שותפה/שותפים/שותפות (feminine/plural/collective forms).
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
-# מיקומים שאנחנו רוצים לפסול מיד (שלא נמצאים בתל אביב/רמת גן למשל)
+# Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
 EXCLUDED_LOCATIONS = ["בני ברק"]
 
-# ─── יציבות ──────────────────────────────────────────────────────────────────────
-# מספר שגיאות Gemini רצופות (לא מכסת 429) לפני מעבר קבוע ל-Ollama
+# ─── Stability ──────────────────────────────────────────────────────────────────
+# Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
 GEMINI_MAX_CONSECUTIVE_ERRORS = 3
-# מספר ניסיונות התחברות ידנית לפני יציאה
+# Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 
-# שפת ההנחיות בפרומפט (לא שפת הפלט — זה תמיד עברית): "en" או "hebrew".
-# מאפשר A/B בין שתי גרסאות הפרומפט ב-prompts.py.
+# Prompt instruction language (not the output language — that's always Hebrew): "en" or "hebrew".
+# Lets you A/B the two prompt variants in prompts.py.
 PROMPT_LANGUAGE = "en"
 
-# ─── מרחק ────────────────────────────────────────────────────────────────────────
-# כתובת היעד לחישוב מרחק מכל דירה (לתצוגה בלבד — לא סינון)
+# ─── Distance ────────────────────────────────────────────────────────────────────
+# Destination address to compute walking distance from every listing (display only — not a filter)
 DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
 
-# מכסת קריאות Distance Matrix חודשית (מרווח ביטחון מתחת ל-10,000 elements/month של ה-free tier).
-# חוצה את המכסה -> התנהגות לפי GMAPS_ON_CAP. המונה מתאפס מעצמו כל חודש (נשמר לפי מפתח YYYY-MM).
+# Maximum walking distance in km. Listings farther than this are filtered out. Set to 99.0 to disable filtering.
+MAX_WALKING_DISTANCE_KM = 4.0
+
+# Cities allowed as a result when validating an address against Google Geocoding
+GMAPS_TARGET_CITIES = ["רמת גן", "גבעתיים", "תל אביב-יפו", "תל אביב"]
+
+# Whether to validate addresses against Geocoding before Distance Matrix.
+# True is recommended: prevents misleading distances from vague/incorrect addresses.
+GMAPS_VALIDATE_ADDRESSES = True
+
+# Whether to compute distance only for addresses with good confidence.
+# True = don't waste Distance Matrix calls on a city-only or weak address.
+GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS = True
+
+# Monthly Distance Matrix call quota (safety margin below the free tier's ~10,000 elements/month).
+# Over the cap -> behavior per GMAPS_ON_CAP. The counter resets itself every month (keyed by YYYY-MM).
 GMAPS_MONTHLY_CAP = 9000
-# "skip" — מפסיקים לחשב מרחק (עמודת המרחק תישאר עם placeholder), אבל ממשיכים לחפש דירות ולהוסיף לגיליון.
-# "halt" — עוצרים את כל הריצה לגמרי כדי לא לחרוג בשום מקרה מהמכסה.
+# "skip" — stop computing distance (the distance column keeps a placeholder), but keep scanning and adding to the sheet.
+# "halt" — stop the entire run so as to never exceed the cap.
 GMAPS_ON_CAP = "skip"
 
-# ─── גלילה ──────────────────────────────────────────────────────────────────────
+# ─── Scrolling ──────────────────────────────────────────────────────────────────
 SCROLL_COUNT = 20
 SCROLL_DELAY_MS = 1000
 
-# ─── מקביליות ────────────────────────────────────────────────────────────────────
-# כמה קבוצות נסרקות בו-זמנית. יותר = מהיר יותר, אבל גם סיכון גבוה יותר לחסימה/CAPTCHA:
-# מצב מקביל (>1) פותח browser+context נפרד לכל קבוצה עם עוגיות מוזרקות — כמה
-# דפדפנים בו-זמנית מאותו חשבון, טביעת אצבע שונה מהפרופיל האמיתי. אם מתחילים
-# checkpoints — הערך הבטוח ביותר הוא 1: מצב סדרתי אמיתי, סורק קבוצה-קבוצה על אותו
-# עמוד בתוך ה-profile האמיתי (chrome_profile/), בלי לייצא storage_state בכלל.
+# ─── Concurrency ────────────────────────────────────────────────────────────────
+# How many groups scan simultaneously. Higher = faster, but also higher risk of a
+# block/CAPTCHA: parallel mode (>1) opens a separate browser+context per group with
+# injected cookies — several simultaneous browsers from one account, a different
+# fingerprint than the real profile. If checkpoints start happening, the safest
+# value is 1: true sequential mode, scanning group by group on the same page inside
+# the real profile (chrome_profile/), never exporting storage_state at all.
 MAX_CONCURRENT_GROUPS = 4
 
-# ─── גוגל שיטס ─────────────────────────────────────────────────────────────────
+# ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [
     "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה (ק\"מ)", "תאריך כניסה",
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
-    "תאריך פרסום", "כתובת"
+    "תאריך פרסום", "כתובת", "זמן סריקה"
 ]
-

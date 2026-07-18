@@ -3,7 +3,7 @@ from config import PROMPT_LANGUAGE
 
 def get_apartment_prompt_hebrew(text: str) -> str:
     """
-    מייצר פרומפט אופטימלי לשליחה למודל AI לחילוץ נתונים מפוסט נדל"ן.
+    Builds an optimized prompt to send to the AI model for extracting data from a real-estate post.
     """
     return f"""אתה מומחה לחילוץ נתונים מתוך טקסט (Data Extraction).
 המטרה שלך היא לקרוא את מודעת הנדל"ן הבאה ולהמיר את המידע שבה למבנה נתונים מסוג JSON.

@@ -1,15 +1,16 @@
 """
-תיקון כתובות בגוגל שיטס באמצעות Google Geocoding API.
+Fixes addresses in the Google Sheet via the Google Geocoding API.
 
-מריץ geocoding על עמודת הכתובת בכל שורה, מנרמל שם רחוב/עיר, ומעדכן את עמודת
-המרחק בהתאם לכתובת המתוקנת. כתובות בתל אביב נשמרות רק אם הן במרחק הליכה של
-עד 4 ק"מ מ-DESTINATION_ADDRESS; מעבר לזה השורה מוסרת. כתובות שה-geocoding
-מצא להן רק התאמת עיר (בלי רחוב) נשארות ללא שינוי — כדי לא להחליף כתובת ספציפית
-בהתאמה כללית פחות מדויקת.
+Runs geocoding on the address column of every row, normalizes street/city
+names, and updates the distance column to match the corrected address.
+Tel Aviv addresses are kept only if they're within a 4km walk of
+DESTINATION_ADDRESS; beyond that the row is removed. Addresses where
+geocoding only found a city-level match (no street) are left unchanged —
+so as not to replace a specific address with a less precise general match.
 
-הרצה:
-    python fix_sheet_addresses.py            # dry run — מציג מה ישתנה, לא כותב
-    python fix_sheet_addresses.py --write    # מריץ בפועל וכותב לגיליון
+Usage:
+    python fix_sheet_addresses.py            # dry run — shows what would change, doesn't write
+    python fix_sheet_addresses.py --write    # runs for real and writes to the sheet
 """
 import re
 import sys
