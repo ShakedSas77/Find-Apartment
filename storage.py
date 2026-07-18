@@ -13,7 +13,7 @@ is the memory of everything else (rejected/pre-filtered/failed).
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "bot_data.db"
@@ -314,3 +314,28 @@ def get_stats() -> tuple[dict, str, int]:
     counts = {row["verdict"]: row["cnt"] for row in rows}
     gmaps_calls = usage_row["gmaps_calls"] if usage_row else 0
     return counts, month, gmaps_calls
+
+
+def prune_old_posts(max_age_days: int) -> int:
+    """
+    Bounds DB growth without breaking the should_skip() dedup guarantee:
+    clears raw_text/parsed_json for posts older than max_age_days (by
+    first_seen), but keeps the row itself (url, verdict, attempts, all
+    analysis columns) forever — should_skip() only ever reads verdict/
+    attempts, so a pruned post can never be rescanned or re-added. Only
+    VACUUMs (reclaims file space) when something was actually pruned, so a
+    day with nothing to prune doesn't pay for a full file rewrite.
+    Returns the number of rows pruned.
+    """
+    cutoff = (datetime.now() - timedelta(days=max_age_days)).isoformat()
+    with _lock, _connect() as conn:
+        cursor = conn.execute(
+            "UPDATE posts SET raw_text = NULL, parsed_json = NULL "
+            "WHERE first_seen < ? AND raw_text IS NOT NULL",
+            (cutoff,),
+        )
+        pruned = cursor.rowcount
+    if pruned > 0:
+        with _lock, _connect() as conn:
+            conn.execute("VACUUM")
+    return pruned

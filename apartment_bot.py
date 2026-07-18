@@ -607,17 +607,23 @@ def _listing_key(row: list) -> tuple:
         price = row[1] if len(row) > 1 else ""
     return ("listing", address_key, rooms, price)
 
-def dedupe_and_sort_sheet(sheet) -> tuple[int, int]:
+def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
-    Removes duplicates:
-    1. Identical URL - always a duplicate.
-    2. Same apartment by meaningful address + rooms + price - keeps the most recent post.
-    Missing/weak addresses aren't merged by price+rooms alone, so real distinct
-    apartments don't get accidentally deleted.
+    Rewrites the sheet's data range in one pass:
+    1. Removes duplicates: identical URL is always a duplicate; same apartment
+       by meaningful address + rooms + price keeps the most recent post.
+       Missing/weak addresses aren't merged by price+rooms alone, so real
+       distinct apartments don't get accidentally deleted.
+    2. Drops rows older than MAX_POST_AGE_DAYS (via _is_recent_post_date) — the
+       sheet is just a "recent/relevant" view; the local DB (should_skip) is
+       what permanently remembers a URL, so removing an old row here can never
+       cause it to be rescanned or re-added. Rows with an unparseable/missing
+       post date are kept (same "don't delete what we're not sure about" rule).
+    Returns (duplicates_removed, stale_removed, kept).
     """
     data = sheet.get_all_values()
     if len(data) <= 1:
-        return 0, len(data) - 1 if data else 0
+        return 0, 0, len(data) - 1 if data else 0
     rows = data[1:]
 
     best_by_url = {}
@@ -638,14 +644,18 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int]:
             best_by_key[key] = row
 
     deduped_rows = list(best_by_key.values())
-    deduped_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
+    duplicates_removed = len(rows) - len(deduped_rows)
 
-    removed = len(rows) - len(deduped_rows)
+    fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[12] if len(r) > 12 else "")]
+    stale_removed = len(deduped_rows) - len(fresh_rows)
+
+    fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
+
     last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
     _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{len(rows) + 1}"]))
-    if deduped_rows:
-        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(deduped_rows) + 1}", values=deduped_rows))
-    return removed, len(deduped_rows)
+    if fresh_rows:
+        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(fresh_rows) + 1}", values=fresh_rows))
+    return duplicates_removed, stale_removed, len(fresh_rows)
 
 def extract_post_info(article) -> tuple[str, str]:
     try:
@@ -1431,9 +1441,14 @@ def run_scraper(headless: bool = False):
     if checkpoint_skipped:
         print(f"{checkpoint_skipped} group(s) skipped due to a security checkpoint — rerun headful.")
 
-    print("Deduplicating cross-posted listings and sorting by post date...")
-    removed, kept = dedupe_and_sort_sheet(sheet)
-    print(f"Removed {removed} duplicate repost(s). Sheet now has {kept} listings, sorted by post date (newest first).")
+    print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
+    duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+    print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
+          f"Sheet now has {kept} listings, sorted by post date (newest first).")
+
+    pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
+    if pruned:
+        print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
 
 def reparse_rejected_posts():
     """
@@ -1452,7 +1467,7 @@ def reparse_rejected_posts():
         url = post["url"]
         text = post["raw_text"]
         group_url = post["group_url"]
-        if url in seen_urls:
+        if not text or url in seen_urls:
             continue
 
         data = analyze_post_with_llm(text)
@@ -1485,8 +1500,8 @@ def reparse_rejected_posts():
             print(f"    ERROR: writing to sheet: {e}")
 
     if added:
-        removed, kept = dedupe_and_sort_sheet(sheet)
-        print(f"Removed {removed} duplicate repost(s). Sheet now has {kept} listings, sorted by post date (newest first).")
+        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings, sorted by post date (newest first).")
     print(f"\nDone. {added} new apartment(s) added from reparse.")
 
 def _replay_text_prefilters(text: str) -> tuple[str, dict] | None:
@@ -1588,8 +1603,8 @@ def replay_all_posts():
             print(f"    ERROR: writing to sheet: {e}")
 
     if added:
-        removed, kept = dedupe_and_sort_sheet(sheet)
-        print(f"Removed {removed} duplicate repost(s). Sheet now has {kept} listings, sorted by post date (newest first).")
+        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings, sorted by post date (newest first).")
     print(f"\nDone. {added} apartment(s) added from replay (out of {len(posts)} stored posts).")
 
 def print_stats():
@@ -1598,6 +1613,19 @@ def print_stats():
     for verdict in storage.ALL_VERDICTS:
         print(f"  {verdict}: {counts.get(verdict, 0)}")
     print(f"\nGoogle Maps calls this month ({month}): {gmaps_calls}")
+
+def prune_data():
+    """
+    On-demand cleanup, no browser: drops sheet rows and lightens local DB rows
+    older than MAX_POST_AGE_DAYS. Runs automatically at the end of every
+    scheduled scan too (run_scraper()) — this flag is for running it standalone.
+    """
+    sheet, _ = setup_google_sheet()
+    print(f"\nPruning rows/records older than {MAX_POST_AGE_DAYS} days...")
+    duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+    print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings.")
+    pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
+    print(f"Lightened {pruned} local DB row(s) (verdict kept, so they won't be rescanned).")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
@@ -1608,6 +1636,8 @@ if __name__ == "__main__":
                          help="Backup + clear the sheet, then rebuild it from ALL stored posts via the current code, no browser")
     parser.add_argument("--stats", action="store_true",
                          help="Print verdict counts and Maps usage from the local DB, then exit")
+    parser.add_argument("--prune", action="store_true",
+                         help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
     args = parser.parse_args()
 
     storage.init_db()
@@ -1622,6 +1652,10 @@ if __name__ == "__main__":
 
     if args.replay:
         replay_all_posts()
+        sys.exit(0)
+
+    if args.prune:
+        prune_data()
         sys.exit(0)
 
     print("\n=======================================================")
