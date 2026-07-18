@@ -170,6 +170,11 @@ python apartment_bot.py --reparse-rejected
 # every post, so it costs more than --reparse-rejected; use that instead for
 # a quick check on just the rejected posts.
 python apartment_bot.py --replay
+
+# Drops sheet rows and lightens local DB rows older than MAX_POST_AGE_DAYS,
+# no browser. Runs automatically at the end of every scan too — this is for
+# an on-demand cleanup.
+python apartment_bot.py --prune
 ```
 
 ## How It Works
@@ -196,3 +201,4 @@ Every post that gets past the URL/date pre-check is recorded in a local SQLite D
 - `posts` table — one row per URL, with the raw post text, parsed JSON (when the LLM ran), and a verdict (`added`, `rejected_price`, `rejected_rooms`, `rejected_distance`, `prefiltered`, `parse_failed`, `price_unknown`).
 - On every run, a post already in the DB is skipped without another LLM call — **except** `parse_failed` posts, which retry automatically up to 3 attempts.
 - The Google Sheet stays the source of truth for actual matches; the local DB is the memory of everything else (rejections, pre-filters, parse failures) and the raw-text archive for prompt iteration.
+- **Retention**: so the DB and Sheet don't grow forever, both are pruned automatically at the end of every run using `MAX_POST_AGE_DAYS`. On the sheet, rows older than that (by post date) are dropped. In the DB, the row's raw text/parsed JSON is cleared, but the URL and verdict are kept forever — that's what stops a pruned post from ever being rescanned or re-added, since the skip check only looks at the verdict, not the text. Run `python apartment_bot.py --prune` any time for an on-demand cleanup.
