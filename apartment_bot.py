@@ -739,13 +739,14 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
         _safe_print("[Local Ollama] ")
 
     try:
-        ollama_response = ollama.chat(
-            model='qwen2.5:7b',
-            messages=[{'role': 'user', 'content': prompt}],
-            format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
-            options={'temperature': 0, 'num_ctx': 4096},
-            keep_alive='10m',
-        )
+        with _ollama_lock:
+            ollama_response = ollama.chat(
+                model='qwen2.5:7b',
+                messages=[{'role': 'user', 'content': prompt}],
+                format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
+                options={'temperature': 0, 'num_ctx': 4096},
+                keep_alive='10m',
+            )
         return json.loads(ollama_response['message']['content'])
     except Exception as ollama_err:
         _safe_print(f"\n    ERROR: local Ollama analysis failed: {ollama_err}")
@@ -754,14 +755,16 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
 def analyze_post_with_llm(text: str) -> dict | None:
     """
     Two attempts max: each attempt runs the LLM and then validates the output
-    against ApartmentData. Validation failure on the first attempt -> a single
-    retry; failure on the second too -> None (verdict parse_failed for the caller).
+    against ApartmentData. A raw call failure (LLM/network error) or a schema
+    validation failure both count as one attempt; failure on both -> None
+    (verdict parse_failed for the caller).
     """
     prompt = get_apartment_prompt_improved(_clean_post_for_llm(text))
     for attempt in range(2):
         raw = _get_llm_raw_result(prompt)
         if raw is None:
-            return None
+            _safe_print(f"    WARNING: LLM call returned no result (attempt {attempt + 1}/2)")
+            continue
         try:
             return ApartmentData.model_validate(raw).model_dump()
         except Exception as validation_err:
