@@ -1221,7 +1221,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 stats["llm_parsed"] += 1
             if not data:
                 _safe_print(f"    [{group_label}] Skipped: LLM failed to parse or returned no data.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PARSE_FAILED)
+                storage.record_post(post_url, target_url, text, storage.VERDICT_PARSE_FAILED,
+                                     analysis=_analysis_from_fields({}, fb_post_date, storage.VERDICT_PARSE_FAILED))
                 return
 
             verdict, fields = _evaluate_post_data(data, text)
@@ -1475,7 +1476,8 @@ def reparse_rejected_posts():
 
         data = analyze_post_with_llm(text)
         if not data:
-            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED)
+            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED,
+                                 analysis=_analysis_from_fields({}, post.get("post_date") or "", storage.VERDICT_PARSE_FAILED))
             print(f"    Still failing to parse: {url}")
             continue
 
@@ -1581,7 +1583,8 @@ def replay_all_posts():
 
         data = analyze_post_with_llm(text)
         if not data:
-            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED)
+            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED,
+                                 analysis=_analysis_from_fields({}, post_date, storage.VERDICT_PARSE_FAILED))
             continue
 
         verdict, fields = _evaluate_post_data(data, text)
