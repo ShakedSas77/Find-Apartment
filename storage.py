@@ -274,6 +274,22 @@ def get_reparse_candidates() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_added_listing_data() -> dict[str, dict]:
+    """
+    url -> {address, price_val, rooms_val} for every added listing, as recorded
+    at scan time. Used by dedupe_and_sort_sheet() to key duplicates off the
+    bot's own original parse rather than the live sheet cells, so a manual
+    edit to a sheet row (e.g. fixing a price) doesn't stop a later crosspost
+    of the same listing from being recognized as a duplicate.
+    """
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, address, price_val, rooms_val FROM posts WHERE verdict = ?",
+            (VERDICT_ADDED,),
+        ).fetchall()
+    return {row["url"]: dict(row) for row in rows}
+
+
 def get_all_posts() -> list[dict]:
     """Every post ever scanned, regardless of verdict — used by --replay (testing new code/prompt without a browser)."""
     with _lock, _connect() as conn:

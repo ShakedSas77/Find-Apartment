@@ -6,6 +6,7 @@ import os
 import re
 import random
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -21,6 +22,12 @@ from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
 from typing import Optional
 
+try:
+    from playwright_stealth import stealth_sync, StealthConfig
+except ImportError:
+    stealth_sync = None
+    StealthConfig = None
+
 from config import (
     CREDENTIALS_FILE, TARGET_URLS,
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
@@ -32,7 +39,7 @@ from config import (
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP,
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
-    INCLUDE_PRICE_UNKNOWN
+    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED
 )
 from prompts import get_apartment_prompt_improved
 import storage
@@ -73,8 +80,28 @@ gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
 GEMINI_EXHAUSTED = False
 GEMINI_ERROR_COUNT = 0
 
+# On Linux, Chrome's sandbox can fail to initialize in some VM/container
+# environments, hanging navigation indefinitely rather than erroring cleanly
+# (verified 2026-07-18: a bare `google-chrome --no-sandbox --disable-gpu` CLI
+# call loaded facebook.com in 11s, while Playwright's launch — which strips
+# --no-sandbox for anti-detection reasons, fine on Windows — hung on
+# page.goto() past a 30s timeout on every single group). Add both flags back
+# on Linux only; Windows keeps the original anti-detection args untouched.
+_CHROME_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+if sys.platform.startswith("linux"):
+    _CHROME_LAUNCH_ARGS += ["--no-sandbox", "--disable-gpu"]
+
 # Strips invisible BIDI characters that Facebook injects and that break regexes
 BIDI_RE = re.compile(r'[‎‏‪-‮⁦-⁩]')
+
+# googlemaps sends GMAPS_API_KEY as a URL query param (unlike Gemini, which uses
+# a header) — on a network-level failure (not a clean API error response), the
+# underlying requests/urllib3 exception's str() embeds the full request URL,
+# key included. Strip it before any exception text reaches a print/log.
+_API_KEY_QUERY_RE = re.compile(r'([?&]key=)[^&\s]+')
+
+def _redact_api_key(text: str) -> str:
+    return _API_KEY_QUERY_RE.sub(r'\1REDACTED', text)
 
 # article.inner_text() also includes the comments section below the post — cut at
 # the first marker so a price/detail from another user's comment (not the poster's)
@@ -114,6 +141,34 @@ class HeadlessCheckpointAbort(Exception):
 def _safe_print(msg: str):
     with _print_lock:
         print(msg)
+
+_stealth_warned = False
+
+def _apply_stealth(page):
+    """
+    Masks automation fingerprints (navigator.webdriver, headless UA artifacts,
+    missing chrome.runtime) via tf-playwright-stealth. Must run on a page
+    BEFORE its first navigation — the patches are add_init_script based.
+    Failure is never fatal: the bot ran for months without stealth.
+    """
+    global _stealth_warned
+    if not STEALTH_ENABLED:
+        return
+    if stealth_sync is None:
+        if not _stealth_warned:
+            _stealth_warned = True
+            _safe_print("WARNING: tf-playwright-stealth not installed — running without stealth patches. Run: pip install -r requirements.txt")
+        return
+    try:
+        # navigator_user_agent/navigator_languages OFF: the package fakes them with a
+        # hardcoded Chrome 95 UA and en-US — an ancient UA is a louder bot signal than
+        # what it hides, and it would stomp the real-profile fingerprint the context
+        # was deliberately given (verified 2026-07-18 against tf-playwright-stealth 1.2.0).
+        stealth_sync(page, StealthConfig(navigator_user_agent=False, navigator_languages=False))
+    except Exception as e:
+        if not _stealth_warned:
+            _stealth_warned = True
+            _safe_print(f"WARNING: stealth patch failed, continuing without it: {e}")
 
 # ─── Helper Functions ─────────────────────────────────────────────────────────────
 
@@ -317,17 +372,25 @@ def _strip_foreign_letters(text: str) -> str:
     return cleaned
 
 _IMMEDIATE_RE = re.compile(r'מיידי|מיד|עכשיו|כניסה\s*מיידית|היום')
+_DATE_DDMM_RE = re.compile(r'(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?')
 
 def _normalize_entry_date(text: str) -> str:
     """
-    Normalizes the entry date, strips foreign-language text, and converts
-    "immediate"-type phrases to the standard "מיידי".
+    Normalizes the entry date, strips foreign-language text, converts
+    "immediate"-type phrases to the standard "מיידי", and zero-pads a
+    numeric day.month(.year) date (e.g. "1.8" / "1.8.26") to "DD/MM",
+    dropping the year. Non-numeric dates (e.g. "ספטמבר") pass through as-is.
     """
     if not text:
         return ""
     text = _strip_foreign_letters(text)
     if _IMMEDIATE_RE.search(text):
         return "מיידי"
+    m = _DATE_DDMM_RE.fullmatch(text.strip().rstrip('./'))
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        if 1 <= day <= 31 and 1 <= month <= 12:
+            return f"{day:02d}/{month:02d}"
     return text
 
 def _reject_hallucinated_address(address: str, source_text: str) -> str:
@@ -432,6 +495,22 @@ def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
     }
     return storage.VERDICT_ADDED, fields
 
+# Rows are written with value_input_option="USER_ENTERED" (needed so numeric
+# columns like price/rooms are stored as real numbers, not text) — that also
+# lets Sheets interpret a cell starting with =/+/-/@ as a formula. Row content
+# ultimately comes from scraped Facebook text via an LLM (untrusted input), so
+# this is an explicit safeguard, not incidental: prefix any such string with a
+# literal-text apostrophe before it's sent. (In practice every string field
+# here is already narrowed to a fixed set or Hebrew-only text that happens to
+# exclude these characters — this guard is deliberate defense-in-depth so that
+# stays true even if that normalization changes later.)
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
+
+def _sheet_safe_cell(value):
+    if isinstance(value, str) and value.startswith(_FORMULA_TRIGGER_CHARS):
+        return "'" + value
+    return value
+
 def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     dist_text, dist_meters, address_confidence, address_warning, distance_source = get_walking_distance(fields["address"])
     fields["distance_text"] = dist_text
@@ -440,7 +519,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     fields["address_warning"] = address_warning
     fields["distance_source"] = distance_source
 
-    return [
+    row = [
         post_url,
         int(fields["price_val"]) if fields["price_val"] else "",
         fields["rooms_val"],
@@ -457,6 +536,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         fields["address"],
         datetime.now().strftime("%Y-%m-%d %H:%M"),
     ]
+    return [_sheet_safe_cell(v) for v in row]
 
 
 def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str = "gemini_or_ollama") -> dict:
@@ -590,21 +670,34 @@ def _classify_address_confidence(address: str) -> tuple[str, str]:
 
     return "medium", "כתובת ללא אינדיקציה ברורה לרחוב"
 
-def _listing_key(row: list) -> tuple:
+def _listing_key(row: list, db_data: dict[str, dict] | None = None) -> tuple:
+    """
+    Keys a row by address+rooms+price sourced from the bot's own original
+    parse in the DB (db_data, keyed by URL) when available, falling back to
+    the live sheet cells otherwise. Matching off the DB record means a manual
+    edit to a sheet cell (e.g. fixing a price) can't stop a later crosspost
+    of the same listing, added under a different URL, from still being
+    recognized as a duplicate.
+    """
     url = row[0] if len(row) > 0 else ""
-    address_key = _normalize_address_key(row[13] if len(row) > 13 else "")
+    db_row = (db_data or {}).get(url)
+
+    raw_address = db_row["address"] if db_row and db_row.get("address") else (row[13] if len(row) > 13 else "")
+    address_key = _normalize_address_key(raw_address)
 
     if not address_key or len(address_key) < 4:
         return ("url", url)
 
+    raw_rooms = db_row["rooms_val"] if db_row and db_row.get("rooms_val") is not None else (row[2] if len(row) > 2 else "")
     try:
-        rooms = f"{float(row[2]):.1f}"
-    except (ValueError, IndexError):
-        rooms = row[2] if len(row) > 2 else ""
+        rooms = f"{float(raw_rooms):.1f}"
+    except (ValueError, TypeError):
+        rooms = raw_rooms
+    raw_price = db_row["price_val"] if db_row and db_row.get("price_val") is not None else (row[1] if len(row) > 1 else "")
     try:
-        price = str(int(float(row[1])))
-    except (ValueError, IndexError):
-        price = row[1] if len(row) > 1 else ""
+        price = str(int(float(raw_price)))
+    except (ValueError, TypeError):
+        price = raw_price
     return ("listing", address_key, rooms, price)
 
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
@@ -636,9 +729,10 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         elif existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_url[url] = row
 
+    db_data = storage.get_added_listing_data()
     best_by_key = {}
     for row in best_by_url.values():
-        key = _listing_key(row)
+        key = _listing_key(row, db_data)
         existing = best_by_key.get(key)
         if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_key[key] = row
@@ -657,6 +751,21 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(fresh_rows) + 1}", values=fresh_rows))
     return duplicates_removed, stale_removed, len(fresh_rows)
 
+# FB serves the same group post under multiple URL shapes — /posts/<id> and
+# /permalink/<id> are interchangeable, and www/m/web hosts all resolve to the
+# same post. Without canonicalization each shape looks like a new post to the
+# dedupe checks (DB primary key + sheet seen_urls) and costs a duplicate LLM call.
+_CANONICAL_GROUP_POST_RE = re.compile(
+    r'https://(?:www|m|web)\.facebook\.com/groups/([^/?#]+)/(?:posts|permalink)/(\d+)'
+)
+
+def _canonical_post_url(url: str) -> str:
+    m = _CANONICAL_GROUP_POST_RE.match(url)
+    if m:
+        # Trailing slash kept — matches the shape already stored in the DB/sheet
+        return f"https://www.facebook.com/groups/{m.group(1)}/posts/{m.group(2)}/"
+    return url  # unknown shape: pass through unchanged, never break dedupe on odd URLs
+
 def extract_post_info(article) -> tuple[str, str]:
     try:
         links = article.locator('a[role="link"]').all()
@@ -668,7 +777,8 @@ def extract_post_info(article) -> tuple[str, str]:
                 clean = href.split("?")[0]
                 if clean.startswith("/"):
                     clean = "https://www.facebook.com" + clean
-                
+                clean = _canonical_post_url(clean)
+
                 # Extract the post date directly from the Facebook timestamp link
                 post_date = ""
                 try:
@@ -865,7 +975,7 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
         storage.increment_gmaps_usage()
         results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
     except Exception as e:
-        _safe_print(f"\n    [Google Geocoding API Error]: {e}")
+        _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
         return address, "", confidence, "שגיאת אימות כתובת", "geocode_error"
 
     if not results:
@@ -940,7 +1050,7 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, canonical_address, city, confidence, "Distance Matrix לא החזיר מסלול תקין", "", 999999, "google_maps_failed", geocode_status)
         return "", float('inf'), confidence, "Distance Matrix לא החזיר מסלול תקין", "google_maps_failed"
     except Exception as e:
-        _safe_print(f"\n    [Google Maps API Error]: {e}")
+        _safe_print(f"\n    [Google Maps API Error]: {_redact_api_key(str(e))}")
         storage.save_address_cache(address, canonical_address, city, confidence, "שגיאת Distance Matrix", "", 999999, "google_maps_error", geocode_status)
         return "", float('inf'), confidence, "שגיאת Distance Matrix", "google_maps_error"
 
@@ -1009,7 +1119,7 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
         except Exception:
             pass
 
-def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool) -> dict:
+def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool, live: bool = False) -> dict:
     """
     The actual scan logic for a single group, run on a page that already
     exists. Shared between parallel mode (_scan_group, which creates a
@@ -1017,6 +1127,15 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
     when MAX_CONCURRENT_GROUPS == 1, which runs every group in sequence on the
     same page inside the original persistent context, to preserve the
     profile's real fingerprint).
+
+    live=False (default, dry-run): classifies posts normally (LLM calls,
+    Maps/geocoding calls, and their quota tracking all still happen — the
+    read-side of the pipeline is identical either way) but a would-be match
+    is never written to the sheet and never recorded as VERDICT_ADDED, so a
+    dry run can never block a real future match via should_skip's cache.
+    Non-match verdicts (prefiltered/rejected/parse_failed) are still recorded
+    regardless of live, since that's just avoiding repeat LLM cost on posts
+    already known not to match, not a "commit" of a result.
 
     Returns a dict summarizing the run: added, checkpoint_hit (True when the
     group was skipped/stopped due to a checkpoint that can't be solved in
@@ -1041,6 +1160,12 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         _safe_print(f"[{group_label}] Scrolling ({SCROLL_COUNT} times)...")
         for _ in range(SCROLL_COUNT):
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
+            # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
+            if random.random() < 0.25:
+                try:
+                    page.mouse.move(random.randint(200, 1100), random.randint(200, 800), steps=random.randint(5, 15))
+                except Exception:
+                    pass
             page.mouse.wheel(0, random.randint(3000, 5000))
             jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
             page.wait_for_timeout(jittered_delay)
@@ -1064,7 +1189,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             'div.x1yztbdb',
             'div[data-ad-preview="message"]',
             'div[data-pagelet^="GroupFeed"] > div > div',
-            'div[role="feed"] > div > div'
+            'div[role="feed"] > div > div',
+            # Last resort: FB post containers carry aria-labelledby (author) +
+            # aria-describedby (body) even when role="article" is absent
+            'div[aria-labelledby][aria-describedby]'
         ]
 
         raw_articles = []
@@ -1089,7 +1217,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
 
         if len(articles_data) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
-            page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
+            try:
+                page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
+            except Exception as e:
+                _safe_print(f"    WARNING: [{group_label}] debug screenshot failed: {e}")
             return stats
 
         valid_posts = []
@@ -1261,7 +1392,9 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     with local_lock:
                         stats["added"] += 1
                     price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
-                    _safe_print(f"    SUCCESS: [{group_label}] Apartment queued: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
+                    prefix = "SUCCESS" if live else "DRY RUN"
+                    verb = "queued" if live else "would queue (pass --live to commit)"
+                    _safe_print(f"    {prefix}: [{group_label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
                 else:
                     _safe_print(f"    [{group_label}] Skipped before queueing: duplicate URL.")
 
@@ -1270,7 +1403,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             for future in as_completed(futures):
                 future.result()
 
-        if pending_rows:
+        if pending_rows and live:
             with _sheet_lock:
                 try:
                     _append_rows_batch(sheet, pending_rows)
@@ -1281,13 +1414,16 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 except Exception as e:
                     _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
                     stats["added"] -= len(pending_rows)
+        elif pending_rows:
+            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
     except GmapsQuotaHalted:
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
         stats["checkpoint_hit"] = True
     return stats
 
-def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool) -> dict:
+def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool,
+                user_agent: str = "", browser_locale: str = "", live: bool = False) -> dict:
     """
     Parallel mode: each thread runs its own Playwright instance (the sync API
     isn't thread-safe when sharing one browser/context between threads) — the
@@ -1307,15 +1443,23 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            channel="chrome",
             headless=headless,
             ignore_default_args=["--no-sandbox", "--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+            args=_CHROME_LAUNCH_ARGS
         )
-        context = browser.new_context(storage_state=storage_state_path, viewport={"width": 1366, "height": 1600})
+        # Match the real profile's fingerprint: a worker with Playwright's default
+        # UA/locale next to the logged-in profile's real ones = same account on two
+        # different "devices" simultaneously, a stronger bot signal than either alone.
+        context_kwargs = {"storage_state": storage_state_path, "viewport": {"width": 1366, "height": 1600}}
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        if browser_locale:
+            context_kwargs["locale"] = browser_locale
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
+        _apply_stealth(page)
         try:
-            return _scan_group_page(page, target_url, group_label, sheet, seen_urls, headless)
+            return _scan_group_page(page, target_url, group_label, sheet, seen_urls, headless, live)
         finally:
             try:
                 context.close()
@@ -1333,7 +1477,9 @@ def _print_gmaps_quota_status():
     if GMAPS_MONTHLY_CAP > 0 and usage >= GMAPS_MONTHLY_CAP * 0.8:
         print(f"WARNING: Google Maps usage is at {usage}/{GMAPS_MONTHLY_CAP} ({usage / GMAPS_MONTHLY_CAP:.0%}) of the monthly cap.")
 
-def run_scraper(headless: bool = False):
+def run_scraper(headless: bool = False, live: bool = False):
+    if not live:
+        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
@@ -1352,15 +1498,31 @@ def run_scraper(headless: bool = False):
 
     # --- Login phase: single persistent-context tab, sequential ---
     with sync_playwright() as p:
+        persistent_kwargs = {}
+        if headless:
+            # Headless Chromium's UA says "HeadlessChrome" in both the HTTP header and
+            # JS — the most obvious headless tell, and a UA can only be set at context
+            # creation. Probe a throwaway browser for the real platform-correct UA and
+            # strip the "Headless" marker.
+            try:
+                probe = p.chromium.launch(headless=True)
+                probe_page = probe.new_page()
+                probe_ua = probe_page.evaluate("navigator.userAgent") or ""
+                probe.close()
+                if "HeadlessChrome" in probe_ua:
+                    persistent_kwargs["user_agent"] = probe_ua.replace("HeadlessChrome", "Chrome")
+            except Exception:
+                pass
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            channel="chrome",
             headless=headless,
             viewport={"width": 1366, "height": 1600},
             ignore_default_args=["--no-sandbox", "--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+            args=_CHROME_LAUNCH_ARGS,
+            **persistent_kwargs
         )
         page = context.pages[0] if context.pages else context.new_page()
+        _apply_stealth(page)
 
         print("Opening Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded")
@@ -1397,7 +1559,11 @@ def run_scraper(headless: bool = False):
             for i, url in enumerate(shuffled_urls, 1):
                 if i > 1:
                     time.sleep(random.uniform(5, 15))
-                stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless)
+                try:
+                    stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless, live)
+                except Exception as e:
+                    _safe_print(f"\nERROR: [Group {i}/{total}] crashed: {e}")
+                    continue
                 groups_scanned += 1
                 total_added += stats["added"]
                 total_posts_seen += stats["posts_seen"]
@@ -1410,6 +1576,16 @@ def run_scraper(headless: bool = False):
                     break
             context.close()
         else:
+            # Capture the logged-in profile's fingerprint so parallel workers can
+            # present the same one (see _scan_group). "HeadlessChrome" is stripped
+            # so a headless run's workers still claim the normal Chrome UA.
+            real_user_agent = ""
+            real_locale = ""
+            try:
+                real_user_agent = (page.evaluate("navigator.userAgent") or "").replace("HeadlessChrome", "Chrome")
+                real_locale = page.evaluate("navigator.language") or ""
+            except Exception:
+                pass
             # Exports cookies/session to a file so independent threads can use
             # them — one context/browser can't be shared between threads (Playwright's sync API isn't thread-safe)
             context.storage_state(path=storage_state_path)
@@ -1420,7 +1596,8 @@ def run_scraper(headless: bool = False):
               f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS) as executor:
             futures = {
-                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless): idx
+                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless,
+                                real_user_agent, real_locale, live): idx
                 for idx, url in enumerate(shuffled_urls, 1)
             }
             for future in as_completed(futures):
@@ -1445,14 +1622,24 @@ def run_scraper(headless: bool = False):
     if checkpoint_skipped:
         print(f"{checkpoint_skipped} group(s) skipped due to a security checkpoint — rerun headful.")
 
-    print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
-    duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
-    print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
-          f"Sheet now has {kept} listings, sorted by post date (newest first).")
+    if live:
+        print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
+        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
+              f"Sheet now has {kept} listings, sorted by post date (newest first).")
 
-    pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
-    if pruned:
-        print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+        pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
+        if pruned:
+            print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+    else:
+        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
+
+    return {
+        "groups_scanned": groups_scanned,
+        "total": total,
+        "checkpoint_skipped": checkpoint_skipped,
+        "total_added": total_added,
+    }
 
 def reparse_rejected_posts():
     """
@@ -1540,78 +1727,51 @@ def _replay_text_prefilters(text: str) -> tuple[str, dict] | None:
 
 def replay_all_posts():
     """
-    Local replay, no browser: backs up the sheet to a new tab, clears the data
-    rows, then re-runs every post stored in SQLite (raw_text) through the
-    current code — including a fresh LLM call per post. Useful for testing a
-    prompt/filter/normalization change without re-scraping Facebook (no
-    checkpoint risk, no waiting for scrolling).
+    Read-only, no browser, no sheet, no DB writes: re-runs every post stored
+    in SQLite (raw_text) through the current filters/LLM/normalization and
+    reports which posts' verdict would change vs. what's stored. The tuning
+    workflow after editing a prompt/filter/threshold — see exactly what flips
+    without rebuilding the sheet (which would wipe hand-edited rows) or
+    mutating the DB's cached verdicts.
     Note: the relative date stored at original scan time ("3 days ago") doesn't
     update with time — replay doesn't re-apply the MAX_POST_AGE_DAYS filter, only filters/LLM/normalization.
     """
-    sheet, _ = setup_google_sheet()
-
-    backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    try:
-        sheet.duplicate(new_sheet_name=backup_name)
-        print(f"Backed up current sheet to tab '{backup_name}'.")
-    except Exception as e:
-        print(f"WARNING: could not create backup tab ({e}) — continuing anyway.")
-
-    row_count = len(sheet.get_all_values())
-    if row_count > 1:
-        sheet.batch_clear([f"A2:Z{row_count}"])
-    seen_urls = set()
-
     posts = storage.get_all_posts()
-    print(f"\nReplaying {len(posts)} stored post(s) through the current code (no browser)...")
+    print(f"\nReplaying {len(posts)} stored post(s) through the current code (read-only — no sheet/DB writes)...")
 
-    added = 0
+    changed = []
+    skipped_no_text = 0
     for post in posts:
         url = post["url"]
-        group_url = post["group_url"]
-        post_date = post.get("post_date") or ""
+        old_verdict = post.get("verdict") or "(none)"
         text = post.get("raw_text") or ""
-        if not text or url in seen_urls:
+        if not text:
+            skipped_no_text += 1
             continue
         text = _strip_comment_section(BIDI_RE.sub('', text))
 
         prefiltered = _replay_text_prefilters(text)
         if prefiltered is not None:
-            verdict, analysis = prefiltered
-            storage.record_post(url, group_url, text, verdict, analysis=analysis)
-            continue
+            new_verdict, _ = prefiltered
+        else:
+            data = analyze_post_with_llm(text)
+            if not data:
+                new_verdict = storage.VERDICT_PARSE_FAILED
+            else:
+                new_verdict, fields = _evaluate_post_data(data, text)
+                if new_verdict == storage.VERDICT_ADDED:
+                    dist_meters = fields.get("distance_meters")
+                    if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+                        new_verdict = storage.VERDICT_REJECTED_DISTANCE
 
-        data = analyze_post_with_llm(text)
-        if not data:
-            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED,
-                                 analysis=_analysis_from_fields({}, post_date, storage.VERDICT_PARSE_FAILED))
-            continue
+        if new_verdict != old_verdict:
+            changed.append((url, old_verdict, new_verdict))
+            print(f"    CHANGED: {old_verdict} -> {new_verdict}  {url}")
 
-        verdict, fields = _evaluate_post_data(data, text)
-        if verdict != storage.VERDICT_ADDED:
-            storage.record_post(url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
-            continue
-
-        new_row = _build_row(url, post_date, fields)
-        dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
-            continue
-
-        try:
-            _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED"))
-            seen_urls.add(url)
-            storage.record_post(url, group_url, text, storage.VERDICT_ADDED, data, analysis=_analysis_from_fields(fields, post_date))
-            added += 1
-            price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
-            print(f"    SUCCESS: Apartment added: {fields['rooms_val']} rooms | {price_display} | Address: {fields['address']}")
-        except Exception as e:
-            print(f"    ERROR: writing to sheet: {e}")
-
-    if added:
-        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
-        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings, sorted by post date (newest first).")
-    print(f"\nDone. {added} apartment(s) added from replay (out of {len(posts)} stored posts).")
+    print(f"\nDone. {len(changed)} verdict(s) changed out of {len(posts)} stored posts "
+          f"({skipped_no_text} skipped: raw_text pruned). Nothing was written — "
+          f"re-run the real scraper (--live) to actually commit any newly-matching posts.")
+    return changed
 
 def print_stats():
     counts, month, gmaps_calls = storage.get_stats()
@@ -1636,10 +1796,13 @@ def prune_data():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
     parser.add_argument("--headless", action="store_true", help="Run without UI")
+    parser.add_argument("--live", action="store_true",
+                         help="Commit results: write matches to Google Sheets, record verdicts, dedupe/prune. "
+                              "Default is dry-run (classify + print only, nothing written).")
     parser.add_argument("--reparse-rejected", action="store_true",
                          help="Re-run LLM + filters on stored rejected/failed posts, no browser")
     parser.add_argument("--replay", action="store_true",
-                         help="Backup + clear the sheet, then rebuild it from ALL stored posts via the current code, no browser")
+                         help="Re-run ALL stored posts through the current code and report which verdicts would change, no browser, no sheet/DB writes")
     parser.add_argument("--stats", action="store_true",
                          help="Print verdict counts and Maps usage from the local DB, then exit")
     parser.add_argument("--prune", action="store_true",
@@ -1673,4 +1836,14 @@ if __name__ == "__main__":
     print(f"  Distance to: {DESTINATION_ADDRESS}")
     print("=======================================================")
 
-    run_scraper(headless=args.headless)
+    try:
+        result = run_scraper(headless=args.headless, live=args.live)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
+
+    if result["checkpoint_skipped"] > 0:
+        sys.exit(2)
+    if result["groups_scanned"] == 0:
+        sys.exit(1)
+    sys.exit(0)
