@@ -79,6 +79,14 @@ def init_db():
                 updated_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_city_hints (
+                group_url TEXT PRIMARY KEY,
+                group_name TEXT,
+                cities_json TEXT,
+                updated_at TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -261,6 +269,35 @@ def save_address_cache(
                 geocode_status,
                 now,
             ),
+        )
+
+
+def get_group_city_hint(group_url: str) -> list[str] | None:
+    """Candidate cities inferred from a group's real FB name, last captured at scan time."""
+    if not group_url:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT cities_json FROM group_city_hints WHERE group_url = ?", (group_url,)
+        ).fetchone()
+    if not row or not row["cities_json"]:
+        return None
+    return json.loads(row["cities_json"])
+
+
+def save_group_city_hint(group_url: str, group_name: str, cities: list[str]):
+    if not group_url:
+        return
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO group_city_hints (group_url, group_name, cities_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(group_url) DO UPDATE SET
+                   group_name=excluded.group_name,
+                   cities_json=excluded.cities_json,
+                   updated_at=excluded.updated_at""",
+            (group_url, group_name, json.dumps(cities, ensure_ascii=False), now),
         )
 
 

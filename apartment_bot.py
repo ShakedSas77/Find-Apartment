@@ -39,7 +39,7 @@ from config import (
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP,
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
-    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED
+    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED
 )
 from prompts import get_apartment_prompt_improved
 import storage
@@ -409,7 +409,7 @@ def _warn_if_fee_implausible(label: str, value, max_bimonthly: int):
     if value > max_bimonthly:
         _safe_print(f"\n    WARNING: {label} looks unusually high ({value}) - verify manually.")
 
-def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
+def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str, dict]:
     """
     Runs the threshold checks (rooms/price, including the regex "second chance")
     and all field normalization. Shared between _scan_group and --reparse-rejected
@@ -482,6 +482,7 @@ def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
 
     address = _strip_foreign_letters(data.get("address") or "")
     address = _reject_hallucinated_address(address, text)
+    address = _format_address_display(address, group_url)
     floor = _parse_floor(data.get("floor") or "")
     is_agent = _detect_agent(text, data.get("is_agent"))
     parking = _classify_parking(data.get("parking") or "")
@@ -602,15 +603,186 @@ _CITY_TOKENS_RE = re.compile(r'רמת[\s-]?גן|גבעתיים|תל[\s-]?אבי�
 _ADDRESS_PUNCT_RE = re.compile(r'[",./\-–—_]')
 _POST_DATE_DDMM_RE = re.compile(r'^(\d{1,2})/(\d{1,2})$')
 _HEBREW_RE = re.compile(r'[\u0590-\u05FF]')
-_STREET_HINT_RE = re.compile(r'רחוב|רח׳|שדרות|שד׳|דרך|סמטת|סמטה|כיכר|משעול')
+_STREET_HINT_RE = re.compile(r'רחוב|רח[\'’׳]|שדרות|שד[\'’׳]|דרך|סמטת|סמטה|כיכר|משעול')
 _LANDMARK_HINT_RE = re.compile(r'ליד|בסמוך|קרוב ל|צמוד ל|באזור|בשכונת|שכונת')
+# Street-type word/abbreviation carries no distinguishing signal for dedupe —
+# "רחוב הרצל" and "רח' הרצל" are the same street. LLM output uses the ASCII
+# apostrophe (U+0027), not the Hebrew geresh (׳), so both must be recognized.
+_STREET_TYPE_RE = _STREET_HINT_RE
 
 def _normalize_address_key(address: str) -> str:
     if not address or address == "לא צוין":
         return ""
     norm = _CITY_TOKENS_RE.sub('', address)
+    norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
     return re.sub(r'\s+', ' ', norm).strip()
+
+# ─── Address display formatting ─────────────────────────────────────────────
+# Reshapes the LLM's raw (verbatim-from-post) address into the sheet's
+# preferred display convention: "<street> <number>, <city>". Only fires when
+# an explicit city is present in the text — same "never invent" discipline as
+# _reject_hallucinated_address: a neighborhood or street mentioned without a
+# city isn't guessed at, it's left as-is.
+_CITY_DISPLAY_RES = [
+    (re.compile(r'(?:ב|ל)?רמת[\s-]?גן|(?:ב|ל)?ר["״]?ג\b|(?:ב|ל)?\bרג\b'), "רמת גן"),
+    (re.compile(r'(?:ב|ל)?גבעתיים'), "גבעתיים"),
+    (re.compile(r'(?:ב|ל)?תל[\s-]?אביב'), "תל אביב"),
+]
+_NEIGHBORHOOD_DISPLAY_RE = re.compile(r'^(?:ב)?שכונ(?:ת|ה)\s+(.+)$')
+_CORNER_DISPLAY_RE = re.compile(r'^(.+?)\s+(?:על\s+)?פינת\s+(.+)$')
+_TRAILING_NUMBER_RE = re.compile(r'^(.+?)\s+(\d+[א-ת]?)$')
+
+def _extract_city_and_core(address: str) -> tuple[str, str] | None:
+    """Finds an explicit city token in the address text. Returns (remaining core, canonical city), or None."""
+    for city_re, canonical in _CITY_DISPLAY_RES:
+        m = city_re.search(address)
+        if m:
+            core = address[:m.start()] + address[m.end():]
+            # Edge-trim only (not a global punctuation substitution like
+            # _ADDRESS_PUNCT_RE): a Hebrew acronym street name can carry an
+            # internal גרשיים ("הרא"ה", "ל"ה"), and an already-formatted
+            # corner keeps its internal " - " separator. Stripping those
+            # unconditionally would corrupt real content and break
+            # idempotency (re-running this on its own prior output must be
+            # a no-op).
+            core = re.sub(r'\s+', ' ', core).strip(' ,./-–—_\t')
+            return core, canonical
+    return None
+
+def _format_core_with_city(core: str, city: str) -> str:
+    """Shapes address text (city already removed) plus a resolved city into the display format. Empty string if unusable."""
+    if not core or not _HEBREW_RE.search(core):
+        return ""
+
+    m = _NEIGHBORHOOD_DISPLAY_RE.match(core)
+    if m:
+        neighborhood = m.group(1).strip()
+        return f"{neighborhood}, {city}" if neighborhood else ""
+
+    m = _CORNER_DISPLAY_RE.match(core)
+    if m:
+        street_a = _STREET_HINT_RE.sub('', m.group(1)).strip()
+        street_b = _STREET_HINT_RE.sub('', m.group(2)).strip()
+        return f"{street_a} - {street_b}, {city}" if street_a and street_b else ""
+
+    street_core = _STREET_HINT_RE.sub('', core, count=1).strip()
+    if not street_core:
+        return ""
+
+    m = _TRAILING_NUMBER_RE.match(street_core)
+    if m:
+        street, number = m.group(1).strip(), m.group(2).strip()
+        return f"{street} {number}, {city}" if street else ""
+
+    return f"{street_core}, {city}"
+
+def _extract_candidate_cities(group_name: str) -> list[str]:
+    """Distinct canonical cities mentioned in a FB group's real display name (e.g. 'דירות רמת גן/גבעתיים')."""
+    cities = []
+    for city_re, canonical in _CITY_DISPLAY_RES:
+        if city_re.search(group_name) and canonical not in cities:
+            cities.append(canonical)
+    return cities
+
+def _gmaps_result_matches_city(result: dict, city: str) -> bool:
+    formatted = result.get("formatted_address", "")
+    result_city = _gmaps_result_city(result)
+    return city in formatted or city == result_city or city in result_city
+
+def _resolve_ambiguous_city(street_core: str, candidate_cities: list[str]) -> str | None:
+    """
+    Resolves which of a group's candidate cities a street actually belongs to.
+    1 candidate -> trusted directly, no Maps call. >=2 -> geocode each to see
+    which ones the street exists in; if more than one does, the walking-
+    distance-closer one to DESTINATION_ADDRESS wins. Never guesses: returns
+    None (caller falls back to the address unchanged) when nothing resolves
+    confidently or Maps is unavailable/over quota.
+    """
+    if not candidate_cities:
+        return None
+    if len(candidate_cities) == 1:
+        return candidate_cities[0]
+
+    if not GMAPS_VALIDATE_ADDRESSES:
+        return None
+
+    hits = []  # (city, formatted_address)
+    for city in candidate_cities:
+        over_cap, _ = _handle_gmaps_cap_if_needed()
+        if over_cap:
+            break
+        query = f"{street_core}, {city}, ישראל"
+        try:
+            storage.increment_gmaps_usage()
+            results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
+        except Exception as e:
+            _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
+            continue
+        if not results:
+            continue
+        best = results[0]
+        if _gmaps_has_street_precision(best) and _gmaps_result_matches_city(best, city):
+            hits.append((city, best.get("formatted_address", "")))
+
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0][0]
+
+    best_city, best_meters = None, float("inf")
+    for city, formatted in hits:
+        over_cap, _ = _handle_gmaps_cap_if_needed()
+        if over_cap:
+            break
+        try:
+            storage.increment_gmaps_usage()
+            result = _with_retries(lambda: gmaps_client.distance_matrix(
+                origins=formatted, destinations=DESTINATION_ADDRESS, mode="walking", language="he", region="il",
+            ))
+            element = result["rows"][0]["elements"][0]
+            if element.get("status") == "OK" and element["distance"]["value"] < best_meters:
+                best_meters = element["distance"]["value"]
+                best_city = city
+        except Exception as e:
+            _safe_print(f"\n    [Google Distance Matrix API Error]: {_redact_api_key(str(e))}")
+            continue
+
+    return best_city or hits[0][0]
+
+def _format_address_display(address: str, group_url: str | None = None) -> str:
+    """
+    "רחוב המעלות 12 בגבעתיים" -> "המעלות 12, גבעתיים"
+    "רחוב הירדן רמת גן" -> "הירדן, רמת גן" (no number)
+    "שכונת מרום נווה ברמת גן" -> "מרום נווה, רמת גן" (neighborhood, not a street)
+    "רחוב אלימלך על פינת הרצל ברמת גן" -> "אלימלך - הרצל, רמת גן" (corner)
+    When no city is stated at all, falls back to resolving one from the
+    scanning group's own candidate cities (see _resolve_ambiguous_city) for a
+    plain street address — corner/neighborhood phrasing without a city is out
+    of scope (too ambiguous to geocode as a single street query). Falls back
+    to the address unchanged whenever nothing resolves confidently — never
+    guesses a city.
+    """
+    if not address:
+        return address
+
+    found = _extract_city_and_core(address)
+    if found:
+        core, city = found
+        return _format_core_with_city(core, city) or address
+
+    if group_url and not _NEIGHBORHOOD_DISPLAY_RE.match(address.strip()) and not _CORNER_DISPLAY_RE.search(address):
+        candidates = storage.get_group_city_hint(group_url)
+        if candidates:
+            street_core = _STREET_HINT_RE.sub('', address, count=1).strip()
+            m = _TRAILING_NUMBER_RE.match(street_core)
+            street_only = m.group(1).strip() if m else street_core
+            if street_only and _HEBREW_RE.search(street_only):
+                city = _resolve_ambiguous_city(street_only, candidates)
+                if city:
+                    return _format_core_with_city(street_core, city) or address
+
+    return address
 
 def _infer_post_date(date_str: str, now: datetime | None = None) -> datetime | None:
     """
@@ -745,11 +917,80 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
 
     fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
 
-    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
-    _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{len(rows) + 1}"]))
-    if fresh_rows:
-        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(fresh_rows) + 1}", values=fresh_rows))
+    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows)
     return duplicates_removed, stale_removed, len(fresh_rows)
+
+def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list]):
+    """Shared full-rewrite helper: clears the data range (header kept) and writes new_rows back."""
+    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
+    _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
+    if new_rows:
+        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(new_rows) + 1}", values=new_rows))
+
+_DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
+
+def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
+    """
+    Navigates to a post URL and checks for Facebook's generic "This content
+    isn't available right now" placeholder — shown when a post was deleted,
+    or its visibility was changed to exclude this account. Confirms with one
+    reload before concluding it's really gone, so a transient load hiccup
+    can't wipe a real listing.
+    """
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        return False
+    page.wait_for_timeout(2000)
+    _handle_checkpoint_if_present(page, url, label, headless)
+    if not _is_visible(page.get_by_text(_DEAD_POST_RE)):
+        return False
+
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+    except Exception:
+        return True
+    return _is_visible(page.get_by_text(_DEAD_POST_RE))
+
+def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
+    """
+    Beginning-of-run pass: visits every URL already in the sheet and removes
+    rows whose post Facebook now shows as unavailable (deleted, or visibility
+    changed) — such a link is a dead lead that would otherwise sit in the
+    sheet until MAX_POST_AGE_DAYS ages it out on its own. live=False checks
+    and reports what would be removed without writing, same dry-run contract
+    as the rest of the pipeline. Local DB rows are untouched — same reasoning
+    as stale-row pruning in dedupe_and_sort_sheet: the sheet is just the
+    "current" view, should_skip() only ever reads verdict/attempts.
+    """
+    data = sheet.get_all_values()
+    if len(data) <= 1:
+        return 0
+    rows = data[1:]
+
+    dead_indices = []
+    for i, row in enumerate(rows):
+        url = row[0] if row else ""
+        if not url:
+            continue
+        if _is_post_removed(page, url, headless, "Dead-link check"):
+            dead_indices.append(i)
+            _safe_print(f"    Dead link found (post no longer available): {url}")
+        time.sleep(random.uniform(2, 5))
+
+    if not dead_indices:
+        print("Dead-link check: 0 removed listing(s) found.")
+        return 0
+
+    if not live:
+        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Pass --live to commit.")
+        return len(dead_indices)
+
+    keep_rows = [row for i, row in enumerate(rows) if i not in dead_indices]
+    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows)
+    print(f"Removed {len(dead_indices)} dead listing(s) from the sheet (post no longer available).")
+    return len(dead_indices)
 
 # FB serves the same group post under multiple URL shapes — /posts/<id> and
 # /permalink/<id> are interchangeable, and www/m/web hosts all resolve to the
@@ -1157,6 +1398,17 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         _handle_checkpoint_if_present(page, target_url, group_label, headless)
         _dismiss_popups(page)
 
+        # Captures the group's real display name so a no-city address can later be
+        # resolved to a candidate city (see _resolve_ambiguous_city) — page.title()
+        # is far more stable across FB DOM changes than a CSS selector, and costs
+        # nothing extra since the page is already loaded.
+        try:
+            group_title = page.title()
+            if group_title:
+                storage.save_group_city_hint(target_url, group_title, _extract_candidate_cities(group_title))
+        except Exception:
+            pass
+
         _safe_print(f"[{group_label}] Scrolling ({SCROLL_COUNT} times)...")
         for _ in range(SCROLL_COUNT):
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
@@ -1356,7 +1608,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                                      analysis=_analysis_from_fields({}, fb_post_date, storage.VERDICT_PARSE_FAILED))
                 return
 
-            verdict, fields = _evaluate_post_data(data, text)
+            verdict, fields = _evaluate_post_data(data, text, target_url)
             if verdict == storage.VERDICT_REJECTED_ROOMS:
                 _safe_print(f"    [{group_label}] Skipped: Room count is not suitable ({fields['rooms_val']}).")
                 storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
@@ -1550,6 +1802,9 @@ def run_scraper(headless: bool = False, live: bool = False):
             else:
                 print("Already logged into Facebook. Skipping manual login.")
 
+        if PRUNE_DEAD_LINKS_ENABLED:
+            _prune_dead_links(page, sheet, headless, live)
+
         if sequential_mode:
             # Sequential mode: no storage_state at all — scans every group in
             # sequence on the same page inside the original context, to
@@ -1668,7 +1923,7 @@ def reparse_rejected_posts():
             print(f"    Still failing to parse: {url}")
             continue
 
-        verdict, fields = _evaluate_post_data(data, text)
+        verdict, fields = _evaluate_post_data(data, text, group_url)
         if verdict != storage.VERDICT_ADDED:
             storage.record_post(url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post.get("post_date") or "", verdict))
             print(f"    Still {verdict}: {url}")
@@ -1744,6 +1999,7 @@ def replay_all_posts():
     for post in posts:
         url = post["url"]
         old_verdict = post.get("verdict") or "(none)"
+        group_url = post.get("group_url") or ""
         text = post.get("raw_text") or ""
         if not text:
             skipped_no_text += 1
@@ -1758,7 +2014,7 @@ def replay_all_posts():
             if not data:
                 new_verdict = storage.VERDICT_PARSE_FAILED
             else:
-                new_verdict, fields = _evaluate_post_data(data, text)
+                new_verdict, fields = _evaluate_post_data(data, text, group_url)
                 if new_verdict == storage.VERDICT_ADDED:
                     dist_meters = fields.get("distance_meters")
                     if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:

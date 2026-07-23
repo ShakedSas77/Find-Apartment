@@ -57,6 +57,9 @@ INCLUDE_PRICE_UNKNOWN = False
 # internally uses the full date.
 MAX_POST_AGE_DAYS = 21
 
+# Scheduled-run log files (logs/run_*.log) older than this get deleted by run_scheduled.bat.
+LOG_RETENTION_DAYS = 14
+
 # ─── Pre-filters (before the AI) ──────────────────────────────────────────────────
 # The post must contain at least one of these phrases to pass the check (saves a lot of time)
 ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|(?<!\d)3\s*וחצי\s*חד'
@@ -113,6 +116,17 @@ GMAPS_ON_CAP = "skip"
 SCROLL_COUNT = 20
 SCROLL_DELAY_MS = 1000
 
+# ─── Anti-detection ─────────────────────────────────────────────────────────────
+# Applies tf-playwright-stealth patches to every page (hides navigator.webdriver,
+# headless UA artifacts, missing chrome.runtime). Kill switch in case a stealth
+# patch ever breaks Facebook rendering — the bot runs fine without it.
+STEALTH_ENABLED = True
+
+# At the start of every run, visit every URL already in the sheet and remove any
+# whose post Facebook now shows as unavailable (deleted, or visibility changed).
+# Kill switch in case this ever needs to be turned off without a code change.
+PRUNE_DEAD_LINKS_ENABLED = True
+
 # ─── Concurrency ────────────────────────────────────────────────────────────────
 # How many groups scan simultaneously. Higher = faster, but also higher risk of a
 # block/CAPTCHA: parallel mode (>1) opens a separate browser+context per group with
@@ -120,7 +134,7 @@ SCROLL_DELAY_MS = 1000
 # fingerprint than the real profile. If checkpoints start happening, the safest
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
-MAX_CONCURRENT_GROUPS = 4
+MAX_CONCURRENT_GROUPS = 8
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [
