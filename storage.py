@@ -79,6 +79,14 @@ def init_db():
                 updated_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_city_hints (
+                group_url TEXT PRIMARY KEY,
+                group_name TEXT,
+                cities_json TEXT,
+                updated_at TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -264,6 +272,35 @@ def save_address_cache(
         )
 
 
+def get_group_city_hint(group_url: str) -> list[str] | None:
+    """Candidate cities inferred from a group's real FB name, last captured at scan time."""
+    if not group_url:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT cities_json FROM group_city_hints WHERE group_url = ?", (group_url,)
+        ).fetchone()
+    if not row or not row["cities_json"]:
+        return None
+    return json.loads(row["cities_json"])
+
+
+def save_group_city_hint(group_url: str, group_name: str, cities: list[str]):
+    if not group_url:
+        return
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO group_city_hints (group_url, group_name, cities_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(group_url) DO UPDATE SET
+                   group_name=excluded.group_name,
+                   cities_json=excluded.cities_json,
+                   updated_at=excluded.updated_at""",
+            (group_url, group_name, json.dumps(cities, ensure_ascii=False), now),
+        )
+
+
 def get_reparse_candidates() -> list[dict]:
     """Posts rejected on price/rooms/distance, that failed to parse, or with no stated price — reparse-rejected candidates."""
     with _lock, _connect() as conn:
@@ -272,6 +309,22 @@ def get_reparse_candidates() -> list[dict]:
             (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN, VERDICT_REJECTED_DISTANCE),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_added_listing_data() -> dict[str, dict]:
+    """
+    url -> {address, price_val, rooms_val} for every added listing, as recorded
+    at scan time. Used by dedupe_and_sort_sheet() to key duplicates off the
+    bot's own original parse rather than the live sheet cells, so a manual
+    edit to a sheet row (e.g. fixing a price) doesn't stop a later crosspost
+    of the same listing from being recognized as a duplicate.
+    """
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, address, price_val, rooms_val FROM posts WHERE verdict = ?",
+            (VERDICT_ADDED,),
+        ).fetchall()
+    return {row["url"]: dict(row) for row in rows}
 
 
 def get_all_posts() -> list[dict]:
