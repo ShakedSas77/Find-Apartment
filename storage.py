@@ -91,6 +91,12 @@ def init_db():
                 updated_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_scan_state (
+                group_url TEXT PRIMARY KEY,
+                last_scanned_at TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -326,6 +332,32 @@ def save_group_city_hint(group_url: str, group_name: str, cities: list[str]):
                    cities_json=excluded.cities_json,
                    updated_at=excluded.updated_at""",
             (group_url, group_name, json.dumps(cities, ensure_ascii=False), now),
+        )
+
+
+def get_last_scan_time(group_url: str) -> datetime | None:
+    """When this group was last fully scanned, so a scan can stop scrolling
+    once it reaches posts already covered last time."""
+    if not group_url:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT last_scanned_at FROM group_scan_state WHERE group_url = ?", (group_url,)
+        ).fetchone()
+    if not row or not row["last_scanned_at"]:
+        return None
+    return datetime.fromisoformat(row["last_scanned_at"])
+
+
+def set_last_scan_time(group_url: str, when: datetime):
+    if not group_url:
+        return
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO group_scan_state (group_url, last_scanned_at)
+               VALUES (?, ?)
+               ON CONFLICT(group_url) DO UPDATE SET last_scanned_at=excluded.last_scanned_at""",
+            (group_url, when.isoformat()),
         )
 
 

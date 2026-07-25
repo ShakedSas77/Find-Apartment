@@ -122,8 +122,19 @@ GMAPS_MONTHLY_CAP = 9000
 GMAPS_ON_CAP = "skip"
 
 # ─── Scrolling ──────────────────────────────────────────────────────────────────
+# Hard upper bound on scroll iterations per group — a safety cap for when a group's
+# post dates are unavailable/unparseable and early-stop can never trigger, not the
+# normal case (see MIN_SCROLLS_BEFORE_EARLY_STOP / CONSECUTIVE_OLD_POSTS_TO_STOP).
 SCROLL_COUNT = 20
-SCROLL_DELAY_MS = 1000
+SCROLL_DELAY_MS = 500
+# Floor on scroll iterations before early-stop is allowed to trigger, so a single
+# old/pinned post near the top of the feed can't cut a scan short.
+MIN_SCROLLS_BEFORE_EARLY_STOP = 3
+# How many old posts in a row (older than MAX_POST_AGE_DAYS or the group's last scan
+# time, whichever is more recent) it takes during scrolling to conclude we've scrolled
+# past all new content. Tolerance against pinned/sponsored posts breaking chronological
+# order — a fallback safety net independent of the group feed's sort mode.
+CONSECUTIVE_OLD_POSTS_TO_STOP = 5
 
 # ─── Anti-detection ─────────────────────────────────────────────────────────────
 # Applies tf-playwright-stealth patches to every page (hides navigator.webdriver,
@@ -143,7 +154,7 @@ PRUNE_DEAD_LINKS_ENABLED = True
 # fingerprint than the real profile. If checkpoints start happening, the safest
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
-MAX_CONCURRENT_GROUPS = 8
+MAX_CONCURRENT_GROUPS = 32
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [

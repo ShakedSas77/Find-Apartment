@@ -33,6 +33,7 @@ from config import (
     CREDENTIALS_FILE, TARGET_URLS,
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     SCROLL_COUNT, SCROLL_DELAY_MS, LOCATIONS,
+    MIN_SCROLLS_BEFORE_EARLY_STOP, CONSECUTIVE_OLD_POSTS_TO_STOP,
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS,
     GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_MODEL, LOGIN_MAX_ATTEMPTS,
@@ -1218,6 +1219,25 @@ def _canonical_post_url(url: str) -> str:
         return f"https://www.facebook.com/groups/{m.group(1)}/posts/{m.group(2)}/"
     return url  # unknown shape: pass through unchanged, never break dedupe on odd URLs
 
+# 7-selector fallback chain — FB DOM changes without warning, last resort:
+# aria-labelledby+aria-describedby holds even when role="article" is absent
+_ARTICLE_SELECTORS = [
+    'div[role="article"]',
+    'div[aria-posinset]',
+    'div.x1yztbdb',
+    'div[data-ad-preview="message"]',
+    'div[data-pagelet^="GroupFeed"] > div > div',
+    'div[role="feed"] > div > div',
+    'div[aria-labelledby][aria-describedby]',
+]
+
+def _find_articles(page) -> list:
+    for sel in _ARTICLE_SELECTORS:
+        elements = page.locator(sel).all()
+        if len(elements) > 0:
+            return elements
+    return []
+
 def extract_post_info(article) -> tuple[str, str]:
     try:
         links = article.locator('a[role="link"]').all()
@@ -1540,6 +1560,38 @@ def _dismiss_popups(page):
         except Exception:
             pass
 
+
+def _ensure_sorted_by_new_posts(page, group_label: str):
+    """
+    Group feeds default to "Most relevant" sort (falls back to "Recent
+    activity" — comment activity, not post date — when nothing stands out),
+    either of which can surface bumped/commented-on posts out of chronological
+    order. Switching to "New posts" makes the feed strictly newest-first,
+    which is what makes it safe to stop scrolling once old posts start
+    appearing (see the scroll loop in _scan_group_page). Verified against live
+    FB DOM 2026-07-25: the sort control is a role="button" whose visible text
+    is the current selection ("Most relevant"/"Recent activity"/"New posts"),
+    and the opened menu's options are role="menuitemradio", not "menuitem".
+    Best-effort: any failure just leaves the default sort, and
+    CONSECUTIVE_OLD_POSTS_TO_STOP's tolerance covers that case too.
+    """
+    try:
+        sort_button = page.locator(
+            '[role="button"]:has-text("Most relevant"), '
+            '[role="button"]:has-text("Recent activity"), '
+            '[role="button"]:has-text("New posts")'
+        ).first
+        if not sort_button.is_visible(timeout=1500):
+            return
+        if "New posts" in sort_button.inner_text():
+            return
+        sort_button.click(timeout=1500)
+        page.locator('[role="menuitemradio"]:has-text("New posts")').first.click(timeout=1500)
+        page.wait_for_timeout(1500)
+        _safe_print(f"[{group_label}] Switched sort to New posts.")
+    except Exception:
+        pass
+
 # ─── Core Scraper ────────────────────────────────────────────────────────
 
 def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headless: bool):
@@ -1717,8 +1769,19 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         except Exception:
             pass
 
-        _safe_print(f"[{group_label}] Scrolling ({SCROLL_COUNT} times)...")
-        for _ in range(SCROLL_COUNT):
+        _ensure_sorted_by_new_posts(page, group_label)
+
+        scan_started_at = datetime.now()
+        last_scan_time = storage.get_last_scan_time(target_url)
+        age_cutoff = datetime.now() - timedelta(days=MAX_POST_AGE_DAYS)
+        effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
+
+        _safe_print(f"[{group_label}] Scrolling (up to {SCROLL_COUNT} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
+        seen_article_count = 0
+        consecutive_old = 0
+        scrolls_done = 0
+        for i in range(SCROLL_COUNT):
+            scrolls_done = i + 1
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
             # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
             if random.random() < 0.25:
@@ -1729,7 +1792,31 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             page.mouse.wheel(0, random.randint(3000, 5000))
             jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
             page.wait_for_timeout(jittered_delay)
-        _safe_print(f"[{group_label}] Done scrolling.")
+
+            try:
+                current_articles = _find_articles(page)
+            except Exception:
+                current_articles = []
+            new_articles = current_articles[seen_article_count:]
+            seen_article_count = len(current_articles)
+
+            for article in new_articles:
+                try:
+                    _, fb_post_date = extract_post_info(article)
+                except Exception:
+                    continue
+                post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+                if post_dt is None:
+                    continue  # inconclusive (comment/unparseable) — leave streak unchanged
+                if post_dt < effective_cutoff:
+                    consecutive_old += 1
+                else:
+                    consecutive_old = 0
+
+            if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
+                _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
+                break
+        _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
 
         # Click "See more" to reveal the full text of long posts
         for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
@@ -1743,24 +1830,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         page.wait_for_timeout(1500)
 
         # Dynamic Selectors fallback loop
-        selectors = [
-            'div[role="article"]',
-            'div[aria-posinset]',
-            'div.x1yztbdb',
-            'div[data-ad-preview="message"]',
-            'div[data-pagelet^="GroupFeed"] > div > div',
-            'div[role="feed"] > div > div',
-            # Last resort: FB post containers carry aria-labelledby (author) +
-            # aria-describedby (body) even when role="article" is absent
-            'div[aria-labelledby][aria-describedby]'
-        ]
-
-        raw_articles = []
-        for sel in selectors:
-            elements = page.locator(sel).all()
-            if len(elements) > 0:
-                raw_articles = elements
-                break
+        raw_articles = _find_articles(page)
 
         # Process articles
         articles_data = []
@@ -1942,6 +2012,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     stats["added"] -= len(pending_rows)
         elif pending_rows:
             _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
+
+        storage.set_last_scan_time(target_url, scan_started_at)
     except GmapsQuotaHalted:
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
