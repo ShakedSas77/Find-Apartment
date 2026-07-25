@@ -618,7 +618,6 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         fields["address"],
         datetime.now().strftime("%Y-%m-%d %H:%M"),
         scoring.compute_fit_score(fields),
-        "⭐0 🗑0",  # vote tally — kept current by bot_listener.py as Telegram votes come in
     ]
     return [_sheet_safe_cell(v) for v in row]
 
