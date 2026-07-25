@@ -26,11 +26,12 @@ VERDICT_PREFILTERED = "prefiltered"
 VERDICT_PARSE_FAILED = "parse_failed"
 VERDICT_PRICE_UNKNOWN = "price_unknown"
 VERDICT_DUPLICATE_LISTING = "duplicate_listing"
+VERDICT_DUPLICATE_TEXT = "duplicate_text"
 
 ALL_VERDICTS = [
     VERDICT_ADDED, VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS,
     VERDICT_REJECTED_DISTANCE, VERDICT_PREFILTERED, VERDICT_PARSE_FAILED,
-    VERDICT_PRICE_UNKNOWN, VERDICT_DUPLICATE_LISTING,
+    VERDICT_PRICE_UNKNOWN, VERDICT_DUPLICATE_LISTING, VERDICT_DUPLICATE_TEXT,
 ]
 
 # Max LLM attempts for a post that failed to parse, before giving up on it permanently
@@ -103,10 +104,13 @@ def init_db():
             "post_date": "ALTER TABLE posts ADD COLUMN post_date TEXT",
             "reject_reason": "ALTER TABLE posts ADD COLUMN reject_reason TEXT",
             "model_used": "ALTER TABLE posts ADD COLUMN model_used TEXT",
+            "text_hash": "ALTER TABLE posts ADD COLUMN text_hash TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
                 conn.execute(statement)
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
 
 
 def should_skip(url: str) -> bool:
@@ -121,6 +125,24 @@ def should_skip(url: str) -> bool:
     if row["verdict"] != VERDICT_PARSE_FAILED:
         return True
     return row["attempts"] >= MAX_PARSE_ATTEMPTS
+
+
+def find_by_text_hash(text_hash: str, exclude_url: str | None = None) -> dict | None:
+    """
+    Finds an already-processed post (any run, any verdict except parse_failed
+    — a prior parse failure shouldn't stop a fresh LLM attempt) with the same
+    normalized-text hash, i.e. the same listing text reposted verbatim to a
+    different group/URL. Lets the scan skip the LLM call entirely for a
+    text-identical crosspost instead of paying for it twice.
+    """
+    if not text_hash:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT url, verdict FROM posts WHERE text_hash = ? AND verdict != ? AND url != ? LIMIT 1",
+            (text_hash, VERDICT_PARSE_FAILED, exclude_url or ""),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def record_post(
@@ -154,7 +176,8 @@ def record_post(
                        distance_meters=?,
                        post_date=?,
                        reject_reason=?,
-                       model_used=?
+                       model_used=?,
+                       text_hash=?
                    WHERE url=?""",
                 (
                     group_url,
@@ -172,6 +195,7 @@ def record_post(
                     analysis.get("post_date"),
                     analysis.get("reject_reason"),
                     analysis.get("model_used"),
+                    analysis.get("text_hash"),
                     url,
                 ),
             )
@@ -181,9 +205,9 @@ def record_post(
                 """INSERT INTO posts (
                        url, group_url, raw_text, parsed_json, verdict, attempts, first_seen, last_processed,
                        price_val, rooms_val, address, address_confidence, distance_text, distance_meters,
-                       post_date, reject_reason, model_used
+                       post_date, reject_reason, model_used, text_hash
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     url,
                     group_url,
@@ -202,6 +226,7 @@ def record_post(
                     analysis.get("post_date"),
                     analysis.get("reject_reason"),
                     analysis.get("model_used"),
+                    analysis.get("text_hash"),
                 ),
             )
 
@@ -314,15 +339,17 @@ def get_reparse_candidates() -> list[dict]:
 
 def get_added_listing_data() -> dict[str, dict]:
     """
-    url -> {address, price_val, rooms_val} for every added listing, as recorded
-    at scan time. Used by dedupe_and_sort_sheet() to key duplicates off the
-    bot's own original parse rather than the live sheet cells, so a manual
-    edit to a sheet row (e.g. fixing a price) doesn't stop a later crosspost
-    of the same listing from being recognized as a duplicate.
+    url -> {address, price_val, rooms_val, distance_text} for every added
+    listing, as currently recorded. Used by dedupe_and_sort_sheet() to key
+    duplicates off the bot's own original parse rather than the live sheet
+    cells (so a manual edit to a sheet row, e.g. fixing a price, doesn't stop
+    a later crosspost from being recognized as a duplicate), and to sync the
+    sheet's address/distance cells if either was recomputed after the row was
+    first added (e.g. a corner-address enrichment or a distance fix).
     """
     with _lock, _connect() as conn:
         rows = conn.execute(
-            "SELECT url, address, price_val, rooms_val FROM posts WHERE verdict = ?",
+            "SELECT url, address, price_val, rooms_val, distance_text FROM posts WHERE verdict = ?",
             (VERDICT_ADDED,),
         ).fetchall()
     return {row["url"]: dict(row) for row in rows}

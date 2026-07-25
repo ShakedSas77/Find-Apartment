@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -114,6 +115,65 @@ def _strip_comment_section(text: str) -> str:
     match = _COMMENT_SECTION_RE.search(text)
     return text[:match.start()].strip() if match else text
 
+# Strips the volatile per-repost header (author name, online-status/"Follow"
+# UI noise, relative timestamp) up through FB's constant "Shared with Public
+# group" marker — so the same listing crossposted to multiple groups
+# normalizes to the same text even though each post's own header differs.
+_POST_HEADER_RE = re.compile(r'^.*?Shared with Public group', re.DOTALL)
+# Below this length a normalized text is too short/generic to trust as a
+# dedup signal — collision risk on short strings isn't worth the LLM-call
+# savings, and a false-positive here would silently drop a real listing.
+_TEXT_DEDUP_MIN_LEN = 40
+# Israeli mobile (05X) and landline/VoIP (0[23489]/07[2-9]) numbers, with or
+# without a separator — a poster's own contact number doesn't change between
+# reposts even when they reword the ad text by hand (confirmed against a real
+# crosspost pair in the DB: same phones, genuinely different wording).
+_PHONE_RE = re.compile(r'0(?:5\d|7[2-9])[-\s]?\d{7}|0[23489][-\s]?\d{7}')
+_ROOMS_EXTRACT_RE = re.compile(r'([1-9](?:\.5)?)\s*חד')
+
+def _normalize_dedup_text(text: str) -> str:
+    core = _POST_HEADER_RE.sub('', text, count=1)
+    return re.sub(r'\s+', ' ', core).strip()
+
+def _phone_price_rooms_fingerprint(text: str) -> str:
+    """
+    Phone number(s) + price + room count, when all three are present — far
+    more robust to manual rewording between crossposts than comparing the ad
+    text itself, since a poster's contact number/price/room count stay fixed
+    even when the description around them gets reworded. Combining all three
+    (not phone alone) protects against the real risk of one landlord/agent
+    posting multiple DIFFERENT apartments under the same number — those will
+    very likely differ in price or room count, so they won't collide here.
+    """
+    phones = sorted(set(re.sub(r'[-\s]', '', m) for m in _PHONE_RE.findall(text)))
+    if not phones:
+        return ""
+    price_match = _PRICE_CONTEXT_RE.search(text)
+    price = (price_match.group(1) or price_match.group(2)) if price_match else None
+    rooms_match = _ROOMS_EXTRACT_RE.search(text)
+    rooms = rooms_match.group(1) if rooms_match else None
+    if not price or not rooms:
+        return ""
+    return f"{'|'.join(phones)}#{price}#{rooms}"
+
+def _text_dedup_hash(text: str) -> str:
+    """
+    Fingerprint used to catch a crosspost of the same listing to a different
+    group before it burns an LLM call. Prefers the phone+price+rooms
+    fingerprint (survives hand-rewording of the ad text); falls back to the
+    header-stripped exact text when no phone/price/rooms combination is
+    found. Both are deliberately conservative about false positives: a
+    missed duplicate just costs one extra LLM call (no regression), while a
+    wrong match would silently drop a real, distinct listing.
+    """
+    fingerprint = _phone_price_rooms_fingerprint(text)
+    if fingerprint:
+        return hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()
+    normalized = _normalize_dedup_text(text)
+    if len(normalized) < _TEXT_DEDUP_MIN_LEN:
+        return ""
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
 # Price "second chance" — only a number found within ~25 chars of a price
 # word/marker, not any 4-5 digit number in the text (so it doesn't grab a phone
 # number, someone else's comment, etc.). The \D (non-digit) gap blocks crossing
@@ -130,6 +190,8 @@ _PRICE_CONTEXT_RE = re.compile(
 _print_lock = threading.Lock()
 _sheet_lock = threading.Lock()  # guards seen_urls reads/writes AND sheet writes together
 _gemini_lock = threading.Lock()
+_text_dedup_lock = threading.Lock()
+_run_text_hashes: dict[str, str] = {}  # text_hash -> claiming url, this run only (fresh per process)
 _checkpoint_lock = threading.Lock()
 _resume_event = threading.Event()
 _resume_event.set()  # set = running; cleared = paused for a checkpoint on some tab
@@ -996,11 +1058,19 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     # have been folded into the DB record via _maybe_enrich_duplicate_address
     # even though its own row was never added — sync the kept row's כתובת
     # cell from that current DB value so the enrichment actually surfaces.
+    # Distance is synced the same way: a formatting/geocoding-precision fix
+    # can let a previously-skipped address resolve a real distance after the
+    # row was already added, and this is the one place that reconciles the
+    # sheet with the DB's current state rather than what was true at add time.
     for row in deduped_rows:
         url = row[0] if row else ""
         db_row = db_data.get(url)
-        if db_row and db_row.get("address") and len(row) > 13:
+        if not db_row:
+            continue
+        if db_row.get("address") and len(row) > 13:
             row[13] = db_row["address"]
+        if db_row.get("distance_text") and len(row) > 3:
+            row[3] = db_row["distance_text"]
 
     fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[12] if len(r) > 12 else "")]
     stale_removed = len(deduped_rows) - len(fresh_rows)
@@ -1318,7 +1388,12 @@ def _gmaps_result_city(result: dict) -> str:
 
 def _gmaps_has_street_precision(result: dict) -> bool:
     types = set(result.get("types", []))
-    if "street_address" in types or "premise" in types:
+    # "intersection" (a corner query, e.g. "X פינת Y") geocodes to an exact
+    # lat/lng just like a street_address does — at least as precise for
+    # walking-distance purposes, not the vague "general area" result this
+    # check exists to filter out. Confirmed via a live geocode of a real
+    # corner address: Google returns type=intersection with a precise point.
+    if "street_address" in types or "premise" in types or "intersection" in types:
         return True
     component_types = {
         t
@@ -1791,6 +1866,30 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 else:
                     _safe_print(f"    [{group_label}] Pre-filtered: No mention of matching room count.\n      URL: {post_url}\n      Text: {clean_snip}...")
                 storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
+                stats["prefiltered"] += 1
+                continue
+
+            # --- Pre-filter: same listing text already seen (this run or a past one) ---
+            # Crossposts to multiple groups are common and otherwise reach the LLM
+            # once per group even though the text is identical — this catches that
+            # before spending a call. Claiming the hash happens under the lock so
+            # concurrent group threads scanning the same crosspost at once still
+            # only let the first one through.
+            text_hash = _text_dedup_hash(text)
+            dup_of_url = None
+            if text_hash:
+                with _text_dedup_lock:
+                    dup_of_url = _run_text_hashes.get(text_hash)
+                    if dup_of_url is None:
+                        _run_text_hashes[text_hash] = post_url
+                if dup_of_url is None:
+                    existing = storage.find_by_text_hash(text_hash, exclude_url=post_url)
+                    if existing:
+                        dup_of_url = existing["url"]
+            if dup_of_url:
+                _safe_print(f"    [{group_label}] Pre-filtered: duplicate text of an already-processed post ({dup_of_url}).")
+                storage.record_post(post_url, target_url, text, storage.VERDICT_DUPLICATE_TEXT,
+                                     analysis={"text_hash": text_hash, "reject_reason": f"duplicate_text_of:{dup_of_url}"})
                 stats["prefiltered"] += 1
                 continue
 
