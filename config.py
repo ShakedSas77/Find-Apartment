@@ -160,8 +160,43 @@ MAX_CONCURRENT_GROUPS = 32
 SHEET_HEADERS = [
     "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה (ק\"מ)", "תאריך כניסה",
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
-    "תאריך פרסום", "כתובת", "זמן סריקה"
+    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה"
 ]
+
+# ─── Fit score ──────────────────────────────────────────────────────────────────
+# compute_fit_score() (scoring.py) weights, must sum to 100.
+SCORE_WEIGHT_PRICE = 40
+SCORE_WEIGHT_DISTANCE = 40
+SCORE_WEIGHT_AMENITIES = 20
+
+# Agent listings carry a one-time broker's fee (typically one month's rent) the
+# private-listing price doesn't. Amortized over a year of lease and folded into the
+# *scoring* price only (not the displayed price) so agent vs. private listings are
+# compared on a fairer effective-monthly-cost basis.
+AGENT_FEE_AMORTIZE_MONTHS = 12
+
+# ─── Free routing fallback (over Google's monthly cap) ──────────────────────────
+# Straight-line (haversine) distance to DESTINATION_ADDRESS, used only when
+# GMAPS_MONTHLY_CAP is hit and Google's own geocoding is therefore also unavailable
+# (see get_walking_distance()). Placeholders matching the placeholder
+# DESTINATION_ADDRESS above — override both in config_local.py with your real
+# address's coordinates (same reasoning as TARGET_URLS: repo is public).
+DESTINATION_LAT = 32.0809
+DESTINATION_LON = 34.7806
+
+# Streets aren't straight lines; this scales the haversine distance up to
+# approximate real walking distance. Uncalibrated against real data — a rough
+# correction, not a precise one.
+STRAIGHT_LINE_CALIBRATION_FACTOR = 1.35
+
+# Required by Nominatim's usage policy (https://operations.osmfoundation.org/policies/nominatim/):
+# identify the app and give a contact method.
+NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
+
+# ─── Telegram (optional push + voting) ───────────────────────────────────────────
+# Kill switch — bot runs fine with this False and no Telegram env vars set at all.
+# When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
+TELEGRAM_ENABLED = False
 
 # ─── Local overrides ────────────────────────────────────────────────────────────
 # config_local.py (gitignored) can override any setting above — currently used

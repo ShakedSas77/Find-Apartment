@@ -97,6 +97,22 @@ def init_db():
                 last_scanned_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS votes (
+                url TEXT,
+                voter_id TEXT,
+                voter_name TEXT,
+                vote TEXT,
+                voted_at TEXT,
+                PRIMARY KEY (url, voter_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -113,6 +129,8 @@ def init_db():
             "reject_reason": "ALTER TABLE posts ADD COLUMN reject_reason TEXT",
             "model_used": "ALTER TABLE posts ADD COLUMN model_used TEXT",
             "text_hash": "ALTER TABLE posts ADD COLUMN text_hash TEXT",
+            "telegram_chat_id": "ALTER TABLE posts ADD COLUMN telegram_chat_id TEXT",
+            "telegram_message_id": "ALTER TABLE posts ADD COLUMN telegram_message_id TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -444,6 +462,108 @@ def get_stats() -> tuple[dict, str, int]:
     counts = {row["verdict"]: row["cnt"] for row in rows}
     gmaps_calls = usage_row["gmaps_calls"] if usage_row else 0
     return counts, month, gmaps_calls
+
+
+def get_group_stats() -> dict[str, dict[str, int]]:
+    """group_url -> {verdict: count}, for the per-group yield breakdown in --stats
+    (flags groups with zero VERDICT_ADDED as candidates to drop from TARGET_URLS)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT group_url, verdict, COUNT(*) AS cnt FROM posts "
+            "WHERE group_url IS NOT NULL AND group_url != '' "
+            "GROUP BY group_url, verdict"
+        ).fetchall()
+    result: dict[str, dict[str, int]] = {}
+    for row in rows:
+        result.setdefault(row["group_url"], {})[row["verdict"]] = row["cnt"]
+    return result
+
+
+def top_excluded_locations(limit: int = 8) -> list[tuple[str, int]]:
+    """Most common excluded_location: name out of prefiltered posts' reject_reason
+    — tells you what's actually tripping EXCLUDED_LOCATIONS, to help tune it."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT reject_reason, COUNT(*) AS cnt FROM posts "
+            "WHERE verdict = ? AND reject_reason LIKE 'excluded_location:%' "
+            "GROUP BY reject_reason ORDER BY cnt DESC",
+            (VERDICT_PREFILTERED,),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        location = row["reject_reason"].split(":", 1)[1]
+        counts[location] = counts.get(location, 0) + row["cnt"]
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+def top_rejected_distance_addresses(limit: int = 8) -> list[tuple[str, int]]:
+    """Most common address among rejected_distance posts — tells you what's
+    landing just outside MAX_WALKING_DISTANCE_KM, to help tune that or the
+    geocoding table."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT address, COUNT(*) AS cnt FROM posts "
+            "WHERE verdict = ? AND address IS NOT NULL AND address != '' "
+            "GROUP BY address ORDER BY cnt DESC LIMIT ?",
+            (VERDICT_REJECTED_DISTANCE, limit),
+        ).fetchall()
+    return [(row["address"], row["cnt"]) for row in rows]
+
+
+def set_telegram_message(url: str, chat_id: str, message_id: str):
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE posts SET telegram_chat_id = ?, telegram_message_id = ? WHERE url = ?",
+            (str(chat_id), str(message_id), url),
+        )
+
+
+def get_telegram_message(url: str) -> tuple[str, str] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_chat_id, telegram_message_id FROM posts WHERE url = ?", (url,)
+        ).fetchone()
+    if not row or not row["telegram_message_id"]:
+        return None
+    return row["telegram_chat_id"], row["telegram_message_id"]
+
+
+def record_vote(url: str, voter_id: str, voter_name: str, vote: str):
+    """Upsert — a voter can change their mind, only their latest vote counts."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO votes (url, voter_id, voter_name, vote, voted_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(url, voter_id) DO UPDATE SET
+                   voter_name=excluded.voter_name,
+                   vote=excluded.vote,
+                   voted_at=excluded.voted_at""",
+            (url, voter_id, voter_name, vote, now),
+        )
+
+
+def get_votes(url: str) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT voter_id, voter_name, vote, voted_at FROM votes WHERE url = ?", (url,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_telegram_offset() -> int:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT value FROM telegram_state WHERE key = 'update_offset'").fetchone()
+    return int(row["value"]) if row else 0
+
+
+def set_telegram_offset(offset: int):
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO telegram_state (key, value) VALUES ('update_offset', ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (str(offset),),
+        )
 
 
 def prune_old_posts(max_age_days: int) -> int:

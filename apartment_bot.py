@@ -42,10 +42,13 @@ from config import (
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
     INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED,
-    EXCLUDE_SOUTH_OF_LAT
+    EXCLUDE_SOUTH_OF_LAT, TELEGRAM_ENABLED
 )
 from prompts import get_apartment_prompt_improved
 import storage
+import scoring
+import distance_fallback
+import telegram_notifier
 
 class ApartmentData(BaseModel):
     """JSON schema forced onto Gemini's response (response_schema) — eliminates parsing failures on the Gemini path."""
@@ -96,6 +99,14 @@ if sys.platform.startswith("linux"):
 
 # Strips invisible BIDI characters that Facebook injects and that break regexes
 BIDI_RE = re.compile(r'[‎‏‪-‮⁦-⁩]')
+
+# distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
+# rejection on. "straight_line_estimate" (distance_fallback.py, used only once
+# GMAPS_MONTHLY_CAP is hit) is a real, if rougher, distance figure — same
+# treatment as a Google-sourced one. Anything else ("skipped"/"quota"/"cache"
+# with no real number) must NOT be gated on, or a listing with no real distance
+# data would look like it passed the filter.
+_DISTANCE_FILTERABLE_SOURCES = {"google_maps", "straight_line_estimate"}
 
 # googlemaps sends GMAPS_API_KEY as a URL query param (unlike Gemini, which uses
 # a header) — on a network-level failure (not a clean API error response), the
@@ -606,6 +617,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         fb_post_date,
         fields["address"],
         datetime.now().strftime("%Y-%m-%d %H:%M"),
+        scoring.compute_fit_score(fields),
     ]
     return [_sheet_safe_cell(v) for v in row]
 
@@ -1517,6 +1529,12 @@ def get_walking_distance(address: str):
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
+        fallback = distance_fallback.estimate_straight_line_distance(canonical_address or address)
+        if fallback:
+            fallback_text, fallback_meters = fallback
+            fallback_warning = "הערכה קווית (מכסת Google הסתיימה)"
+            storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status)
+            return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate"
         storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status)
         return placeholder, 999999, confidence, warning, "quota"
 
@@ -1647,7 +1665,8 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
 
 def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
                                seen_urls: set, pending_rows: list, pending_seen_urls: set,
-                               pending_records: list, stats: dict, local_lock: threading.Lock) -> None:
+                               pending_records: list, stats: dict, local_lock: threading.Lock,
+                               pending_telegram: list | None = None) -> None:
     """
     Runs one scraped listing (any source — FB post, Yad2 ad) through LLM parse
     -> _evaluate_post_data -> _build_row -> queue-for-sheet-write. Pulled out of
@@ -1700,7 +1719,7 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
     # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
     # address/quota/error, not a real distance, and shouldn't disqualify a
     # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
-    if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
         _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
         storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
         return
@@ -1711,6 +1730,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             pending_rows.append(new_row)
             pending_seen_urls.add(post_url)
             pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
+            if pending_telegram is not None:
+                pending_telegram.append((post_url, dict(fields), new_row[-1]))
             with local_lock:
                 stats["added"] += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
@@ -1993,11 +2014,13 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         pending_records = []
         pending_rows = []
         pending_seen_urls = set()
+        pending_telegram = []
         local_lock = threading.Lock()
 
         def process_post(post):
             process_candidate_listing(post["url"], post["text"], post["post_date"], target_url, group_label, live,
-                                       seen_urls, pending_rows, pending_seen_urls, pending_records, stats, local_lock)
+                                       seen_urls, pending_rows, pending_seen_urls, pending_records, stats, local_lock,
+                                       pending_telegram)
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(process_post, post) for post in valid_posts]
@@ -2012,6 +2035,12 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
                         storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
                     _safe_print(f"    [{group_label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
+                    if TELEGRAM_ENABLED:
+                        for tg_url, tg_fields, tg_score in pending_telegram:
+                            try:
+                                telegram_notifier.send_listing_alert(tg_url, tg_fields, tg_score)
+                            except Exception as e:
+                                _safe_print(f"    WARNING: [{group_label}] Telegram alert failed for {tg_url}: {e}")
                 except Exception as e:
                     _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
                     stats["added"] -= len(pending_rows)
@@ -2287,7 +2316,7 @@ def reparse_rejected_posts():
             print(f"    Still rejected_location: {url}")
             continue
         dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
             storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
             print(f"    Still rejected_distance: {url}")
             continue
@@ -2298,6 +2327,11 @@ def reparse_rejected_posts():
             added += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
             print(f"    SUCCESS: Apartment added: {fields['rooms_val']} rooms | {price_display} | Address: {fields['address']}")
+            if TELEGRAM_ENABLED:
+                try:
+                    telegram_notifier.send_listing_alert(url, fields, new_row[-1])
+                except Exception as e:
+                    print(f"    WARNING: Telegram alert failed for {url}: {e}")
         except Exception as e:
             print(f"    ERROR: writing to sheet: {e}")
 
@@ -2375,7 +2409,7 @@ def replay_all_posts():
                         new_verdict = storage.VERDICT_REJECTED_LOCATION
                     else:
                         dist_meters = fields.get("distance_meters")
-                        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+                        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
                             new_verdict = storage.VERDICT_REJECTED_DISTANCE
 
         if new_verdict != old_verdict:
@@ -2393,6 +2427,27 @@ def print_stats():
     for verdict in storage.ALL_VERDICTS:
         print(f"  {verdict}: {counts.get(verdict, 0)}")
     print(f"\nGoogle Maps calls this month ({month}): {gmaps_calls}")
+
+    group_stats = storage.get_group_stats()
+    if group_stats:
+        print("\n--- per-group yield (added | total) ---")
+        for group_url, verdict_counts in sorted(group_stats.items()):
+            added = verdict_counts.get(storage.VERDICT_ADDED, 0)
+            total = sum(verdict_counts.values())
+            flag = "   <- 0 matches, candidate to drop from TARGET_URLS" if added == 0 else ""
+            print(f"  {group_url}   {added:>3} | {total:>4}{flag}")
+
+    top_locations = storage.top_excluded_locations()
+    if top_locations:
+        print("\n--- top excluded locations (tune EXCLUDED_LOCATIONS) ---")
+        for location, cnt in top_locations:
+            print(f"  {cnt:4}  {location}")
+
+    top_addresses = storage.top_rejected_distance_addresses()
+    if top_addresses:
+        print("\n--- top rejected_distance addresses (tune MAX_WALKING_DISTANCE_KM/geocoding) ---")
+        for address, cnt in top_addresses:
+            print(f"  {cnt:4}  {address}")
 
 def prune_data():
     """

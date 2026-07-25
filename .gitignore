@@ -2,6 +2,7 @@
 credentials.json
 fb_session.json
 bot_data.db
+backups/
 config_local.py
 __pycache__/
 
