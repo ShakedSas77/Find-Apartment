@@ -663,7 +663,11 @@ def _listing_dedupe_key(address: str, rooms, price) -> tuple | None:
 _CITY_DISPLAY_RES = [
     (re.compile(r'(?:ב|ל)?רמת[\s-]?גן|(?:ב|ל)?ר["״]?ג\b|(?:ב|ל)?\bרג\b'), "רמת גן"),
     (re.compile(r'(?:ב|ל)?גבעתיים'), "גבעתיים"),
-    (re.compile(r'(?:ב|ל)?תל[\s-]?אביב'), "תל אביב"),
+    # "יפו" is matched as an optional suffix of the SAME token (not a separate
+    # city/street) since "תל אביב יפו"/"תל אביב-יפו" is one compound official
+    # name — without this, _extract_city_and_core only consumed "תל אביב" and
+    # left "יפו" behind looking like a real street/neighborhood core.
+    (re.compile(r'(?:ב|ל)?תל[\s-]?אביב(?:[\s-]?יפו)?|(?:ב|ל)?ת["״]א\b|(?:ב|ל)?\bתא\b'), "תל אביב"),
 ]
 _NEIGHBORHOOD_DISPLAY_RE = re.compile(r'^(?:ב)?שכונ(?:ת|ה)\s+(.+)$')
 _CORNER_DISPLAY_RE = re.compile(r'^(.+?)\s+(?:על\s+)?פינת\s+(.+)$')
@@ -690,7 +694,13 @@ def _extract_city_and_core(address: str) -> tuple[str, str] | None:
 
 def _format_core_with_city(core: str, city: str) -> str:
     """Shapes address text (city already removed) plus a resolved city into the display format. Empty string if unusable."""
-    if not core or not _HEBREW_RE.search(core):
+    # Nothing left after removing the city token means the post only ever
+    # named the city itself (e.g. "תל אביב יפו" with no street at all) — the
+    # honest result is the bare city name, not falling back to duplicating
+    # the raw city mention as if it were a real address.
+    if not core:
+        return city
+    if not _HEBREW_RE.search(core):
         return ""
 
     m = _NEIGHBORHOOD_DISPLAY_RE.match(core)
