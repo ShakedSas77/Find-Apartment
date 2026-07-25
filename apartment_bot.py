@@ -1814,7 +1814,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     consecutive_old = 0
 
             if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
-                _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
+                if scrolls_done < SCROLL_COUNT:
+                    _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
                 break
         _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
 
@@ -1893,8 +1894,12 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 _safe_print(f"    [{group_label}] Pre-filtered: Post already exists in Google Sheets (Duplicate).")
                 continue
 
-            if fb_post_date and not _is_recent_post_date(fb_post_date):
-                _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than {MAX_POST_AGE_DAYS} days.")
+            # Same effective_cutoff the scroll loop used to decide when to stop — a post
+            # this old either predates MAX_POST_AGE_DAYS or predates the group's last scan
+            # (already handled last run), so there's no point sending it to the LLM here.
+            post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+            if post_dt is not None and post_dt < effective_cutoff:
+                _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than the scan cutoff ({effective_cutoff:%d/%m %H:%M}).")
                 storage.record_post(
                     post_url,
                     target_url,
@@ -1902,7 +1907,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     storage.VERDICT_PREFILTERED,
                     analysis={
                         "post_date": fb_post_date,
-                        "reject_reason": f"older_than_{MAX_POST_AGE_DAYS}_days",
+                        "reject_reason": "older_than_scan_cutoff",
                     },
                 )
                 stats["prefiltered"] += 1
