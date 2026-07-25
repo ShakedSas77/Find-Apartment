@@ -483,6 +483,11 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     address = _strip_foreign_letters(data.get("address") or "")
     address = _reject_hallucinated_address(address, text)
     address = _format_address_display(address, group_url)
+
+    dup_key = _listing_dedupe_key(address, rooms_val, price_val)
+    if dup_key and dup_key in _known_added_listing_keys():
+        return storage.VERDICT_DUPLICATE_LISTING, {"rooms_val": rooms_val, "price_val": price_val, "address": address}
+
     floor = _parse_floor(data.get("floor") or "")
     is_agent = _detect_agent(text, data.get("is_agent"))
     parking = _classify_parking(data.get("parking") or "")
@@ -617,6 +622,27 @@ def _normalize_address_key(address: str) -> str:
     norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
     return re.sub(r'\s+', ' ', norm).strip()
+
+def _listing_dedupe_key(address: str, rooms, price) -> tuple | None:
+    """
+    Normalized (address, rooms, price) key identifying the same physical
+    listing regardless of URL/repost wording. None when the address is too
+    weak to key on (missing/short/generic) — such listings are never merged
+    on address+rooms+price alone, only on exact URL, so distinct apartments
+    with a thin address don't get accidentally treated as the same one.
+    """
+    address_key = _normalize_address_key(address)
+    if not address_key or len(address_key) < 4:
+        return None
+    try:
+        rooms_key = f"{float(rooms):.1f}"
+    except (TypeError, ValueError):
+        rooms_key = str(rooms)
+    try:
+        price_key = str(int(float(price)))
+    except (TypeError, ValueError):
+        price_key = str(price)
+    return (address_key, rooms_key, price_key)
 
 # ─── Address display formatting ─────────────────────────────────────────────
 # Reshapes the LLM's raw (verbatim-from-post) address into the sheet's
@@ -855,22 +881,26 @@ def _listing_key(row: list, db_data: dict[str, dict] | None = None) -> tuple:
     db_row = (db_data or {}).get(url)
 
     raw_address = db_row["address"] if db_row and db_row.get("address") else (row[13] if len(row) > 13 else "")
-    address_key = _normalize_address_key(raw_address)
-
-    if not address_key or len(address_key) < 4:
-        return ("url", url)
-
     raw_rooms = db_row["rooms_val"] if db_row and db_row.get("rooms_val") is not None else (row[2] if len(row) > 2 else "")
-    try:
-        rooms = f"{float(raw_rooms):.1f}"
-    except (ValueError, TypeError):
-        rooms = raw_rooms
     raw_price = db_row["price_val"] if db_row and db_row.get("price_val") is not None else (row[1] if len(row) > 1 else "")
-    try:
-        price = str(int(float(raw_price)))
-    except (ValueError, TypeError):
-        price = raw_price
-    return ("listing", address_key, rooms, price)
+
+    key = _listing_dedupe_key(raw_address, raw_rooms, raw_price)
+    return ("listing",) + key if key else ("url", url)
+
+def _known_added_listing_keys() -> set[tuple]:
+    """
+    Dedupe keys for every listing ever added, across the DB's whole history —
+    not just what's still in the (pruned/rewritten) sheet. Used to catch a
+    listing reposted under a brand-new URL (common for agents farming
+    multiple groups daily) before it burns an LLM call and re-adds a row that
+    dedupe_and_sort_sheet would just merge away anyway.
+    """
+    keys = set()
+    for row in storage.get_added_listing_data().values():
+        key = _listing_dedupe_key(row.get("address"), row.get("rooms_val"), row.get("price_val"))
+        if key:
+            keys.add(key)
+    return keys
 
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
@@ -920,12 +950,62 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows)
     return duplicates_removed, stale_removed, len(fresh_rows)
 
+_ENTRY_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך כניסה")
+_POST_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך פרסום")
+_SCAN_TIME_COL_INDEX = SHEET_HEADERS.index("זמן סריקה")
+_TEXT_FORMAT_COL_INDICES = (_ENTRY_DATE_COL_INDEX, _POST_DATE_COL_INDEX, _SCAN_TIME_COL_INDEX)
+
 def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list]):
-    """Shared full-rewrite helper: clears the data range (header kept) and writes new_rows back."""
+    """
+    Shared full-rewrite helper: clears the data range (header kept) and writes
+    new_rows back. new_rows comes from sheet.get_all_values(), which always
+    returns strings — writing those back requires care on two fronts:
+
+    1. value_input_option="USER_ENTERED" (matching the original _build_row
+       write) so numeric-looking strings ("6200", "3.5") land back as real
+       numbers instead of permanently downgrading to text on every rewrite.
+    2. Re-running every cell through _sheet_safe_cell(): the leading-apostrophe
+       formula-injection guard is an input-time signal Sheets consumes, not
+       stored content — get_all_values() returns a previously-escaped
+       "=SUM(...)" clean, with the apostrophe already gone. Under RAW (the old
+       default) that was harmless since RAW never executes formulas either
+       way; under USER_ENTERED it would be executed unless re-escaped here.
+    """
     last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
     _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
+
+    # DD/MM text ("01/09") and the "YYYY-MM-DD HH:MM" scan timestamp both look
+    # date/datetime-like to Sheets — under USER_ENTERED they get auto-parsed
+    # into a real date/datetime serial (losing the deliberate literal-text
+    # format) unless the column is already declared Plain text *before* the
+    # value write below. Must run first, not after: setting the format on an
+    # already-date-typed cell only changes how it displays, it doesn't turn
+    # the stored value back into the original literal string.
+    _with_retries(lambda: sheet.spreadsheet.batch_update({
+        "requests": [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet.id,
+                        "startColumnIndex": col_index,
+                        "endColumnIndex": col_index + 1,
+                        "startRowIndex": 1,
+                    },
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+            for col_index in _TEXT_FORMAT_COL_INDICES
+        ]
+    }))
+
     if new_rows:
-        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(new_rows) + 1}", values=new_rows))
+        safe_rows = [[_sheet_safe_cell(v) for v in row] for row in new_rows]
+        _with_retries(lambda: sheet.update(
+            range_name=f"A2:{last_col}{len(safe_rows) + 1}",
+            values=safe_rows,
+            value_input_option="USER_ENTERED",
+        ))
 
 _DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
 
@@ -1243,12 +1323,18 @@ def get_walking_distance(address: str):
 
     cached = storage.get_address_cache(address)
     if cached:
+        # Must return the ORIGINAL source ("google_maps"/"skipped"/"quota"),
+        # not a hardcoded "cache" — callers gate the > MAX_WALKING_DISTANCE_KM
+        # rejection on distance_source == "google_maps", so a hardcoded value
+        # here silently let any cached far-away address (e.g. previously
+        # geocoded by an earlier, differently-rejected post reusing the same
+        # address text) bypass the distance filter entirely.
         return (
             cached.get("distance_text") or "",
             cached.get("distance_meters") or 999999,
             cached.get("confidence") or confidence,
             cached.get("warning") or "",
-            "cache",
+            cached.get("distance_source") or "cache",
         )
 
     if address.strip() in _CITY_ONLY_ADDRESSES:
@@ -1619,6 +1705,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 return
             if verdict == storage.VERDICT_PRICE_UNKNOWN:
                 _safe_print(f"    [{group_label}] Skipped: no price stated in post (contact seller directly).")
+                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
+                return
+            if verdict == storage.VERDICT_DUPLICATE_LISTING:
+                _safe_print(f"    [{group_label}] Skipped: repost of an already-added listing ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
                 storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
                 return
 
