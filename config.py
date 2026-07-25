@@ -96,6 +96,13 @@ DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
 # Maximum walking distance in km. Listings farther than this are filtered out. Set to 99.0 to disable filtering.
 MAX_WALKING_DISTANCE_KM = 5.0
 
+# Listings south of this latitude are filtered out. Only applied when the
+# address geocodes precisely (GMAPS_VALIDATE_ADDRESSES must be on) — an
+# address that can't be geocoded confidently is never rejected on this basis.
+# Set to None to disable. Default: Tel Aviv HaHagana rail station
+# (32.054062, 34.7847899), confirmed via Google Geocoding directly.
+EXCLUDE_SOUTH_OF_LAT = 32.054062
+
 # Cities allowed as a result when validating an address against Google Geocoding
 GMAPS_TARGET_CITIES = ["רמת גן", "גבעתיים", "תל אביב-יפו", "תל אביב"]
 

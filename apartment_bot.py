@@ -40,7 +40,8 @@ from config import (
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP,
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
-    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED
+    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED,
+    EXCLUDE_SOUTH_OF_LAT
 )
 from prompts import get_apartment_prompt_improved
 import storage
@@ -1409,19 +1410,24 @@ def _gmaps_city_allowed(result: dict) -> bool:
     return any(target in formatted or target in city for target in GMAPS_TARGET_CITIES)
 
 
-def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str]:
+def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str, float | None]:
     """
-    Returns canonical_address, city, updated_confidence, warning, geocode_status.
+    Returns canonical_address, city, updated_confidence, warning, geocode_status, lat.
+    lat is only ever populated on the "ok" success path (a precise, city-
+    matched result) — every other path either never geocoded or got a
+    result too weak to trust for a geographic check, so callers needing lat
+    (e.g. the south-of-HaHagana exclusion) should treat None as "can't tell,
+    don't reject on this basis."
     """
     if not GMAPS_VALIDATE_ADDRESSES:
-        return address, "", confidence, "", "disabled"
+        return address, "", confidence, "", "disabled", None
 
     if confidence in {"missing", "low"}:
-        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence"
+        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence", None
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
-        return address, "", confidence, placeholder, "quota"
+        return address, "", confidence, placeholder, "quota", None
 
     query = address
     if not any(city in query for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
@@ -1432,19 +1438,20 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
         results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
     except Exception as e:
         _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
-        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error"
+        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error", None
 
     if not results:
-        return "", "", "low", "Google לא מצא את הכתובת", "not_found"
+        return "", "", "low", "Google לא מצא את הכתובת", "not_found", None
 
     best = results[0]
     if not _gmaps_city_allowed(best):
-        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city"
+        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city", None
 
     if not _gmaps_has_street_precision(best):
-        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision"
+        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision", None
 
-    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok"
+    lat = best.get("geometry", {}).get("location", {}).get("lat")
+    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok", lat
 
 
 def get_walking_distance(address: str):
@@ -1476,12 +1483,17 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, "", "", "low", "כתובת ברמת עיר בלבד", "", 999999, "skipped", "city_only")
         return "", 999999, "low", "כתובת ברמת עיר בלבד", "skipped"
 
-    canonical_address, city, confidence, geocode_warning, geocode_status = _validate_address_with_geocoding(address, confidence)
+    canonical_address, city, confidence, geocode_warning, geocode_status, lat = _validate_address_with_geocoding(address, confidence)
     warning = geocode_warning or warning
 
     if GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS and confidence not in {"high", "medium"}:
         storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status)
         return "", 999999, confidence, warning, "skipped"
+
+    if EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT:
+        south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
+        storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status)
+        return "", 999999, confidence, south_warning, "excluded_south"
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
@@ -1625,6 +1637,11 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
         return
 
     new_row = _build_row(post_url, post_date, fields)
+
+    if fields.get("distance_source") == "excluded_south":
+        _safe_print(f"    [{label}] Skipped: location south of Tel Aviv HaHagana station.")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
+        return
 
     dist_meters = fields.get("distance_meters")
     # Only reject on distance if a real distance was actually computed against
@@ -2188,6 +2205,10 @@ def reparse_rejected_posts():
 
         post_date = post.get("post_date") or ""
         new_row = _build_row(url, post_date, fields)
+        if fields.get("distance_source") == "excluded_south":
+            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
+            print(f"    Still rejected_location: {url}")
+            continue
         dist_meters = fields.get("distance_meters")
         if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
             storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
@@ -2273,9 +2294,12 @@ def replay_all_posts():
             else:
                 new_verdict, fields = _evaluate_post_data(data, text, group_url)
                 if new_verdict == storage.VERDICT_ADDED:
-                    dist_meters = fields.get("distance_meters")
-                    if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-                        new_verdict = storage.VERDICT_REJECTED_DISTANCE
+                    if fields.get("distance_source") == "excluded_south":
+                        new_verdict = storage.VERDICT_REJECTED_LOCATION
+                    else:
+                        dist_meters = fields.get("distance_meters")
+                        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+                            new_verdict = storage.VERDICT_REJECTED_DISTANCE
 
         if new_verdict != old_verdict:
             changed.append((url, old_verdict, new_verdict))
