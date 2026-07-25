@@ -77,7 +77,7 @@ NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
 # Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
-EXCLUDED_LOCATIONS = ["בני ברק"]
+EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה"]
 
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
