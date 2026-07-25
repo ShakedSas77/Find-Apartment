@@ -2120,6 +2120,11 @@ def run_scraper(headless: bool = False, live: bool = False):
 
     shuffled_urls = random.sample(TARGET_URLS, len(TARGET_URLS))
     total = len(shuffled_urls)
+    if live and TELEGRAM_ENABLED:
+        try:
+            telegram_notifier.send_run_started(total)
+        except Exception as e:
+            print(f"WARNING: Telegram run-started alert failed: {e}")
     groups_scanned = 0
     total_added = 0
     total_posts_seen = 0
@@ -2268,6 +2273,21 @@ def run_scraper(headless: bool = False, live: bool = False):
             print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
     else:
         print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
+
+    if live and TELEGRAM_ENABLED:
+        try:
+            telegram_notifier.send_run_finished({
+                "groups_scanned": groups_scanned,
+                "total": total,
+                "posts_seen": total_posts_seen,
+                "prefiltered": total_prefiltered,
+                "llm_parsed": total_llm_parsed,
+                "added": total_added,
+                "gmaps_calls": gmaps_calls_this_month,
+                "checkpoint_skipped": checkpoint_skipped,
+            })
+        except Exception as e:
+            print(f"WARNING: Telegram run-finished alert failed: {e}")
 
     return {
         "groups_scanned": groups_scanned,

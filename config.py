@@ -198,6 +198,13 @@ NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
 # When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
 TELEGRAM_ENABLED = False
 
+# Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
+VOTES_TO_REMOVE = 2
+# Up-votes at which bot_listener.py sends a highlight alert to the Telegram chat.
+VOTES_TO_HIGHLIGHT = 2
+# Added to the sheet's fit-score cell per up-vote (clamped to 100).
+SCORE_VOTE_BOOST = 10
+
 # ─── Local overrides ────────────────────────────────────────────────────────────
 # config_local.py (gitignored) can override any setting above — currently used
 # for TARGET_URLS so real group URLs never land in the (public) repo history.

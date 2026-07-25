@@ -14,6 +14,7 @@ import os
 import requests
 from dotenv import load_dotenv
 
+import config
 import storage
 
 load_dotenv()
@@ -101,8 +102,46 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
     return message_id
 
 
+def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str, address: str):
+    """Sent by bot_listener.py once a listing crosses VOTES_TO_HIGHLIGHT up-votes
+    — a distinct, no-buttons message calling out a listing both voters liked."""
+    if not _configured():
+        return
+    price_line = f"{price} ₪" if price else "מחיר לא ידוע"
+    text = (
+        f"🔥 דירה חמה — {config.VOTES_TO_HIGHLIGHT}+ הצבעות חיוביות!\n"
+        f"{rooms} חדרים | {price_line} | מרחק הליכה {distance_km or '?'} ק\"מ\n"
+        f"{address}\n\n{post_url}"
+    )
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
+
+
 def send_failure_alert(summary: str):
     """Used by doctor.py --alert to DM a health-check failure summary."""
     if not _configured():
         return
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚠️ apartment-bot doctor check failed:\n\n{summary}"})
+
+
+def send_run_started(total_groups: int):
+    """Sent once at the start of a --live run_scraper() call — never on a dry run."""
+    if not _configured():
+        return
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"▶️ הרצה התחילה — {total_groups} קבוצות לסריקה"})
+
+
+def send_run_finished(stats: dict):
+    """Sent once at the end of a --live run_scraper() call, with the same
+    numbers printed to the console summary line."""
+    if not _configured():
+        return
+    text = (
+        f"✅ הרצה הסתיימה\n"
+        f"{stats['groups_scanned']}/{stats['total']} קבוצות נסרקו\n"
+        f"{stats['posts_seen']} פוסטים נבדקו | {stats['prefiltered']} סוננו מראש | {stats['llm_parsed']} נשלחו ל-LLM\n"
+        f"{stats['added']} דירות נוספו\n"
+        f"{stats['gmaps_calls']} קריאות Google Maps החודש"
+    )
+    if stats.get("checkpoint_skipped"):
+        text += f"\n⚠️ {stats['checkpoint_skipped']} קבוצה/ות דולגו עקב checkpoint"
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
