@@ -1446,6 +1446,76 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
         except Exception:
             pass
 
+def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
+                               seen_urls: set, pending_rows: list, pending_seen_urls: set,
+                               pending_records: list, stats: dict, local_lock: threading.Lock) -> None:
+    """
+    Runs one scraped listing (any source — FB post, Yad2 ad) through LLM parse
+    -> _evaluate_post_data -> _build_row -> queue-for-sheet-write. Pulled out of
+    _scan_group_page's process_post closure so a second source (Yad2) can feed
+    the same pipeline without a second hand-copied version of this logic —
+    see CLAUDE.md on keeping _evaluate_post_data/_build_row call sites in sync.
+    """
+    _safe_print(f"[{label}] Analyzing post (URL: {post_url})...")
+
+    try:
+        data = analyze_post_with_llm(text)
+    except (GmapsQuotaHalted, HeadlessCheckpointAbort):
+        raise
+
+    with local_lock:
+        stats["llm_parsed"] += 1
+    if not data:
+        _safe_print(f"    [{label}] Skipped: LLM failed to parse or returned no data.")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_PARSE_FAILED,
+                             analysis=_analysis_from_fields({}, post_date, storage.VERDICT_PARSE_FAILED))
+        return
+
+    verdict, fields = _evaluate_post_data(data, text, group_url)
+    if verdict == storage.VERDICT_REJECTED_ROOMS:
+        _safe_print(f"    [{label}] Skipped: Room count is not suitable ({fields['rooms_val']}).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_REJECTED_PRICE:
+        _safe_print(f"    [{label}] Skipped: Price is not suitable ({int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_PRICE_UNKNOWN:
+        _safe_print(f"    [{label}] Skipped: no price stated in post (contact seller directly).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_DUPLICATE_LISTING:
+        _safe_print(f"    [{label}] Skipped: repost of an already-added listing ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+
+    new_row = _build_row(post_url, post_date, fields)
+
+    dist_meters = fields.get("distance_meters")
+    # Only reject on distance if a real distance was actually computed against
+    # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
+    # address/quota/error, not a real distance, and shouldn't disqualify a
+    # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
+    if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+        _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
+        return
+
+    with _sheet_lock:
+        seen_now = post_url in seen_urls or post_url in pending_seen_urls
+        if not seen_now:
+            pending_rows.append(new_row)
+            pending_seen_urls.add(post_url)
+            pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
+            with local_lock:
+                stats["added"] += 1
+            price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
+            prefix = "SUCCESS" if live else "DRY RUN"
+            verb = "queued" if live else "would queue (pass --live to commit)"
+            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
+        else:
+            _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
+
 def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool, live: bool = False) -> dict:
     """
     The actual scan logic for a single group, run on a page that already
@@ -1675,70 +1745,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         local_lock = threading.Lock()
 
         def process_post(post):
-            post_url = post["url"]
-            text = post["text"]
-            fb_post_date = post["post_date"]
-
-            _safe_print(f"[{group_label}] Analyzing post (URL: {post_url})...")
-            
-            try:
-                data = analyze_post_with_llm(text)
-            except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-                raise
-                
-            with local_lock:
-                stats["llm_parsed"] += 1
-            if not data:
-                _safe_print(f"    [{group_label}] Skipped: LLM failed to parse or returned no data.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PARSE_FAILED,
-                                     analysis=_analysis_from_fields({}, fb_post_date, storage.VERDICT_PARSE_FAILED))
-                return
-
-            verdict, fields = _evaluate_post_data(data, text, target_url)
-            if verdict == storage.VERDICT_REJECTED_ROOMS:
-                _safe_print(f"    [{group_label}] Skipped: Room count is not suitable ({fields['rooms_val']}).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-            if verdict == storage.VERDICT_REJECTED_PRICE:
-                _safe_print(f"    [{group_label}] Skipped: Price is not suitable ({int(fields['price_val']):,} ₪).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-            if verdict == storage.VERDICT_PRICE_UNKNOWN:
-                _safe_print(f"    [{group_label}] Skipped: no price stated in post (contact seller directly).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-            if verdict == storage.VERDICT_DUPLICATE_LISTING:
-                _safe_print(f"    [{group_label}] Skipped: repost of an already-added listing ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-
-            new_row = _build_row(post_url, fb_post_date, fields)
-
-            dist_meters = fields.get("distance_meters")
-            # Only reject on distance if a real distance was actually computed
-            # against Google Maps — dist_meters is a placeholder (999999/inf)
-            # for an uncertain address/quota/error, not a real distance, and
-            # shouldn't disqualify a post as if it were far away (see
-            # CLAUDE.md, verified 2026-07-18).
-            if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-                _safe_print(f"    [{group_label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, fb_post_date, storage.VERDICT_REJECTED_DISTANCE))
-                return
-
-            with _sheet_lock:
-                seen_now = post_url in seen_urls or post_url in pending_seen_urls
-                if not seen_now:
-                    pending_rows.append(new_row)
-                    pending_seen_urls.add(post_url)
-                    pending_records.append((post_url, target_url, text, data, _analysis_from_fields(fields, fb_post_date)))
-                    with local_lock:
-                        stats["added"] += 1
-                    price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
-                    prefix = "SUCCESS" if live else "DRY RUN"
-                    verb = "queued" if live else "would queue (pass --live to commit)"
-                    _safe_print(f"    {prefix}: [{group_label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
-                else:
-                    _safe_print(f"    [{group_label}] Skipped before queueing: duplicate URL.")
+            process_candidate_listing(post["url"], post["text"], post["post_date"], target_url, group_label, live,
+                                       seen_urls, pending_rows, pending_seen_urls, pending_records, stats, local_lock)
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(process_post, post) for post in valid_posts]
