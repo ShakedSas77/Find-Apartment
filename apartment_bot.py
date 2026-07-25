@@ -486,6 +486,7 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
 
     dup_key = _listing_dedupe_key(address, rooms_val, price_val)
     if dup_key and dup_key in _known_added_listing_keys():
+        _maybe_enrich_duplicate_address(dup_key, address)
         return storage.VERDICT_DUPLICATE_LISTING, {"rooms_val": rooms_val, "price_val": price_val, "address": address}
 
     floor = _parse_floor(data.get("floor") or "")
@@ -666,6 +667,8 @@ _CITY_DISPLAY_RES = [
 ]
 _NEIGHBORHOOD_DISPLAY_RE = re.compile(r'^(?:ב)?שכונ(?:ת|ה)\s+(.+)$')
 _CORNER_DISPLAY_RE = re.compile(r'^(.+?)\s+(?:על\s+)?פינת\s+(.+)$')
+# Informal shorthand for the same "corner of X and Y" meaning ("כצנלסון/ויצמן").
+_CORNER_SLASH_RE = re.compile(r'^(.+?)\s*/\s*(.+)$')
 _TRAILING_NUMBER_RE = re.compile(r'^(.+?)\s+(\d+[א-ת]?)$')
 
 def _extract_city_and_core(address: str) -> tuple[str, str] | None:
@@ -695,11 +698,11 @@ def _format_core_with_city(core: str, city: str) -> str:
         neighborhood = m.group(1).strip()
         return f"{neighborhood}, {city}" if neighborhood else ""
 
-    m = _CORNER_DISPLAY_RE.match(core)
+    m = _CORNER_DISPLAY_RE.match(core) or _CORNER_SLASH_RE.match(core)
     if m:
-        street_a = _STREET_HINT_RE.sub('', m.group(1)).strip()
-        street_b = _STREET_HINT_RE.sub('', m.group(2)).strip()
-        return f"{street_a} - {street_b}, {city}" if street_a and street_b else ""
+        street_a = _STREET_HINT_RE.sub('', m.group(1)).strip(' ,./-–—_\t')
+        street_b = _STREET_HINT_RE.sub('', m.group(2)).strip(' ,./-–—_\t')
+        return f"{street_a} פינת {street_b}, {city}" if street_a and street_b else ""
 
     street_core = _STREET_HINT_RE.sub('', core, count=1).strip()
     if not street_core:
@@ -790,13 +793,15 @@ def _format_address_display(address: str, group_url: str | None = None) -> str:
     "רחוב המעלות 12 בגבעתיים" -> "המעלות 12, גבעתיים"
     "רחוב הירדן רמת גן" -> "הירדן, רמת גן" (no number)
     "שכונת מרום נווה ברמת גן" -> "מרום נווה, רמת גן" (neighborhood, not a street)
-    "רחוב אלימלך על פינת הרצל ברמת גן" -> "אלימלך - הרצל, רמת גן" (corner)
+    "רחוב אלימלך על פינת הרצל ברמת גן" -> "אלימלך פינת הרצל, רמת גן" (corner)
+    "כצנלסון/ויצמן בגבעתיים" -> "כצנלסון פינת ויצמן, גבעתיים" (slash shorthand)
     When no city is stated at all, falls back to resolving one from the
-    scanning group's own candidate cities (see _resolve_ambiguous_city) for a
-    plain street address — corner/neighborhood phrasing without a city is out
-    of scope (too ambiguous to geocode as a single street query). Falls back
-    to the address unchanged whenever nothing resolves confidently — never
-    guesses a city.
+    scanning group's own candidate cities (see _resolve_ambiguous_city),
+    keyed off the primary street (group1 of a corner/slash pair, since that's
+    what geocoding needs) — neighborhood phrasing alone stays out of scope
+    (too ambiguous to geocode as a single street query). Falls back to the
+    address unchanged whenever nothing resolves confidently — never guesses
+    a city.
     """
     if not address:
         return address
@@ -806,16 +811,22 @@ def _format_address_display(address: str, group_url: str | None = None) -> str:
         core, city = found
         return _format_core_with_city(core, city) or address
 
-    if group_url and not _NEIGHBORHOOD_DISPLAY_RE.match(address.strip()) and not _CORNER_DISPLAY_RE.search(address):
+    if group_url and not _NEIGHBORHOOD_DISPLAY_RE.match(address.strip()):
         candidates = storage.get_group_city_hint(group_url)
         if candidates:
-            street_core = _STREET_HINT_RE.sub('', address, count=1).strip()
-            m = _TRAILING_NUMBER_RE.match(street_core)
-            street_only = m.group(1).strip() if m else street_core
+            corner_m = _CORNER_DISPLAY_RE.match(address) or _CORNER_SLASH_RE.match(address)
+            if corner_m:
+                street_only = _STREET_HINT_RE.sub('', corner_m.group(1)).strip()
+                core_for_format = address
+            else:
+                street_core = _STREET_HINT_RE.sub('', address, count=1).strip()
+                m = _TRAILING_NUMBER_RE.match(street_core)
+                street_only = m.group(1).strip() if m else street_core
+                core_for_format = street_core
             if street_only and _HEBREW_RE.search(street_only):
                 city = _resolve_ambiguous_city(street_only, candidates)
                 if city:
-                    return _format_core_with_city(street_core, city) or address
+                    return _format_core_with_city(core_for_format, city) or address
 
     return address
 
@@ -911,6 +922,26 @@ def _known_added_listing_keys() -> set[tuple]:
             keys.add(key)
     return keys
 
+def _maybe_enrich_duplicate_address(dup_key: tuple, new_address: str):
+    """
+    A rejected duplicate sometimes states a more specific address (adds a
+    "פינת X" corner qualifier) than the originally-added post did —
+    _listing_dedupe_key deliberately treats both as the same listing so the
+    duplicate is never added as a second row, but that shouldn't mean losing
+    the more useful address text. If this duplicate's address has a corner
+    qualifier the stored one lacks, update the original's stored address so
+    the next dedupe_and_sort_sheet() pass can sync it into the sheet's כתובת
+    cell.
+    """
+    if not _CORNER_HINT_RE.search(new_address):
+        return
+    for url, row in storage.get_added_listing_data().items():
+        existing_address = row.get("address") or ""
+        key = _listing_dedupe_key(existing_address, row.get("rooms_val"), row.get("price_val"))
+        if key == dup_key and not _CORNER_HINT_RE.search(existing_address):
+            storage.update_added_listing_address(url, new_address)
+            return
+
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
     Rewrites the sheet's data range in one pass:
@@ -950,6 +981,16 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
 
     deduped_rows = list(best_by_key.values())
     duplicates_removed = len(rows) - len(deduped_rows)
+
+    # A later crosspost's more specific address (e.g. a corner qualifier) may
+    # have been folded into the DB record via _maybe_enrich_duplicate_address
+    # even though its own row was never added — sync the kept row's כתובת
+    # cell from that current DB value so the enrichment actually surfaces.
+    for row in deduped_rows:
+        url = row[0] if row else ""
+        db_row = db_data.get(url)
+        if db_row and db_row.get("address") and len(row) > 13:
+            row[13] = db_row["address"]
 
     fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[12] if len(r) > 12 else "")]
     stale_removed = len(deduped_rows) - len(fresh_rows)

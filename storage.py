@@ -328,6 +328,21 @@ def get_added_listing_data() -> dict[str, dict]:
     return {row["url"]: dict(row) for row in rows}
 
 
+def update_added_listing_address(url: str, address: str):
+    """
+    Overwrites the stored address for an already-added listing — used when a
+    later crosspost of the same physical listing (same dedupe key) states a
+    more specific address (e.g. adds a "פינת X" corner qualifier the original
+    post lacked) than what got recorded originally. dedupe_and_sort_sheet()
+    syncs the sheet's כתובת cell from this value on its next rewrite pass.
+    """
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE posts SET address = ? WHERE url = ? AND verdict = ?",
+            (address, url, VERDICT_ADDED),
+        )
+
+
 def get_all_posts() -> list[dict]:
     """Every post ever scanned, regardless of verdict — used by --replay (testing new code/prompt without a browser)."""
     with _lock, _connect() as conn:
