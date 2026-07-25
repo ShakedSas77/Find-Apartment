@@ -614,11 +614,20 @@ _LANDMARK_HINT_RE = re.compile(r'ליד|בסמוך|קרוב ל|צמוד ל|בא�
 # "רחוב הרצל" and "רח' הרצל" are the same street. LLM output uses the ASCII
 # apostrophe (U+0027), not the Hebrew geresh (׳), so both must be recognized.
 _STREET_TYPE_RE = _STREET_HINT_RE
+# A cross-street qualifier ("X פינת Y" / "X על פינת Y") is a more specific
+# description of the same corner, not a different address — one post calling
+# it "שמחה" and another "רחוב שמחה, פינת שפירא" are very likely the same
+# listing. Dropped before keying so they collapse to the same primary street;
+# _format_core_with_city's _CORNER_DISPLAY_RE is a different, fuller parse
+# used for display formatting, not reused here since this only needs the
+# cross-street half discarded, not restructured.
+_CORNER_HINT_RE = re.compile(r'\s+(?:על\s+)?פינת\s+.+$')
 
 def _normalize_address_key(address: str) -> str:
     if not address or address == "לא צוין":
         return ""
     norm = _CITY_TOKENS_RE.sub('', address)
+    norm = _CORNER_HINT_RE.sub('', norm)
     norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
     return re.sub(r'\s+', ' ', norm).strip()

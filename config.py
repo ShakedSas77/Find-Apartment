@@ -26,6 +26,8 @@ GEMINI_MODEL = "gemini-flash-lite-latest"
 # ─── Target locations ────────────────────────────────────────────────────────────
 # Facebook groups to scan — placeholder examples, replace with groups you're a member of
 # (each group's URL is in the browser address bar when it's open). See README for details.
+# Real group URLs go in config_local.py (gitignored) instead of here — the repo is
+# public, and TARGET_URLS reveals which groups/areas you're monitoring.
 TARGET_URLS = [
     "https://www.facebook.com/groups/000000000000001",
     "https://www.facebook.com/groups/000000000000002",
@@ -92,7 +94,7 @@ PROMPT_LANGUAGE = "en"
 DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
 
 # Maximum walking distance in km. Listings farther than this are filtered out. Set to 99.0 to disable filtering.
-MAX_WALKING_DISTANCE_KM = 4.0
+MAX_WALKING_DISTANCE_KM = 5.0
 
 # Cities allowed as a result when validating an address against Google Geocoding
 GMAPS_TARGET_CITIES = ["רמת גן", "גבעתיים", "תל אביב-יפו", "תל אביב"]
@@ -142,3 +144,11 @@ SHEET_HEADERS = [
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
     "תאריך פרסום", "כתובת", "זמן סריקה"
 ]
+
+# ─── Local overrides ────────────────────────────────────────────────────────────
+# config_local.py (gitignored) can override any setting above — currently used
+# for TARGET_URLS so real group URLs never land in the (public) repo history.
+try:
+    from config_local import *  # noqa: F401,F403
+except ImportError:
+    pass

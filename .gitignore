@@ -2,13 +2,19 @@
 credentials.json
 fb_session.json
 bot_data.db
+config_local.py
 __pycache__/
 
 chrome_profile/
 chrome_profile_test/
+yad2_profile/
+yad2_profile_explore/
 debug_fb*.png
 checkpoint_*.png
+yad2_*.png
+yad2_*.html
 test_*.py
+logs/
 
 .idea/
 .claude/
