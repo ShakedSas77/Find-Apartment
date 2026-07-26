@@ -13,6 +13,7 @@ Goal: reduce **headless security checkpoints**, the bot's biggest operational pa
 - httpx / no-browser scraping — FB groups need auth'd GraphQL, brittle, higher ban risk.
 - `kevinzg/facebook-scraper` — its README admits group scraping "may return only one page and not work on private groups" (our targets are private); IP-ban prone, unmaintained since ~2022.
 - CSV/JSON export — Google Sheet already covers.
+- Network resource blocking (`page.route()` to block image/video/font requests during scroll), evaluated 2026-07-26 — this is the user's real, logged-in Chrome profile (`chrome_profile/`); blocking first-party `fbcdn`/`facebook.com` resource loads is a new, session-specific deviation from that profile's established real-browsing baseline, the same shape of risk `browserforge` fingerprints were rejected for above, just applied to network payload instead of fingerprint identity. Upside is also small here — the bot only reads `inner_text()`, and throughput is already bottlenecked by jittered scroll waits and the 4s Gemini rate lock, not page-load bandwidth.
 
 ## What shipped
 

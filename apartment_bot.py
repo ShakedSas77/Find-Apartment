@@ -42,7 +42,8 @@ from config import (
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
     INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED,
-    EXCLUDE_SOUTH_OF_LAT, TELEGRAM_ENABLED
+    EXCLUDE_SOUTH_OF_LAT, TELEGRAM_ENABLED,
+    SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS
 )
 from prompts import get_apartment_prompt_improved
 import storage
@@ -1235,12 +1236,12 @@ def _canonical_post_url(url: str) -> str:
 # aria-labelledby+aria-describedby holds even when role="article" is absent
 _ARTICLE_SELECTORS = [
     'div[role="article"]',
+    'div[aria-labelledby][aria-describedby]',
     'div[aria-posinset]',
-    'div.x1yztbdb',
     'div[data-ad-preview="message"]',
+    'div.x1yztbdb',
     'div[data-pagelet^="GroupFeed"] > div > div',
     'div[role="feed"] > div > div',
-    'div[aria-labelledby][aria-describedby]',
 ]
 
 def _find_articles(page) -> list:
@@ -1249,6 +1250,52 @@ def _find_articles(page) -> list:
         if len(elements) > 0:
             return elements
     return []
+
+_SEE_MORE_CLICK_JS = """el => {
+    const patterns = ['See more', 'קרא עוד', 'ראה עוד'];
+    for (const btn of el.querySelectorAll('div[role="button"], span, a')) {
+        if (patterns.includes(btn.textContent.trim())) { btn.click(); return true; }
+    }
+    return false;
+}"""
+
+def _wait_for_text_growth(article, before_len: int) -> str:
+    """Bounded poll after a "See more" click: re-reads article.inner_text() at short
+    intervals up to a ceiling, returning as soon as text visibly grows, instead of
+    always sleeping the full fixed duration. Local DOM re-checks only — no extra
+    requests to Facebook. Best-effort: returns the last successfully read text."""
+    text = ""
+    elapsed = 0
+    while elapsed < SEE_MORE_SETTLE_MAX_MS:
+        try:
+            article.page.wait_for_timeout(SEE_MORE_SETTLE_POLL_MS)
+        except Exception:
+            break
+        elapsed += SEE_MORE_SETTLE_POLL_MS
+        try:
+            text = article.inner_text().strip()
+        except Exception:
+            break
+        if len(text) > before_len:
+            return text
+    return text
+
+def _wait_for_button_settle(button_locator):
+    """Bounded poll after clicking a page-level "See more" button: FB typically
+    removes/hides the button once text expands, so poll for that instead of a fixed
+    sleep. Same no-extra-request reasoning as _wait_for_text_growth."""
+    elapsed = 0
+    while elapsed < SEE_MORE_SETTLE_MAX_MS:
+        try:
+            button_locator.page.wait_for_timeout(SEE_MORE_SETTLE_POLL_MS)
+        except Exception:
+            return
+        elapsed += SEE_MORE_SETTLE_POLL_MS
+        try:
+            if not button_locator.is_visible():
+                return
+        except Exception:
+            return
 
 def extract_post_info(article) -> tuple[str, str]:
     try:
@@ -1846,7 +1893,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 try:
                     if el.is_visible():
                         el.click(timeout=1000)
-                        page.wait_for_timeout(300)
+                        _wait_for_button_settle(el)
                 except Exception:
                     pass
         page.wait_for_timeout(1500)
@@ -1880,23 +1927,22 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             article = item["element"]
             text = item["text"]
 
-            # Per-article "See more" — JS click bypasses visibility/off-screen issues
-            try:
-                article.scroll_into_view_if_needed(timeout=500)
-                clicked = article.evaluate(
-                    """el => {
-                        const patterns = ['See more', 'קרא עוד', 'ראה עוד'];
-                        for (const btn of el.querySelectorAll('div[role="button"], span, a')) {
-                            if (patterns.includes(btn.textContent.trim())) { btn.click(); return true; }
-                        }
-                        return false;
-                    }"""
-                )
-                if clicked:
-                    page.wait_for_timeout(400)
-                    text = article.inner_text().strip()
-            except Exception:
-                pass
+            # Per-article "See more" — JS click bypasses visibility/off-screen issues.
+            # One retry on a transient failure (DOM not settled yet) — otherwise a post's
+            # text stays truncated forever: storage.should_skip() makes any non-parse_failed
+            # verdict permanent, and --reparse-rejected/--replay only ever re-read the
+            # already-truncated stored raw_text, never re-click.
+            for attempt in range(2):
+                try:
+                    article.scroll_into_view_if_needed(timeout=500)
+                    clicked = article.evaluate(_SEE_MORE_CLICK_JS)
+                    if clicked:
+                        text = _wait_for_text_growth(article, len(text))
+                    break
+                except Exception:
+                    if attempt == 0:
+                        page.wait_for_timeout(SEE_MORE_RETRY_DELAY_MS)
+                        continue
 
             text = BIDI_RE.sub('', text)
             text = _strip_comment_section(text)
@@ -2214,7 +2260,10 @@ def run_scraper(headless: bool = False, live: bool = False):
                     checkpoint_skipped += 1 + remaining
                     _safe_print(f"Stopping sequential scan: {remaining} remaining group(s) also skipped due to the checkpoint.")
                     break
-            context.close()
+            try:
+                context.close()
+            except Exception as e:
+                _safe_print(f"WARNING: closing browser context failed: {e}")
         else:
             # Capture the logged-in profile's fingerprint so parallel workers can
             # present the same one (see _scan_group). "HeadlessChrome" is stripped
@@ -2229,7 +2278,10 @@ def run_scraper(headless: bool = False, live: bool = False):
             # Exports cookies/session to a file so independent threads can use
             # them — one context/browser can't be shared between threads (Playwright's sync API isn't thread-safe)
             context.storage_state(path=storage_state_path)
-            context.close()
+            try:
+                context.close()
+            except Exception as e:
+                _safe_print(f"WARNING: closing browser context failed: {e}")
 
     if not sequential_mode:
         print(f"Continuing to scan groups ({MAX_CONCURRENT_GROUPS} in parallel — this raises checkpoint/ban risk "

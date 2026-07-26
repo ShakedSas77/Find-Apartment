@@ -127,6 +127,15 @@ GMAPS_ON_CAP = "skip"
 # normal case (see MIN_SCROLLS_BEFORE_EARLY_STOP / CONSECUTIVE_OLD_POSTS_TO_STOP).
 SCROLL_COUNT = 20
 SCROLL_DELAY_MS = 500
+
+# Bounded poll after a "See more" click, replacing a blind fixed sleep — returns as
+# soon as the click visibly took effect instead of always waiting the full ceiling.
+# Local DOM re-checks over the existing CDP connection only, no extra Facebook
+# requests — carries no anti-bot signal, only affects local pacing.
+SEE_MORE_SETTLE_POLL_MS = 100
+SEE_MORE_SETTLE_MAX_MS = 500
+# Brief pause before the one retry on a transient "See more" click failure.
+SEE_MORE_RETRY_DELAY_MS = 150
 # Floor on scroll iterations before early-stop is allowed to trigger, so a single
 # old/pinned post near the top of the feed can't cut a scan short.
 MIN_SCROLLS_BEFORE_EARLY_STOP = 3
