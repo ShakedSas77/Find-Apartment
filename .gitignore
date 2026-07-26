@@ -14,7 +14,7 @@ debug_fb*.png
 checkpoint_*.png
 yad2_*.png
 yad2_*.html
-test_*.py
+/test_*.py
 logs/
 
 .idea/
