@@ -1,17 +1,16 @@
 """
-Unit tests for the pure text-normalization helpers in apartment_bot.py.
-Importing apartment_bot here (with no .env required) is itself the proof that
-the Phase 0 import-time fix works — these functions still live in
-apartment_bot.py until the core/normalize.py extraction (later phase).
+Unit tests for the pure text-normalization/dedupe helpers.
 """
 from datetime import datetime
 
-from apartment_bot import (
+from core.normalize import (
     _detect_agent,
     _infer_post_date,
-    _listing_dedupe_key,
     _normalize_bimonthly_fee,
     _parse_floor,
+)
+from apartment_bot import (
+    _listing_dedupe_key,
     _phone_price_rooms_fingerprint,
     _text_dedup_hash,
 )
