@@ -12,16 +12,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
 
-import ollama
 import gspread
 import googlemaps
-from google import genai
-from google.genai import types
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
-from pydantic import BaseModel
-from typing import Optional
-
 
 from config import (
     CREDENTIALS_FILE, TARGET_URLS,
@@ -30,7 +24,7 @@ from config import (
     MIN_SCROLLS_BEFORE_EARLY_STOP, CONSECUTIVE_OLD_POSTS_TO_STOP,
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS,
-    GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_MODEL, LOGIN_MAX_ATTEMPTS,
+    LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, SHEET_HEADERS,
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP,
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
@@ -39,12 +33,11 @@ from config import (
     EXCLUDE_SOUTH_OF_LAT, TELEGRAM_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS
 )
-from prompts import get_apartment_prompt_improved
 from core.util import _safe_print, _with_retries, _sheet_lock, _checkpoint_lock, _resume_event
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
     map_bool, BIDI_RE, _strip_comment_section, _PRICE_CONTEXT_RE, relative_to_date,
-    _normalize_bimonthly_fee, _parse_floor, _clean_post_for_llm, _detect_agent,
+    _normalize_bimonthly_fee, _parse_floor, _detect_agent,
     _ROOMMATE_COUPLE_EXCEPTION_RE, _classify_parking, _strip_foreign_letters,
     _normalize_entry_date, _reject_hallucinated_address, _warn_if_fee_implausible,
     _sheet_safe_cell, _HEBREW_RE, _STREET_HINT_RE, _NEIGHBORHOOD_DISPLAY_RE,
@@ -58,43 +51,13 @@ from core.dedupe import (
     _text_dedup_hash, _listing_dedupe_key, _listing_key, _known_added_listing_keys,
     _maybe_enrich_duplicate_address,
 )
+from core.llm import analyze_post_with_llm
 import env
 import storage
 import scoring
 import distance_fallback
 import telegram_notifier
 
-class ApartmentData(BaseModel):
-    """JSON schema forced onto Gemini's response (response_schema) — eliminates parsing failures on the Gemini path."""
-    rooms: Optional[float] = None
-    price: Optional[int] = None
-    arnona: Optional[str] = None
-    vaad: Optional[str] = None
-    shelter: Optional[bool] = None
-    parking: Optional[str] = None
-    entry_date: Optional[str] = None
-    floor: Optional[str] = None
-    elevator: Optional[bool] = None
-    is_agent: Optional[bool] = None
-    address: Optional[str] = None
-
-
-# --- API clients ---
-# Lazy + double-checked-locked, not constructed at import time: importing this
-# module (e.g. to unit-test a pure function) must work with no .env at all.
-# Double-checking is required, not decorative — _scan_group_page runs a
-# 5-worker ThreadPoolExecutor over process_candidate_listing, so first touch
-# of either client is genuinely concurrent.
-_gemini_client = None
-_gemini_client_lock = threading.Lock()
-
-def get_gemini_client():
-    global _gemini_client
-    if _gemini_client is None:
-        with _gemini_client_lock:
-            if _gemini_client is None:
-                _gemini_client = genai.Client(api_key=env.get_gemini_api_key())
-    return _gemini_client
 
 _gmaps_client = None
 _gmaps_client_lock = threading.Lock()
@@ -107,8 +70,6 @@ def get_gmaps_client():
                 _gmaps_client = googlemaps.Client(key=env.get_gmaps_api_key())
     return _gmaps_client
 
-GEMINI_EXHAUSTED = False
-GEMINI_ERROR_COUNT = 0
 
 if sys.platform.startswith("linux"):
     _CHROME_LAUNCH_ARGS += ["--no-sandbox", "--disable-gpu"]
@@ -132,8 +93,6 @@ def _redact_api_key(text: str) -> str:
     return _API_KEY_QUERY_RE.sub(r'\1REDACTED', text)
 
 
-# ─── Concurrency primitives (groups scan in parallel tabs) ────────────────────────
-_gemini_lock = threading.Lock()
 _text_dedup_lock = threading.Lock()
 _run_text_hashes: dict[str, str] = {}  # text_hash -> claiming url, this run only (fresh per process)
 _headless_checkpoint_hit = False  # set once any group hits a checkpoint in --headless mode; other groups then skip fast
@@ -722,94 +681,6 @@ def extract_post_info(article) -> tuple[str, str]:
     except Exception:
         pass
     return "Link not extracted", ""
-
-_ollama_lock = threading.Lock()
-_gemini_rate_lock = threading.Lock()
-_last_gemini_call = 0.0
-
-def _get_llm_raw_result(prompt: str) -> dict | None:
-    """
-    Runs a single LLM parsing attempt (Gemini if not exhausted, otherwise
-    Ollama). Returns a raw dict, before schema validation — validation happens
-    at the analyze_post_with_llm level so it applies identically to both paths.
-    """
-    global GEMINI_EXHAUSTED, GEMINI_ERROR_COUNT, _last_gemini_call
-    if not GEMINI_EXHAUSTED:
-        with _gemini_rate_lock:
-            now = time.time()
-            elapsed = now - _last_gemini_call
-            if elapsed < 4.0:
-                time.sleep(4.0 - elapsed)
-            _last_gemini_call = time.time()
-            
-        try:
-            response = get_gemini_client().models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ApartmentData,
-                ),
-            )
-            result = response.parsed.model_dump() if response.parsed else json.loads(response.text)
-            with _gemini_lock:
-                GEMINI_ERROR_COUNT = 0
-            return result
-        except Exception as gemini_err:
-            error_msg = str(gemini_err)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                _safe_print("\n    Gemini quota exhausted. Switching permanently to Ollama...")
-                with _gemini_lock:
-                    GEMINI_EXHAUSTED = True
-            elif "404" in error_msg or "NOT_FOUND" in error_msg:
-                _safe_print(f"\n    WARNING: Gemini model '{GEMINI_MODEL}' not found ({error_msg}).")
-                _safe_print("    The model is misconfigured or deprecated — update GEMINI_MODEL in config.py")
-                with _gemini_lock:
-                    GEMINI_EXHAUSTED = True
-            else:
-                with _gemini_lock:
-                    GEMINI_ERROR_COUNT += 1
-                    current_count = GEMINI_ERROR_COUNT
-                _safe_print(f"\n    WARNING: Gemini error ({error_msg}). Falling back to Ollama...")
-                if current_count >= GEMINI_MAX_CONSECUTIVE_ERRORS:
-                    _safe_print(f"\n    {current_count} consecutive Gemini errors. Switching permanently to Ollama...")
-                    with _gemini_lock:
-                        GEMINI_EXHAUSTED = True
-    else:
-        _safe_print("[Local Ollama] ")
-
-    try:
-        with _ollama_lock:
-            ollama_response = ollama.chat(
-                model='qwen2.5:7b',
-                messages=[{'role': 'user', 'content': prompt}],
-                format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
-                options={'temperature': 0, 'num_ctx': 4096},
-                keep_alive='10m',
-            )
-        return json.loads(ollama_response['message']['content'])
-    except Exception as ollama_err:
-        _safe_print(f"\n    ERROR: local Ollama analysis failed: {ollama_err}")
-        return None
-
-def analyze_post_with_llm(text: str) -> dict | None:
-    """
-    Two attempts max: each attempt runs the LLM and then validates the output
-    against ApartmentData. A raw call failure (LLM/network error) or a schema
-    validation failure both count as one attempt; failure on both -> None
-    (verdict parse_failed for the caller).
-    """
-    prompt = get_apartment_prompt_improved(_clean_post_for_llm(text))
-    for attempt in range(2):
-        raw = _get_llm_raw_result(prompt)
-        if raw is None:
-            _safe_print(f"    WARNING: LLM call returned no result (attempt {attempt + 1}/2)")
-            continue
-        try:
-            return ApartmentData.model_validate(raw).model_dump()
-        except Exception as validation_err:
-            _safe_print(f"    WARNING: LLM output failed schema validation (attempt {attempt + 1}/2): {validation_err}")
-    return None
 
 
 _gmaps_cap_lock = threading.Lock()
