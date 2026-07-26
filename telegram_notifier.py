@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 
 import config
 import storage
+from core.normalize import map_bool
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -61,13 +62,23 @@ def _group_post_ids(post_url: str) -> tuple[str, str] | None:
 def _format_listing_message(fields: dict, score: int) -> str:
     price = fields.get("price_val")
     price_line = f"{int(price):,} ₪" if price else "מחיר לא ידוע"
+    entry_date = fields.get("entry_date") or "?"
+    elevator = map_bool(fields.get("elevator")) or "?"
+    parking = fields.get("parking") or "אין"
+    shelter = map_bool(fields.get("shelter")) or "?"
+    arnona = fields.get("arnona") or "?"
+    vaad = fields.get("vaad") or "?"
+
     lines = [
         f"דירה חדשה — ציון התאמה {score}/100",
-        f"{fields.get('rooms_val', '')} חדרים | {price_line}",
+        f"{fields.get('rooms_val', '')} חדרים | {price_line} | כניסה: {entry_date}",
         f"מרחק הליכה: {fields.get('distance_text') or '?'} ק\"מ",
-        f"קומה: {fields.get('floor', '')}",
+        f"קומה: {fields.get('floor', '')} | מעלית: {elevator} | חניה: {parking} | ממ\"ד: {shelter}",
+        f"ארנונה: {arnona} | ועד בית: {vaad}",
         f"כתובת: {fields.get('address', '')}",
     ]
+    if fields.get("address_warning"):
+        lines.append(f"⚠️ {fields['address_warning']}")
     if fields.get("is_agent"):
         lines.append("תיווך")
     return "\n".join(lines)
@@ -102,7 +113,8 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
     return message_id
 
 
-def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str, address: str):
+def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str, address: str,
+                          entry_date: str = "", floor: str = "", elevator: str = ""):
     """Sent by bot_listener.py once a listing crosses VOTES_TO_HIGHLIGHT up-votes
     — a distinct, no-buttons message calling out a listing both voters liked."""
     if not _configured():
@@ -110,7 +122,8 @@ def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str
     price_line = f"{price} ₪" if price else "מחיר לא ידוע"
     text = (
         f"🔥 דירה חמה — {config.VOTES_TO_HIGHLIGHT}+ הצבעות חיוביות!\n"
-        f"{rooms} חדרים | {price_line} | מרחק הליכה {distance_km or '?'} ק\"מ\n"
+        f"{rooms} חדרים | {price_line} | מרחק הליכה {distance_km or '?'} ק\"מ | כניסה: {entry_date or '?'}\n"
+        f"קומה: {floor or '?'} | מעלית: {elevator or '?'}\n"
         f"{address}\n\n{post_url}"
     )
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})

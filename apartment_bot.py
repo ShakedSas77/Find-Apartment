@@ -7,7 +7,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
-    TELEGRAM_ENABLED,
+    TELEGRAM_ENABLED, SHEET_HEADERS,
 )
 from core.util import _with_retries
 from core.normalize import BIDI_RE, _strip_comment_section
@@ -19,6 +19,7 @@ from core.evaluate import (
 from sheets import setup_google_sheet, dedupe_and_sort_sheet
 from fb_scraper import run_scraper
 import env
+import scoring
 import storage
 import telegram_notifier
 
@@ -168,6 +169,79 @@ def print_stats():
         for address, cnt in top_addresses:
             print(f"  {cnt:4}  {address}")
 
+def _bool_cell(s: str) -> bool | None:
+    if s == "כן": return True
+    if s == "לא": return False
+    return None
+
+def _number_cell(s: str) -> float | None:
+    cleaned = (s or "").replace(",", "").replace("₪", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+_COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
+_COL_ELEVATOR, _COL_PARKING, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 10, 11, 13
+_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
+
+def _fields_from_sheet_row(row: list) -> dict:
+    """
+    Reconstructs the subset of compute_fit_score()'s expected fields dict from
+    an already-written sheet row. lat/lon were never persisted anywhere (not
+    the sheet, not the DB), so the location score's directional adjustment
+    comes out neutral (0) here — everything else recomputes for real.
+    """
+    def cell(i):
+        return row[i] if len(row) > i else ""
+
+    dist_km = _number_cell(cell(_COL_DIST_KM))
+    floor_val = _number_cell(cell(_COL_FLOOR))
+    return {
+        "price_val": _number_cell(cell(_COL_PRICE)),
+        "rooms_val": _number_cell(cell(_COL_ROOMS)),
+        "distance_meters": dist_km * 1000 if dist_km is not None else None,
+        "entry_date": cell(_COL_ENTRY_DATE) or None,
+        "floor": int(floor_val) if floor_val is not None else None,
+        "elevator": _bool_cell(cell(_COL_ELEVATOR)),
+        "parking": cell(_COL_PARKING),
+        "shelter": _bool_cell(cell(_COL_SHELTER)),
+        "is_agent": _bool_cell(cell(_COL_AGENT)),
+        "address": cell(_COL_ADDRESS),
+        "lat": None, "lon": None,
+    }
+
+def recompute_sheet_scores():
+    """
+    Rewrites the ציון התאמה cell of every existing sheet row using the current
+    scoring.compute_fit_score() formula — for when the formula itself changes
+    (as in the entry-date curve redesign) and old rows are left holding scores
+    from the previous version. No browser, no Maps/Gemini calls.
+    """
+    sheet, _ = setup_google_sheet()
+    data = sheet.get_all_values()
+    rows = data[1:]
+    if not rows:
+        print("Sheet has no data rows.")
+        return
+
+    changed = 0
+    new_scores = []
+    for row in rows:
+        old_score = row[_SCORE_COL_INDEX] if len(row) > _SCORE_COL_INDEX else ""
+        new_score = scoring.compute_fit_score(_fields_from_sheet_row(row))
+        if str(new_score) != old_score.strip():
+            changed += 1
+        new_scores.append([new_score])
+
+    col_letter = chr(ord('A') + _SCORE_COL_INDEX)
+    _with_retries(lambda: sheet.update(
+        range_name=f"{col_letter}2:{col_letter}{len(rows) + 1}",
+        values=new_scores,
+        value_input_option="RAW",
+    ))
+    print(f"Recomputed fit score for {len(rows)} row(s); {changed} changed.")
+
 def prune_data():
     """
     On-demand cleanup, no browser: drops sheet rows and lightens local DB rows
@@ -195,6 +269,8 @@ if __name__ == "__main__":
                          help="Print verdict counts and Maps usage from the local DB, then exit")
     parser.add_argument("--prune", action="store_true",
                          help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
+    parser.add_argument("--recompute-scores", action="store_true",
+                         help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
     args = parser.parse_args()
 
     env.require_env()
@@ -214,6 +290,10 @@ if __name__ == "__main__":
 
     if args.prune:
         prune_data()
+        sys.exit(0)
+
+    if args.recompute_scores:
+        recompute_sheet_scores()
         sys.exit(0)
 
     print("\n=======================================================")

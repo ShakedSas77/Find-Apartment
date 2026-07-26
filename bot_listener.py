@@ -32,6 +32,7 @@ _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT_SECONDS = 30
 _SCORE_COL = config.SHEET_HEADERS.index("ציון התאמה") + 1
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ADDRESS = 1, 2, 3, 13  # 0-based row indexes
+_COL_ENTRY_DATE, _COL_FLOOR, _COL_ELEVATOR = 4, 5, 6
 
 
 def _call(method: str, payload: dict) -> dict | list | None:
@@ -131,6 +132,9 @@ def _handle_callback_query(cq: dict, sheet):
                 rooms=row[_COL_ROOMS] if len(row) > _COL_ROOMS else "",
                 distance_km=row[_COL_DIST_KM] if len(row) > _COL_DIST_KM else "",
                 address=row[_COL_ADDRESS] if len(row) > _COL_ADDRESS else "",
+                entry_date=row[_COL_ENTRY_DATE] if len(row) > _COL_ENTRY_DATE else "",
+                floor=row[_COL_FLOOR] if len(row) > _COL_FLOOR else "",
+                elevator=row[_COL_ELEVATOR] if len(row) > _COL_ELEVATOR else "",
             )
 
     if chat_id and message_id:

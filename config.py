@@ -255,7 +255,7 @@ NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
 # ─── Telegram (optional push + voting) ───────────────────────────────────────────
 # Kill switch — bot runs fine with this False and no Telegram env vars set at all.
 # When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
-TELEGRAM_ENABLED = False
+TELEGRAM_ENABLED = True
 
 # Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
 VOTES_TO_REMOVE = 2
