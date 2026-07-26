@@ -32,27 +32,39 @@ def test_zero_price_scores_zero():
 
 # --- _entry_date_score ---
 
-def test_entry_date_within_ideal_window_is_full_score():
-    assert scoring._entry_date_score("01/10") == SCORE_WEIGHT_ENTRY_DATE
+def test_entry_date_exact_target_is_full_score():
+    assert scoring._entry_date_score("04/10") == SCORE_WEIGHT_ENTRY_DATE
 
 
-def test_entry_date_rest_of_target_month_scores_below_ideal_but_positive():
+def test_entry_date_rest_of_target_month_scores_below_full_but_positive():
     score = scoring._entry_date_score("20/10")
     assert 0 < score < SCORE_WEIGHT_ENTRY_DATE
 
 
-def test_entry_date_adjacent_month_scores_lower_than_target_month():
-    september_score = scoring._entry_date_score("15/09")
-    october_score = scoring._entry_date_score("20/10")
-    assert 0 < september_score < october_score
+def test_entry_date_closer_to_target_scores_higher():
+    near_score = scoring._entry_date_score("20/10")
+    far_score = scoring._entry_date_score("15/09")
+    assert far_score < near_score
 
 
-def test_entry_date_far_outside_window_scores_zero():
-    assert scoring._entry_date_score("15/05") == 0.0
+def test_entry_date_after_target_decays_slower_than_before():
+    # Oct 20 (16 days after target) vs Sep 23 (11 days before target) — the
+    # "after" side is more forgiving, so the further-away date still wins.
+    after_score = scoring._entry_date_score("20/10")
+    before_score = scoring._entry_date_score("23/09")
+    assert after_score > before_score
 
 
-def test_entry_date_immediate_scores_zero():
-    assert scoring._entry_date_score("מיידי") == 0.0
+def test_entry_date_far_outside_window_scores_near_zero():
+    assert scoring._entry_date_score("15/05") < 0.01 * SCORE_WEIGHT_ENTRY_DATE
+
+
+def test_entry_date_immediate_uses_todays_distance_from_target():
+    from datetime import date
+    on_target = scoring._entry_date_score("מיידי", today=date(2026, 10, 4))
+    far_from_target = scoring._entry_date_score("מיידי", today=date(2026, 1, 1))
+    assert on_target == SCORE_WEIGHT_ENTRY_DATE
+    assert far_from_target < 0.01 * SCORE_WEIGHT_ENTRY_DATE
 
 
 def test_entry_date_missing_scores_zero():
@@ -60,8 +72,9 @@ def test_entry_date_missing_scores_zero():
     assert scoring._entry_date_score(None) == 0.0
 
 
-def test_entry_date_month_name_only_uses_month_tier():
-    assert scoring._entry_date_score("ספטמבר") == SCORE_WEIGHT_ENTRY_DATE * 0.4
+def test_entry_date_month_name_only_scores_positive_but_below_full():
+    score = scoring._entry_date_score("ספטמבר")
+    assert 0 < score < SCORE_WEIGHT_ENTRY_DATE
 
 
 # --- _direction_adjustment ---

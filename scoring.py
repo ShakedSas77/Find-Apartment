@@ -21,7 +21,7 @@ from config import (
     SCORE_WEIGHT_AMENITIES, SCORE_WEIGHT_ROOMS, SCORE_WEIGHT_PARKING,
     AGENT_FEE_AMORTIZE_MONTHS, SCORE_PRICE_SOFT_CEILING,
     SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY,
-    SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS,
+    SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE, SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER,
     SCORE_LOCATION_NORTH_BONUS_PER_KM, SCORE_LOCATION_SOUTH_PENALTY_PER_KM,
     SCORE_LOCATION_EAST_PENALTY_PER_KM, SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT,
     SCORE_LOCATION_GIVATAIM_BONUS,
@@ -104,46 +104,63 @@ _HEBREW_MONTH_NAMES = {
 }
 
 
-def _score_month(month: int, day: int | None) -> float:
+def _entry_date_curve(days_signed: int) -> float:
     """
-    Fraction (0..1) of SCORE_WEIGHT_ENTRY_DATE. Uses a fixed placeholder year
-    for the day-level +/-window check — fine for a target near October, but
-    would need wraparound handling if SCORE_ENTRY_DATE_TARGET_MONTH ever moved
-    close to December/January.
+    Continuous decay, not stepped tiers: 1.0 exactly on target, ~0.61 at
+    one sigma away, ~0.14 at 2*sigma, tapering smoothly from there rather
+    than jumping between fixed bands. This is what makes e.g. Sep 1 (further
+    away) score lower than Sep 20 (closer), even though both are "September".
+
+    Asymmetric: days_signed < 0 (before target) decays on
+    SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE, days_signed > 0 (after target) decays
+    on the more forgiving SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER.
     """
-    if day is not None:
-        target = date(2001, SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY)
-        try:
-            candidate = date(2001, month, day)
-        except ValueError:
-            return 0.0
-        if abs((candidate - target).days) <= SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS:
-            return 1.0
-    if month == SCORE_ENTRY_DATE_TARGET_MONTH:
-        return 0.8
-    if month in (SCORE_ENTRY_DATE_TARGET_MONTH - 1, SCORE_ENTRY_DATE_TARGET_MONTH + 1):
-        return 0.4
-    return 0.0
+    sigma = SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER if days_signed > 0 else SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE
+    return math.exp(-(days_signed ** 2) / (2 * sigma ** 2))
 
 
-def _entry_date_score(entry_date: str | None) -> float:
+def _score_month_day(month: int, day: int) -> float:
     """
-    "מיידי" (immediate) is treated as now — outside the Sep-Nov band, so it
-    scores 0 same as a genuinely bad-timing date. A missing/unparseable value
-    also scores 0, but for a different reason (no signal either way) — both
-    collapse to the same additive contribution, which is fine here.
+    Fraction (0..1) of SCORE_WEIGHT_ENTRY_DATE for a specific month/day, via a
+    fixed placeholder year — fine for a target near October, but would need
+    wraparound handling if SCORE_ENTRY_DATE_TARGET_MONTH ever moved close to
+    December/January.
     """
-    if not entry_date or entry_date == "מיידי":
+    target = date(2001, SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY)
+    try:
+        candidate = date(2001, month, day)
+    except ValueError:
         return 0.0
+    return _entry_date_curve((candidate - target).days)
+
+
+def _entry_date_score(entry_date: str | None, today: date | None = None) -> float:
+    """
+    "מיידי" (immediate) is scored against today's *real* distance from the
+    target date (not the year-agnostic placeholder used for parsed dates) —
+    it's a real "right now", so it should decay the same continuous curve
+    everything else does. A missing/unparseable value is the only hard 0:
+    there's genuinely no date to measure a distance from. `today` is
+    injectable so tests don't depend on the wall clock.
+    """
+    if not entry_date:
+        return 0.0
+
+    if entry_date == "מיידי":
+        today = today or date.today()
+        target_this_year = date(today.year, SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY)
+        return SCORE_WEIGHT_ENTRY_DATE * _entry_date_curve((today - target_this_year).days)
 
     match = _ENTRY_DATE_DDMM_RE.match(entry_date.strip())
     if match:
         day, month = int(match.group(1)), int(match.group(2))
-        return SCORE_WEIGHT_ENTRY_DATE * _score_month(month, day)
+        return SCORE_WEIGHT_ENTRY_DATE * _score_month_day(month, day)
 
     for name, month in _HEBREW_MONTH_NAMES.items():
         if name in entry_date:
-            return SCORE_WEIGHT_ENTRY_DATE * _score_month(month, day=None)
+            # No exact day in free text ("ספטמבר") — the 15th is a reasonable
+            # mid-month stand-in for the curve.
+            return SCORE_WEIGHT_ENTRY_DATE * _score_month_day(month, day=15)
 
     return 0.0
 

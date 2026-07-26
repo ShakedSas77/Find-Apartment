@@ -191,14 +191,24 @@ AGENT_FEE_AMORTIZE_MONTHS = 12
 # and beyond — "~6500 is still ok, but it gets bad fast after that."
 SCORE_PRICE_SOFT_CEILING = 6500
 
-# Entry-date scoring target: full marks within +/- SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS
-# of this month/day (year-agnostic — resolved to the nearest upcoming occurrence),
-# a flat "good enough" score for the rest of that calendar month, a lower score for
-# the adjacent months, and near-zero outside that 3-month band. A missing/
-# unparseable/"immediate" entry date scores 0 on this component (no signal either way).
+# Entry-date scoring target: a smooth (Gaussian) curve peaking at 1.0 exactly
+# on this month/day and decaying continuously as the listing's date gets
+# further away — not stepped tiers, so e.g. Sep 1 scores lower than Sep 20
+# even though both are "September". Deliberately ASYMMETRIC, not a plain
+# Gaussian: moving in a bit late (after the target, toward Oct/Nov) is more
+# tolerable than moving in early (before the target, toward Sept/earlier), so
+# the "after" side decays slower — e.g. Oct 20 (16 days after) scores higher
+# than Sep 23 (11 days before) despite being further away in raw days.
+# score = exp(-days_signed^2 / (2*sigma^2)), sigma chosen per side by sign;
+# at days_signed == sigma the score is ~0.61, at 2*sigma it's ~0.14. "מיידי"
+# (immediate) is scored the same way against today's actual distance from the
+# target (real calendar date, not year-agnostic) — a missing/unparseable
+# entry date is the only case that scores a hard 0, since there's genuinely
+# no date to measure.
 SCORE_ENTRY_DATE_TARGET_MONTH = 10
 SCORE_ENTRY_DATE_TARGET_DAY = 4
-SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS = 7
+SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE = 20
+SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER = 45
 
 # Directional location adjustment relative to DESTINATION_LAT/DESTINATION_LON:
 # north of the destination is a bonus, south or east is a penalty (west is neutral —
