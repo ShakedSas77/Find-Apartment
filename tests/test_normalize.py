@@ -9,7 +9,7 @@ from core.normalize import (
     _normalize_bimonthly_fee,
     _parse_floor,
 )
-from apartment_bot import (
+from core.dedupe import (
     _listing_dedupe_key,
     _phone_price_rooms_fingerprint,
     _text_dedup_hash,
