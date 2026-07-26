@@ -212,7 +212,11 @@ python apartment_bot.py --prune
 5. After scanning, deduplicates cross-posted listings (same street/rooms/price, different URL — keeps the newest post date) and sorts the sheet by post date, newest first
 6. Prints an end-of-run summary: groups scanned, posts seen, pre-filtered, sent to the LLM, matches added, Maps calls used this month, and checkpoints hit
 
-Post dates are parsed from Facebook's own timestamp text (`relative_to_date` in `apartment_bot.py`) and assume an **English-locale Facebook UI** (`"5h"`, `"3 hrs"`, `"1 day"`, `"Yesterday"`, `"July 9 at 5:50 PM"`, etc.) — if your Facebook account's UI language changes, unrecognized formats pass through unchanged and log a one-time warning per run rather than failing silently.
+Post dates are parsed from Facebook's own timestamp text (`relative_to_date` in `core/normalize.py`) and assume an **English-locale Facebook UI** (`"5h"`, `"3 hrs"`, `"1 day"`, `"Yesterday"`, `"July 9 at 5:50 PM"`, etc.) — if your Facebook account's UI language changes, unrecognized formats pass through unchanged and log a one-time warning per run rather than failing silently.
+
+### Code layout
+
+`apartment_bot.py` is just the CLI entrypoint now — the actual logic lives in focused modules: `fb_scraper.py` (Playwright/FB scanning), `core/evaluate.py` (the LLM-parse → filter → build-row pipeline), `core/llm.py` (Gemini/Ollama), `maps.py` (distance/geocoding), `sheets.py` (Google Sheets I/O), `core/normalize.py` (text/domain parsing), `core/dedupe.py` (cross-post dedup), `browser.py` (stealth/launch args), `core/util.py`/`core/errors.py` (shared helpers). See `CLAUDE.md` for the full breakdown. Run commands below are unaffected — `apartment_bot.py` is still the file you run.
 
 ## Fit Score
 
