@@ -1,5 +1,6 @@
 import argparse
 import sys
+import time
 import traceback
 
 from config import (
@@ -182,15 +183,16 @@ def _number_cell(s: str) -> float | None:
         return None
 
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
-_COL_ELEVATOR, _COL_PARKING, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 10, 11, 13
+_COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 def _fields_from_sheet_row(row: list) -> dict:
     """
-    Reconstructs the subset of compute_fit_score()'s expected fields dict from
-    an already-written sheet row. lat/lon were never persisted anywhere (not
-    the sheet, not the DB), so the location score's directional adjustment
-    comes out neutral (0) here — everything else recomputes for real.
+    Reconstructs a fields dict from an already-written sheet row — enough for
+    both compute_fit_score() and telegram_notifier's message formatting.
+    lat/lon were never persisted anywhere (not the sheet, not the DB), so the
+    location score's directional adjustment comes out neutral (0) here —
+    everything else recomputes/displays for real.
     """
     def cell(i):
         return row[i] if len(row) > i else ""
@@ -201,10 +203,13 @@ def _fields_from_sheet_row(row: list) -> dict:
         "price_val": _number_cell(cell(_COL_PRICE)),
         "rooms_val": _number_cell(cell(_COL_ROOMS)),
         "distance_meters": dist_km * 1000 if dist_km is not None else None,
+        "distance_text": cell(_COL_DIST_KM),
         "entry_date": cell(_COL_ENTRY_DATE) or None,
         "floor": int(floor_val) if floor_val is not None else None,
         "elevator": _bool_cell(cell(_COL_ELEVATOR)),
         "parking": cell(_COL_PARKING),
+        "arnona": cell(_COL_ARNONA),
+        "vaad": cell(_COL_VAAD),
         "shelter": _bool_cell(cell(_COL_SHELTER)),
         "is_agent": _bool_cell(cell(_COL_AGENT)),
         "address": cell(_COL_ADDRESS),
@@ -242,6 +247,44 @@ def recompute_sheet_scores():
     ))
     print(f"Recomputed fit score for {len(rows)} row(s); {changed} changed.")
 
+def backfill_ratings():
+    """
+    Pushes every currently-listed sheet row to Telegram with the 0-10 rating
+    keyboard, for collecting human judgment on apartments already added —
+    the training set for eventually regressing compute_fit_score()'s weights
+    against real preference (storage.get_ratings_with_listing_data()). Reuses
+    the same row->fields reconstruction as --recompute-scores. No browser, no
+    Maps/Gemini calls. 3s pacing between sends — Telegram's group-chat rate
+    limit is roughly 20 messages/minute; telegram_notifier._call() also
+    retries once on a 429, honoring the server's own retry_after cooldown.
+    """
+    if not TELEGRAM_ENABLED:
+        print("TELEGRAM_ENABLED is False in config.py — nothing to send.")
+        return
+    sheet, _ = setup_google_sheet()
+    data = sheet.get_all_values()
+    rows = data[1:]
+    if not rows:
+        print("Sheet has no data rows.")
+        return
+
+    telegram_notifier.send_backfill_announcement(len(rows))
+    sent = 0
+    for row in rows:
+        url = row[0] if row else ""
+        if not url:
+            continue
+        score_cell = row[_SCORE_COL_INDEX].strip() if len(row) > _SCORE_COL_INDEX else ""
+        try:
+            score = int(score_cell)
+        except ValueError:
+            score = 0
+        message_id = telegram_notifier.send_listing_alert(url, _fields_from_sheet_row(row), score)
+        if message_id:
+            sent += 1
+        time.sleep(3)
+    print(f"Sent {sent}/{len(rows)} listing(s) to Telegram for rating.")
+
 def prune_data():
     """
     On-demand cleanup, no browser: drops sheet rows and lightens local DB rows
@@ -271,6 +314,8 @@ if __name__ == "__main__":
                          help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
     parser.add_argument("--recompute-scores", action="store_true",
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
+    parser.add_argument("--backfill-ratings", action="store_true",
+                         help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
     args = parser.parse_args()
 
     env.require_env()
@@ -294,6 +339,10 @@ if __name__ == "__main__":
 
     if args.recompute_scores:
         recompute_sheet_scores()
+        sys.exit(0)
+
+    if args.backfill_ratings:
+        backfill_ratings()
         sys.exit(0)
 
     print("\n=======================================================")

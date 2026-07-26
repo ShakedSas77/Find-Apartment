@@ -1,13 +1,17 @@
 """
-=== Telegram vote listener ===
+=== Telegram vote + rating listener ===
 
-Long-polls Telegram getUpdates for taps on the vote buttons attached by
-telegram_notifier.send_listing_alert(), records each vote, and acts on the
-sheet based on the running tally:
-  - VOTES_TO_REMOVE down-votes -> the listing's row is deleted from the sheet.
-  - each up-vote -> the sheet's fit-score cell is bumped by SCORE_VOTE_BOOST
-    (clamped to 100).
-  - VOTES_TO_HIGHLIGHT up-votes -> a highlight message is sent to the chat.
+Long-polls Telegram getUpdates for taps on the buttons attached by
+telegram_notifier.build_listing_keyboard(): a ⭐/🗑 vote row and two rows of
+0-10 rating buttons.
+  - Votes act on the sheet based on the running tally: VOTES_TO_REMOVE
+    down-votes deletes the listing's row; each up-vote bumps the sheet's
+    fit-score cell by SCORE_VOTE_BOOST (clamped to 100); VOTES_TO_HIGHLIGHT
+    up-votes sends a highlight message to the chat.
+  - Ratings (storage.record_rating()) have no sheet side effect at all —
+    pure data collection, the training set for eventually regressing
+    compute_fit_score()'s weights against real human judgment
+    (storage.get_ratings_with_listing_data()).
 A separate long-lived process — not part of the scrape.
 
     python bot_listener.py
@@ -55,15 +59,6 @@ def _open_sheet():
     return gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
 
 
-def _markup(up: int, down: int, group_id: str, post_id: str) -> dict:
-    return {
-        "inline_keyboard": [[
-            {"text": f"⭐ מעניין ({up})", "callback_data": f"up:{group_id}:{post_id}"},
-            {"text": f"🗑 לא רלוונטי ({down})", "callback_data": f"down:{group_id}:{post_id}"},
-        ]]
-    }
-
-
 def _find_row(sheet, url: str) -> tuple[int, list] | None:
     """Row number (1-based) + cell values for the listing, or None if it's not
     (or no longer) in the sheet — e.g. already removed by a prior down-vote,
@@ -90,8 +85,32 @@ def _boost_score(sheet, row_num: int, row: list):
     sheet.update_cell(row_num, _SCORE_COL, new_score)
 
 
+def _handle_rating(cq: dict, parts: list[str]):
+    """rate:{score}:{group_id}:{post_id} — pure data collection, no sheet
+    side effect, unlike the up/down vote (see _handle_callback_query)."""
+    _, score_str, group_id, post_id = parts
+    try:
+        score = int(score_str)
+    except ValueError:
+        return
+    url = f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
+
+    voter = cq.get("from", {})
+    voter_id = str(voter.get("id", ""))
+    voter_name = voter.get("first_name") or voter.get("username") or voter_id
+    storage.record_rating(url, voter_id, voter_name, score)
+
+    _call("answerCallbackQuery", {
+        "callback_query_id": cq.get("id"),
+        "text": f"ניקוד {score}/10 נשמר, תודה!",
+    })
+
+
 def _handle_callback_query(cq: dict, sheet):
     parts = cq.get("data", "").split(":")
+    if parts and parts[0] == "rate" and len(parts) == 4:
+        _handle_rating(cq, parts)
+        return
     if len(parts) != 3:
         return
     vote, group_id, post_id = parts
@@ -141,7 +160,7 @@ def _handle_callback_query(cq: dict, sheet):
         _call("editMessageReplyMarkup", {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": _markup(up, down, group_id, post_id),
+            "reply_markup": telegram_notifier.build_listing_keyboard(up, down, group_id, post_id),
         })
     _call("answerCallbackQuery", {"callback_query_id": cq.get("id")})
 

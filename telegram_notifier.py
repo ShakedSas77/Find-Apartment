@@ -10,6 +10,7 @@ the sheet).
 """
 
 import os
+import time
 
 import requests
 from dotenv import load_dotenv
@@ -36,12 +37,20 @@ def _configured() -> bool:
     return False
 
 
-def _call(method: str, payload: dict) -> dict | None:
+def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
     url = _API_BASE.format(token=TELEGRAM_BOT_TOKEN, method=method)
     try:
         resp = requests.post(url, json=payload, timeout=10)
         data = resp.json()
         if not data.get("ok"):
+            # 429 from a burst of sends (e.g. --backfill-ratings) carries the
+            # server's own cooldown in retry_after — honor it and retry once
+            # rather than dropping the message, since a single flood-control
+            # hit is otherwise indistinguishable from a real failure.
+            retry_after = data.get("parameters", {}).get("retry_after")
+            if not _retried and data.get("error_code") == 429 and retry_after:
+                time.sleep(retry_after + 1)
+                return _call(method, payload, _retried=True)
             print(f"WARNING: Telegram {method} failed: {data.get('description')}")
             return None
         return data.get("result")
@@ -81,11 +90,31 @@ def _format_listing_message(fields: dict, score: int) -> str:
         lines.append(f"⚠️ {fields['address_warning']}")
     if fields.get("is_agent"):
         lines.append("תיווך")
+    lines.append("דרג את הדירה (0-10) 👇 — עוזר לנו לכייל את מערכת הניקוד")
     return "\n".join(lines)
 
 
+def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> dict:
+    """
+    Shared reply_markup for a listing message: the ⭐/🗑 vote row (drives real
+    sheet actions — see bot_listener.py) plus two rows of 0-10 rating buttons
+    (pure data collection — storage.record_rating() — no sheet side effect).
+    Rebuilt on every callback (bot_listener.py), not just at send time, so a
+    vote tap doesn't wipe the rating buttons off the message and vice versa.
+    """
+    vote_row = [
+        {"text": f"⭐ מעניין ({up})", "callback_data": f"up:{group_id}:{post_id}"},
+        {"text": f"🗑 לא רלוונטי ({down})", "callback_data": f"down:{group_id}:{post_id}"},
+    ]
+    rating_rows = [
+        [{"text": str(n), "callback_data": f"rate:{n}:{group_id}:{post_id}"} for n in range(0, 6)],
+        [{"text": str(n), "callback_data": f"rate:{n}:{group_id}:{post_id}"} for n in range(6, 11)],
+    ]
+    return {"inline_keyboard": [vote_row, *rating_rows]}
+
+
 def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
-    """Sends a new match to the shared Telegram chat with vote buttons.
+    """Sends a new match to the shared Telegram chat with vote + rating buttons.
     Returns the sent message_id, or None on any failure/misconfiguration."""
     if not _configured():
         return None
@@ -98,12 +127,7 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": f"{_format_listing_message(fields, score)}\n\n{post_url}",
-        "reply_markup": {
-            "inline_keyboard": [[
-                {"text": "⭐ מעניין", "callback_data": f"up:{group_id}:{post_id}"},
-                {"text": "🗑 לא רלוונטי", "callback_data": f"down:{group_id}:{post_id}"},
-            ]]
-        },
+        "reply_markup": build_listing_keyboard(0, 0, group_id, post_id),
     }
     result = _call("sendMessage", payload)
     if not result:
@@ -125,6 +149,18 @@ def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str
         f"{rooms} חדרים | {price_line} | מרחק הליכה {distance_km or '?'} ק\"מ | כניסה: {entry_date or '?'}\n"
         f"קומה: {floor or '?'} | מעלית: {elevator or '?'}\n"
         f"{address}\n\n{post_url}"
+    )
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
+
+
+def send_backfill_announcement(count: int):
+    """Sent once before apartment_bot.py --backfill-ratings replays every
+    sheet row, so the chat knows why a burst of old listings just showed up."""
+    if not _configured():
+        return
+    text = (
+        f"📋 גיבוי היסטורי — {count} דירות מהעבר.\n"
+        f"דרגו כל אחת (0-10) — עוזר לנו לכייל את מערכת הניקוד לפי מה שבאמת חשוב לכם."
     )
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
