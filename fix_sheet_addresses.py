@@ -21,7 +21,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from config import CREDENTIALS_FILE, SHEET_HEADERS
-from apartment_bot import SHEET_ID, gmaps_client, get_walking_distance, dedupe_and_sort_sheet
+from env import get_sheet_id
+from apartment_bot import get_gmaps_client, get_walking_distance, dedupe_and_sort_sheet
 
 DRY_RUN = "--write" not in sys.argv
 
@@ -41,7 +42,7 @@ def geocode_with_retry(query, attempts=4, base_delay=3.0):
     last_err = None
     for attempt in range(attempts):
         try:
-            return gmaps_client.geocode(query, language='iw', region='il')
+            return get_gmaps_client().geocode(query, language='iw', region='il')
         except googlemaps.exceptions.ApiError as e:
             last_err = e
             if attempt < attempts - 1:
@@ -103,7 +104,7 @@ def main():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     gc = gspread.authorize(creds)
-    sheet = gc.open_by_key(SHEET_ID).sheet1
+    sheet = gc.open_by_key(get_sheet_id()).sheet1
     data = sheet.get_all_values()
     rows = data[1:]
 

@@ -11,7 +11,6 @@ import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
 import ollama
 import gspread
@@ -46,6 +45,7 @@ from config import (
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS
 )
 from prompts import get_apartment_prompt_improved
+import env
 import storage
 import scoring
 import distance_fallback
@@ -70,19 +70,33 @@ def map_bool(val):
     if val is False: return "לא"
     return ""
 
-# --- Load environment variables ---
-load_dotenv()
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GMAPS_API_KEY = os.getenv("GMAPS_API_KEY")
-SHEET_ID = os.getenv("SHEET_ID")
+# --- API clients ---
+# Lazy + double-checked-locked, not constructed at import time: importing this
+# module (e.g. to unit-test a pure function) must work with no .env at all.
+# Double-checking is required, not decorative — _scan_group_page runs a
+# 5-worker ThreadPoolExecutor over process_candidate_listing, so first touch
+# of either client is genuinely concurrent.
+_gemini_client = None
+_gemini_client_lock = threading.Lock()
 
-if not GEMINI_API_KEY or not GMAPS_API_KEY or not SHEET_ID:
-    print("ERROR: Missing GEMINI_API_KEY, GMAPS_API_KEY, or SHEET_ID in .env file")
-    sys.exit(1)
+def get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
+        with _gemini_client_lock:
+            if _gemini_client is None:
+                _gemini_client = genai.Client(api_key=env.get_gemini_api_key())
+    return _gemini_client
 
-# --- API Clients ---
-client = genai.Client(api_key=GEMINI_API_KEY)
-gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
+_gmaps_client = None
+_gmaps_client_lock = threading.Lock()
+
+def get_gmaps_client():
+    global _gmaps_client
+    if _gmaps_client is None:
+        with _gmaps_client_lock:
+            if _gmaps_client is None:
+                _gmaps_client = googlemaps.Client(key=env.get_gmaps_api_key())
+    return _gmaps_client
 
 GEMINI_EXHAUSTED = False
 GEMINI_ERROR_COUNT = 0
@@ -646,7 +660,7 @@ def setup_google_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     gc = gspread.authorize(creds)
-    sheet = gc.open_by_key(SHEET_ID).sheet1
+    sheet = gc.open_by_key(env.get_sheet_id()).sheet1
 
     try:
         # Check headers via row 1 only — avoids pulling the whole sheet into memory
@@ -840,7 +854,7 @@ def _resolve_ambiguous_city(street_core: str, candidate_cities: list[str]) -> st
         query = f"{street_core}, {city}, ישראל"
         try:
             storage.increment_gmaps_usage()
-            results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
+            results = _with_retries(lambda: get_gmaps_client().geocode(query, language="he", region="il"))
         except Exception as e:
             _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
             continue
@@ -862,7 +876,7 @@ def _resolve_ambiguous_city(street_core: str, candidate_cities: list[str]) -> st
             break
         try:
             storage.increment_gmaps_usage()
-            result = _with_retries(lambda: gmaps_client.distance_matrix(
+            result = _with_retries(lambda: get_gmaps_client().distance_matrix(
                 origins=formatted, destinations=DESTINATION_ADDRESS, mode="walking", language="he", region="il",
             ))
             element = result["rows"][0]["elements"][0]
@@ -1344,7 +1358,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
             _last_gemini_call = time.time()
             
         try:
-            response = client.models.generate_content(
+            response = get_gemini_client().models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -1514,7 +1528,7 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
 
     try:
         storage.increment_gmaps_usage()
-        results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
+        results = _with_retries(lambda: get_gmaps_client().geocode(query, language="he", region="il"))
     except Exception as e:
         _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
         return address, "", confidence, "שגיאת אימות כתובת", "geocode_error", None
@@ -1592,7 +1606,7 @@ def get_walking_distance(address: str):
 
     try:
         storage.increment_gmaps_usage()  # counted before the call — origins×destinations is always 1×1 here
-        result = _with_retries(lambda: gmaps_client.distance_matrix(
+        result = _with_retries(lambda: get_gmaps_client().distance_matrix(
             origins=origin,
             destinations=DESTINATION_ADDRESS,
             mode="walking",
@@ -2550,6 +2564,7 @@ if __name__ == "__main__":
                          help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
     args = parser.parse_args()
 
+    env.require_env()
     storage.init_db()
 
     if args.stats:
