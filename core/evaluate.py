@@ -132,12 +132,14 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     return storage.VERDICT_ADDED, fields
 
 def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
-    dist_text, dist_meters, address_confidence, address_warning, distance_source = get_walking_distance(fields["address"])
+    dist_text, dist_meters, address_confidence, address_warning, distance_source, lat, lon = get_walking_distance(fields["address"])
     fields["distance_text"] = dist_text
     fields["distance_meters"] = dist_meters
     fields["address_confidence"] = address_confidence
     fields["address_warning"] = address_warning
     fields["distance_source"] = distance_source
+    fields["lat"] = lat
+    fields["lon"] = lon
 
     row = [
         post_url,

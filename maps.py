@@ -212,24 +212,24 @@ def _gmaps_city_allowed(result: dict) -> bool:
     city = _gmaps_result_city(result)
     return any(target in formatted or target in city for target in GMAPS_TARGET_CITIES)
 
-def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str, float | None]:
+def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str, float | None, float | None]:
     """
-    Returns canonical_address, city, updated_confidence, warning, geocode_status, lat.
-    lat is only ever populated on the "ok" success path (a precise, city-
+    Returns canonical_address, city, updated_confidence, warning, geocode_status, lat, lon.
+    lat/lon are only ever populated on the "ok" success path (a precise, city-
     matched result) — every other path either never geocoded or got a
-    result too weak to trust for a geographic check, so callers needing lat
-    (e.g. the south-of-HaHagana exclusion) should treat None as "can't tell,
-    don't reject on this basis."
+    result too weak to trust for a geographic check, so callers needing them
+    (e.g. the south-of-HaHagana exclusion, or the fit-score direction signal)
+    should treat None as "can't tell, don't score/reject on this basis."
     """
     if not GMAPS_VALIDATE_ADDRESSES:
-        return address, "", confidence, "", "disabled", None
+        return address, "", confidence, "", "disabled", None, None
 
     if confidence in {"missing", "low"}:
-        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence", None
+        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence", None, None
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
-        return address, "", confidence, placeholder, "quota", None
+        return address, "", confidence, placeholder, "quota", None, None
 
     query = address
     if not any(city in query for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
@@ -240,29 +240,35 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
         results = _with_retries(lambda: get_gmaps_client().geocode(query, language="he", region="il"))
     except Exception as e:
         _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
-        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error", None
+        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error", None, None
 
     if not results:
-        return "", "", "low", "Google לא מצא את הכתובת", "not_found", None
+        return "", "", "low", "Google לא מצא את הכתובת", "not_found", None, None
 
     best = results[0]
     if not _gmaps_city_allowed(best):
-        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city", None
+        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city", None, None
 
     if not _gmaps_has_street_precision(best):
-        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision", None
+        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision", None, None
 
-    lat = best.get("geometry", {}).get("location", {}).get("lat")
-    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok", lat
+    location = best.get("geometry", {}).get("location", {})
+    lat = location.get("lat")
+    lon = location.get("lng")
+    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok", lat, lon
 
 def get_walking_distance(address: str):
     """
-    Returns distance_text, distance_meters, confidence, warning, source.
+    Returns distance_text, distance_meters, confidence, warning, source, lat, lon.
+    lat/lon are the listing's own geocoded coordinates (not the destination's)
+    — used by scoring.py for the north/south/east directional adjustment. Only
+    populated when a geocode actually ran and succeeded; None otherwise (see
+    _validate_address_with_geocoding's docstring for which paths that covers).
     """
     confidence, warning = _classify_address_confidence(address)
 
     if not address or len(address) < 3:
-        return "", 999999, "missing", "כתובת חסרה", "skipped"
+        return "", 999999, "missing", "כתובת חסרה", "skipped", None, None
 
     cached = storage.get_address_cache(address)
     if cached:
@@ -278,23 +284,25 @@ def get_walking_distance(address: str):
             cached.get("confidence") or confidence,
             cached.get("warning") or "",
             cached.get("distance_source") or "cache",
+            cached.get("lat"),
+            cached.get("lon"),
         )
 
     if address.strip() in _CITY_ONLY_ADDRESSES:
-        storage.save_address_cache(address, "", "", "low", "כתובת ברמת עיר בלבד", "", 999999, "skipped", "city_only")
-        return "", 999999, "low", "כתובת ברמת עיר בלבד", "skipped"
+        storage.save_address_cache(address, "", "", "low", "כתובת ברמת עיר בלבד", "", 999999, "skipped", "city_only", None, None)
+        return "", 999999, "low", "כתובת ברמת עיר בלבד", "skipped", None, None
 
-    canonical_address, city, confidence, geocode_warning, geocode_status, lat = _validate_address_with_geocoding(address, confidence)
+    canonical_address, city, confidence, geocode_warning, geocode_status, lat, lon = _validate_address_with_geocoding(address, confidence)
     warning = geocode_warning or warning
 
     if GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS and confidence not in {"high", "medium"}:
-        storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status)
-        return "", 999999, confidence, warning, "skipped"
+        storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status, lat, lon)
+        return "", 999999, confidence, warning, "skipped", lat, lon
 
     if EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT:
         south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
-        storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status)
-        return "", 999999, confidence, south_warning, "excluded_south"
+        storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
+        return "", 999999, confidence, south_warning, "excluded_south", lat, lon
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
@@ -302,10 +310,10 @@ def get_walking_distance(address: str):
         if fallback:
             fallback_text, fallback_meters = fallback
             fallback_warning = "הערכה קווית (מכסת Google הסתיימה)"
-            storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status)
-            return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate"
-        storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status)
-        return placeholder, 999999, confidence, warning, "quota"
+            storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status, lat, lon)
+            return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate", lat, lon
+        storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status, lat, lon)
+        return placeholder, 999999, confidence, warning, "quota", lat, lon
 
     # Safety-net addition for Google Maps: anchoring the search area
     origin = canonical_address or address
@@ -325,12 +333,12 @@ def get_walking_distance(address: str):
         if element["status"] == "OK":
             dist_meters = element["distance"]["value"]
             dist_text = f"{dist_meters / 1000:.1f}"
-            storage.save_address_cache(address, canonical_address, city, confidence, warning, dist_text, dist_meters, "google_maps", geocode_status)
-            return dist_text, dist_meters, confidence, warning, "google_maps"
+            storage.save_address_cache(address, canonical_address, city, confidence, warning, dist_text, dist_meters, "google_maps", geocode_status, lat, lon)
+            return dist_text, dist_meters, confidence, warning, "google_maps", lat, lon
 
-        storage.save_address_cache(address, canonical_address, city, confidence, "Distance Matrix לא החזיר מסלול תקין", "", 999999, "google_maps_failed", geocode_status)
-        return "", float('inf'), confidence, "Distance Matrix לא החזיר מסלול תקין", "google_maps_failed"
+        storage.save_address_cache(address, canonical_address, city, confidence, "Distance Matrix לא החזיר מסלול תקין", "", 999999, "google_maps_failed", geocode_status, lat, lon)
+        return "", float('inf'), confidence, "Distance Matrix לא החזיר מסלול תקין", "google_maps_failed", lat, lon
     except Exception as e:
         _safe_print(f"\n    [Google Maps API Error]: {_redact_api_key(str(e))}")
-        storage.save_address_cache(address, canonical_address, city, confidence, "שגיאת Distance Matrix", "", 999999, "google_maps_error", geocode_status)
-        return "", float('inf'), confidence, "שגיאת Distance Matrix", "google_maps_error"
+        storage.save_address_cache(address, canonical_address, city, confidence, "שגיאת Distance Matrix", "", 999999, "google_maps_error", geocode_status, lat, lon)
+        return "", float('inf'), confidence, "שגיאת Distance Matrix", "google_maps_error", lat, lon

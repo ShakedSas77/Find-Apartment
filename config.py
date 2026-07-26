@@ -174,15 +174,55 @@ SHEET_HEADERS = [
 
 # ─── Fit score ──────────────────────────────────────────────────────────────────
 # compute_fit_score() (scoring.py) weights, must sum to 100.
-SCORE_WEIGHT_PRICE = 40
-SCORE_WEIGHT_DISTANCE = 40
-SCORE_WEIGHT_AMENITIES = 20
+SCORE_WEIGHT_PRICE = 30
+SCORE_WEIGHT_LOCATION = 30
+SCORE_WEIGHT_ENTRY_DATE = 15
+SCORE_WEIGHT_AMENITIES = 10  # floor/elevator condition (primary) + shelter (minor bonus)
+SCORE_WEIGHT_ROOMS = 10
+SCORE_WEIGHT_PARKING = 5
 
 # Agent listings carry a one-time broker's fee (typically one month's rent) the
 # private-listing price doesn't. Amortized over a year of lease and folded into the
 # *scoring* price only (not the displayed price) so agent vs. private listings are
 # compared on a fairer effective-monthly-cost basis.
 AGENT_FEE_AMORTIZE_MONTHS = 12
+
+# Price scoring is flat-ish up to this point, then decays rapidly toward MAX_PRICE
+# and beyond — "~6500 is still ok, but it gets bad fast after that."
+SCORE_PRICE_SOFT_CEILING = 6500
+
+# Entry-date scoring target: full marks within +/- SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS
+# of this month/day (year-agnostic — resolved to the nearest upcoming occurrence),
+# a flat "good enough" score for the rest of that calendar month, a lower score for
+# the adjacent months, and near-zero outside that 3-month band. A missing/
+# unparseable/"immediate" entry date scores 0 on this component (no signal either way).
+SCORE_ENTRY_DATE_TARGET_MONTH = 10
+SCORE_ENTRY_DATE_TARGET_DAY = 4
+SCORE_ENTRY_DATE_IDEAL_WINDOW_DAYS = 7
+
+# Directional location adjustment relative to DESTINATION_LAT/DESTINATION_LON:
+# north of the destination is a bonus, south or east is a penalty (west is neutral —
+# not mentioned as either good or bad). Points per km, folded into the location
+# score and clamped so it can only shift that component by +/- SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT.
+SCORE_LOCATION_NORTH_BONUS_PER_KM = 1.5
+SCORE_LOCATION_SOUTH_PENALTY_PER_KM = 1.5
+SCORE_LOCATION_EAST_PENALTY_PER_KM = 1.5
+SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT = 4
+# Givataim is preferred over Ramat Gan — a flat bonus added to the same
+# direction-adjustment budget above (detected from the formatted address string).
+SCORE_LOCATION_GIVATAIM_BONUS = 2
+
+# No-elevator is only penalized once the floor is high enough that stairs are a
+# real burden; below this floor a walk-up is considered fine.
+SCORE_NO_ELEVATOR_FLOOR_THRESHOLD = 3
+# Points deducted per floor above the threshold when there's no elevator.
+SCORE_NO_ELEVATOR_PENALTY_PER_FLOOR = 2
+# Points granted (out of SCORE_WEIGHT_AMENITIES) when shelter/ממ"ד is present.
+SCORE_SHELTER_BONUS = 2
+
+# 3.5 rooms scores a bit lower than 3.0 — this is the max fraction of
+# SCORE_WEIGHT_ROOMS shaved off at MAX_ROOMS, interpolated linearly from MIN_ROOMS.
+SCORE_ROOMS_MAX_PENALTY_FRACTION = 0.2
 
 # ─── Free routing fallback (over Google's monthly cap) ──────────────────────────
 # Straight-line (haversine) distance to DESTINATION_ADDRESS, used only when

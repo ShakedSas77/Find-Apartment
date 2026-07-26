@@ -136,6 +136,18 @@ def init_db():
             if column not in existing_columns:
                 conn.execute(statement)
 
+        existing_address_cache_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(address_cache)").fetchall()
+        }
+        address_cache_migrations = {
+            "lat": "ALTER TABLE address_cache ADD COLUMN lat REAL",
+            "lon": "ALTER TABLE address_cache ADD COLUMN lon REAL",
+        }
+        for column, statement in address_cache_migrations.items():
+            if column not in existing_address_cache_columns:
+                conn.execute(statement)
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
 
 
@@ -280,6 +292,8 @@ def save_address_cache(
     distance_meters,
     distance_source: str,
     geocode_status: str,
+    lat: float | None = None,
+    lon: float | None = None,
 ):
     key = _address_cache_key(original_address)
     if not key:
@@ -294,9 +308,10 @@ def save_address_cache(
         conn.execute(
             """INSERT INTO address_cache (
                    address_key, original_address, canonical_address, city, confidence, warning,
-                   distance_text, distance_meters, distance_source, geocode_status, updated_at
+                   distance_text, distance_meters, distance_source, geocode_status, updated_at,
+                   lat, lon
                )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(address_key) DO UPDATE SET
                    original_address=excluded.original_address,
                    canonical_address=excluded.canonical_address,
@@ -307,7 +322,9 @@ def save_address_cache(
                    distance_meters=excluded.distance_meters,
                    distance_source=excluded.distance_source,
                    geocode_status=excluded.geocode_status,
-                   updated_at=excluded.updated_at""",
+                   updated_at=excluded.updated_at,
+                   lat=excluded.lat,
+                   lon=excluded.lon""",
             (
                 key,
                 original_address,
@@ -320,6 +337,8 @@ def save_address_cache(
                 distance_source,
                 geocode_status,
                 now,
+                lat,
+                lon,
             ),
         )
 
