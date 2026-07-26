@@ -18,7 +18,7 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
-from apartment_bot import _apply_stealth, _CHROME_LAUNCH_ARGS, _is_visible
+from browser import _apply_stealth, _CHROME_LAUNCH_ARGS, _is_visible
 
 PROFILE_DIR = "yad2_profile"
 VERIFY_URL = "https://www.yad2.co.il/realestate/rent/tel-aviv-area"
