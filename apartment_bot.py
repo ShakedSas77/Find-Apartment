@@ -45,6 +45,8 @@ from config import (
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS
 )
 from prompts import get_apartment_prompt_improved
+from core.util import _safe_print, _with_retries, _sheet_lock, _checkpoint_lock, _resume_event
+from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 import env
 import storage
 import scoring
@@ -215,22 +217,10 @@ _PRICE_CONTEXT_RE = re.compile(
 )
 
 # ─── Concurrency primitives (groups scan in parallel tabs) ────────────────────────
-_print_lock = threading.Lock()
-_sheet_lock = threading.Lock()  # guards seen_urls reads/writes AND sheet writes together
 _gemini_lock = threading.Lock()
 _text_dedup_lock = threading.Lock()
 _run_text_hashes: dict[str, str] = {}  # text_hash -> claiming url, this run only (fresh per process)
-_checkpoint_lock = threading.Lock()
-_resume_event = threading.Event()
-_resume_event.set()  # set = running; cleared = paused for a checkpoint on some tab
 _headless_checkpoint_hit = False  # set once any group hits a checkpoint in --headless mode; other groups then skip fast
-
-class HeadlessCheckpointAbort(Exception):
-    """Raised when a checkpoint/CAPTCHA is detected in headless mode — can't be solved manually, so this group is stopped."""
-
-def _safe_print(msg: str):
-    with _print_lock:
-        print(msg)
 
 _stealth_warned = False
 
@@ -1426,24 +1416,7 @@ def analyze_post_with_llm(text: str) -> dict | None:
             _safe_print(f"    WARNING: LLM output failed schema validation (attempt {attempt + 1}/2): {validation_err}")
     return None
 
-def _with_retries(fn, attempts: int = 3, base_delay: float = 1.0):
-    """Runs fn up to `attempts` times on failure, with increasing delay between attempts. Returns/raises on the last attempt."""
-    last_err = None
-    for attempt in range(attempts):
-        try:
-            return fn()
-        except Exception as e:
-            last_err = e
-            if attempt < attempts - 1:
-                time.sleep(base_delay * (attempt + 1))
-    if last_err:
-        raise last_err
-    raise RuntimeError("Function failed repeatedly without capturing an exception")
-
 _CITY_ONLY_ADDRESSES = {"רמת גן", "רמת-גן", "גבעתיים", "תל אביב", 'ר"ג', "ר״ג"}
-
-class GmapsQuotaHalted(Exception):
-    """Raised when GMAPS_ON_CAP == 'halt' and the monthly quota has been reached — stops the entire run."""
 
 _gmaps_cap_lock = threading.Lock()
 _gmaps_cap_notice_printed = False
