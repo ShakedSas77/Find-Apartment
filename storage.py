@@ -25,11 +25,15 @@ VERDICT_REJECTED_DISTANCE = "rejected_distance"
 VERDICT_PREFILTERED = "prefiltered"
 VERDICT_PARSE_FAILED = "parse_failed"
 VERDICT_PRICE_UNKNOWN = "price_unknown"
+VERDICT_DUPLICATE_LISTING = "duplicate_listing"
+VERDICT_DUPLICATE_TEXT = "duplicate_text"
+VERDICT_REJECTED_LOCATION = "rejected_location"
 
 ALL_VERDICTS = [
     VERDICT_ADDED, VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS,
     VERDICT_REJECTED_DISTANCE, VERDICT_PREFILTERED, VERDICT_PARSE_FAILED,
-    VERDICT_PRICE_UNKNOWN,
+    VERDICT_PRICE_UNKNOWN, VERDICT_DUPLICATE_LISTING, VERDICT_DUPLICATE_TEXT,
+    VERDICT_REJECTED_LOCATION,
 ]
 
 # Max LLM attempts for a post that failed to parse, before giving up on it permanently
@@ -79,6 +83,36 @@ def init_db():
                 updated_at TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_city_hints (
+                group_url TEXT PRIMARY KEY,
+                group_name TEXT,
+                cities_json TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_scan_state (
+                group_url TEXT PRIMARY KEY,
+                last_scanned_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS votes (
+                url TEXT,
+                voter_id TEXT,
+                voter_name TEXT,
+                vote TEXT,
+                voted_at TEXT,
+                PRIMARY KEY (url, voter_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS telegram_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -94,10 +128,15 @@ def init_db():
             "post_date": "ALTER TABLE posts ADD COLUMN post_date TEXT",
             "reject_reason": "ALTER TABLE posts ADD COLUMN reject_reason TEXT",
             "model_used": "ALTER TABLE posts ADD COLUMN model_used TEXT",
+            "text_hash": "ALTER TABLE posts ADD COLUMN text_hash TEXT",
+            "telegram_chat_id": "ALTER TABLE posts ADD COLUMN telegram_chat_id TEXT",
+            "telegram_message_id": "ALTER TABLE posts ADD COLUMN telegram_message_id TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
                 conn.execute(statement)
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
 
 
 def should_skip(url: str) -> bool:
@@ -112,6 +151,24 @@ def should_skip(url: str) -> bool:
     if row["verdict"] != VERDICT_PARSE_FAILED:
         return True
     return row["attempts"] >= MAX_PARSE_ATTEMPTS
+
+
+def find_by_text_hash(text_hash: str, exclude_url: str | None = None) -> dict | None:
+    """
+    Finds an already-processed post (any run, any verdict except parse_failed
+    — a prior parse failure shouldn't stop a fresh LLM attempt) with the same
+    normalized-text hash, i.e. the same listing text reposted verbatim to a
+    different group/URL. Lets the scan skip the LLM call entirely for a
+    text-identical crosspost instead of paying for it twice.
+    """
+    if not text_hash:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT url, verdict FROM posts WHERE text_hash = ? AND verdict != ? AND url != ? LIMIT 1",
+            (text_hash, VERDICT_PARSE_FAILED, exclude_url or ""),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def record_post(
@@ -145,7 +202,8 @@ def record_post(
                        distance_meters=?,
                        post_date=?,
                        reject_reason=?,
-                       model_used=?
+                       model_used=?,
+                       text_hash=?
                    WHERE url=?""",
                 (
                     group_url,
@@ -163,6 +221,7 @@ def record_post(
                     analysis.get("post_date"),
                     analysis.get("reject_reason"),
                     analysis.get("model_used"),
+                    analysis.get("text_hash"),
                     url,
                 ),
             )
@@ -172,9 +231,9 @@ def record_post(
                 """INSERT INTO posts (
                        url, group_url, raw_text, parsed_json, verdict, attempts, first_seen, last_processed,
                        price_val, rooms_val, address, address_confidence, distance_text, distance_meters,
-                       post_date, reject_reason, model_used
+                       post_date, reject_reason, model_used, text_hash
                    )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     url,
                     group_url,
@@ -193,6 +252,7 @@ def record_post(
                     analysis.get("post_date"),
                     analysis.get("reject_reason"),
                     analysis.get("model_used"),
+                    analysis.get("text_hash"),
                 ),
             )
 
@@ -264,6 +324,61 @@ def save_address_cache(
         )
 
 
+def get_group_city_hint(group_url: str) -> list[str] | None:
+    """Candidate cities inferred from a group's real FB name, last captured at scan time."""
+    if not group_url:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT cities_json FROM group_city_hints WHERE group_url = ?", (group_url,)
+        ).fetchone()
+    if not row or not row["cities_json"]:
+        return None
+    return json.loads(row["cities_json"])
+
+
+def save_group_city_hint(group_url: str, group_name: str, cities: list[str]):
+    if not group_url:
+        return
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO group_city_hints (group_url, group_name, cities_json, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(group_url) DO UPDATE SET
+                   group_name=excluded.group_name,
+                   cities_json=excluded.cities_json,
+                   updated_at=excluded.updated_at""",
+            (group_url, group_name, json.dumps(cities, ensure_ascii=False), now),
+        )
+
+
+def get_last_scan_time(group_url: str) -> datetime | None:
+    """When this group was last fully scanned, so a scan can stop scrolling
+    once it reaches posts already covered last time."""
+    if not group_url:
+        return None
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT last_scanned_at FROM group_scan_state WHERE group_url = ?", (group_url,)
+        ).fetchone()
+    if not row or not row["last_scanned_at"]:
+        return None
+    return datetime.fromisoformat(row["last_scanned_at"])
+
+
+def set_last_scan_time(group_url: str, when: datetime):
+    if not group_url:
+        return
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO group_scan_state (group_url, last_scanned_at)
+               VALUES (?, ?)
+               ON CONFLICT(group_url) DO UPDATE SET last_scanned_at=excluded.last_scanned_at""",
+            (group_url, when.isoformat()),
+        )
+
+
 def get_reparse_candidates() -> list[dict]:
     """Posts rejected on price/rooms/distance, that failed to parse, or with no stated price — reparse-rejected candidates."""
     with _lock, _connect() as conn:
@@ -272,6 +387,39 @@ def get_reparse_candidates() -> list[dict]:
             (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN, VERDICT_REJECTED_DISTANCE),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_added_listing_data() -> dict[str, dict]:
+    """
+    url -> {address, price_val, rooms_val, distance_text} for every added
+    listing, as currently recorded. Used by dedupe_and_sort_sheet() to key
+    duplicates off the bot's own original parse rather than the live sheet
+    cells (so a manual edit to a sheet row, e.g. fixing a price, doesn't stop
+    a later crosspost from being recognized as a duplicate), and to sync the
+    sheet's address/distance cells if either was recomputed after the row was
+    first added (e.g. a corner-address enrichment or a distance fix).
+    """
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, address, price_val, rooms_val, distance_text FROM posts WHERE verdict = ?",
+            (VERDICT_ADDED,),
+        ).fetchall()
+    return {row["url"]: dict(row) for row in rows}
+
+
+def update_added_listing_address(url: str, address: str):
+    """
+    Overwrites the stored address for an already-added listing — used when a
+    later crosspost of the same physical listing (same dedupe key) states a
+    more specific address (e.g. adds a "פינת X" corner qualifier the original
+    post lacked) than what got recorded originally. dedupe_and_sort_sheet()
+    syncs the sheet's כתובת cell from this value on its next rewrite pass.
+    """
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE posts SET address = ? WHERE url = ? AND verdict = ?",
+            (address, url, VERDICT_ADDED),
+        )
 
 
 def get_all_posts() -> list[dict]:
@@ -314,6 +462,108 @@ def get_stats() -> tuple[dict, str, int]:
     counts = {row["verdict"]: row["cnt"] for row in rows}
     gmaps_calls = usage_row["gmaps_calls"] if usage_row else 0
     return counts, month, gmaps_calls
+
+
+def get_group_stats() -> dict[str, dict[str, int]]:
+    """group_url -> {verdict: count}, for the per-group yield breakdown in --stats
+    (flags groups with zero VERDICT_ADDED as candidates to drop from TARGET_URLS)."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT group_url, verdict, COUNT(*) AS cnt FROM posts "
+            "WHERE group_url IS NOT NULL AND group_url != '' "
+            "GROUP BY group_url, verdict"
+        ).fetchall()
+    result: dict[str, dict[str, int]] = {}
+    for row in rows:
+        result.setdefault(row["group_url"], {})[row["verdict"]] = row["cnt"]
+    return result
+
+
+def top_excluded_locations(limit: int = 8) -> list[tuple[str, int]]:
+    """Most common excluded_location: name out of prefiltered posts' reject_reason
+    — tells you what's actually tripping EXCLUDED_LOCATIONS, to help tune it."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT reject_reason, COUNT(*) AS cnt FROM posts "
+            "WHERE verdict = ? AND reject_reason LIKE 'excluded_location:%' "
+            "GROUP BY reject_reason ORDER BY cnt DESC",
+            (VERDICT_PREFILTERED,),
+        ).fetchall()
+    counts: dict[str, int] = {}
+    for row in rows:
+        location = row["reject_reason"].split(":", 1)[1]
+        counts[location] = counts.get(location, 0) + row["cnt"]
+    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+
+
+def top_rejected_distance_addresses(limit: int = 8) -> list[tuple[str, int]]:
+    """Most common address among rejected_distance posts — tells you what's
+    landing just outside MAX_WALKING_DISTANCE_KM, to help tune that or the
+    geocoding table."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT address, COUNT(*) AS cnt FROM posts "
+            "WHERE verdict = ? AND address IS NOT NULL AND address != '' "
+            "GROUP BY address ORDER BY cnt DESC LIMIT ?",
+            (VERDICT_REJECTED_DISTANCE, limit),
+        ).fetchall()
+    return [(row["address"], row["cnt"]) for row in rows]
+
+
+def set_telegram_message(url: str, chat_id: str, message_id: str):
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE posts SET telegram_chat_id = ?, telegram_message_id = ? WHERE url = ?",
+            (str(chat_id), str(message_id), url),
+        )
+
+
+def get_telegram_message(url: str) -> tuple[str, str] | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT telegram_chat_id, telegram_message_id FROM posts WHERE url = ?", (url,)
+        ).fetchone()
+    if not row or not row["telegram_message_id"]:
+        return None
+    return row["telegram_chat_id"], row["telegram_message_id"]
+
+
+def record_vote(url: str, voter_id: str, voter_name: str, vote: str):
+    """Upsert — a voter can change their mind, only their latest vote counts."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO votes (url, voter_id, voter_name, vote, voted_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(url, voter_id) DO UPDATE SET
+                   voter_name=excluded.voter_name,
+                   vote=excluded.vote,
+                   voted_at=excluded.voted_at""",
+            (url, voter_id, voter_name, vote, now),
+        )
+
+
+def get_votes(url: str) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT voter_id, voter_name, vote, voted_at FROM votes WHERE url = ?", (url,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_telegram_offset() -> int:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT value FROM telegram_state WHERE key = 'update_offset'").fetchone()
+    return int(row["value"]) if row else 0
+
+
+def set_telegram_offset(offset: int):
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO telegram_state (key, value) VALUES ('update_offset', ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+            (str(offset),),
+        )
 
 
 def prune_old_posts(max_age_days: int) -> int:

@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import sys
 import time
@@ -6,6 +7,7 @@ import os
 import re
 import random
 import threading
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -21,10 +23,17 @@ from playwright.sync_api import sync_playwright
 from pydantic import BaseModel
 from typing import Optional
 
+try:
+    from playwright_stealth import stealth_sync, StealthConfig
+except ImportError:
+    stealth_sync = None
+    StealthConfig = None
+
 from config import (
     CREDENTIALS_FILE, TARGET_URLS,
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     SCROLL_COUNT, SCROLL_DELAY_MS, LOCATIONS,
+    MIN_SCROLLS_BEFORE_EARLY_STOP, CONSECUTIVE_OLD_POSTS_TO_STOP,
     MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS,
     GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_MODEL, LOGIN_MAX_ATTEMPTS,
@@ -32,10 +41,14 @@ from config import (
     GMAPS_MONTHLY_CAP, GMAPS_ON_CAP,
     MAX_POST_AGE_DAYS, GMAPS_TARGET_CITIES, GMAPS_VALIDATE_ADDRESSES,
     GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, MAX_WALKING_DISTANCE_KM,
-    INCLUDE_PRICE_UNKNOWN
+    INCLUDE_PRICE_UNKNOWN, STEALTH_ENABLED, PRUNE_DEAD_LINKS_ENABLED,
+    EXCLUDE_SOUTH_OF_LAT, TELEGRAM_ENABLED
 )
 from prompts import get_apartment_prompt_improved
 import storage
+import scoring
+import distance_fallback
+import telegram_notifier
 
 class ApartmentData(BaseModel):
     """JSON schema forced onto Gemini's response (response_schema) — eliminates parsing failures on the Gemini path."""
@@ -73,8 +86,36 @@ gmaps_client = googlemaps.Client(key=GMAPS_API_KEY)
 GEMINI_EXHAUSTED = False
 GEMINI_ERROR_COUNT = 0
 
+# On Linux, Chrome's sandbox can fail to initialize in some VM/container
+# environments, hanging navigation indefinitely rather than erroring cleanly
+# (verified 2026-07-18: a bare `google-chrome --no-sandbox --disable-gpu` CLI
+# call loaded facebook.com in 11s, while Playwright's launch — which strips
+# --no-sandbox for anti-detection reasons, fine on Windows — hung on
+# page.goto() past a 30s timeout on every single group). Add both flags back
+# on Linux only; Windows keeps the original anti-detection args untouched.
+_CHROME_LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+if sys.platform.startswith("linux"):
+    _CHROME_LAUNCH_ARGS += ["--no-sandbox", "--disable-gpu"]
+
 # Strips invisible BIDI characters that Facebook injects and that break regexes
 BIDI_RE = re.compile(r'[‎‏‪-‮⁦-⁩]')
+
+# distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
+# rejection on. "straight_line_estimate" (distance_fallback.py, used only once
+# GMAPS_MONTHLY_CAP is hit) is a real, if rougher, distance figure — same
+# treatment as a Google-sourced one. Anything else ("skipped"/"quota"/"cache"
+# with no real number) must NOT be gated on, or a listing with no real distance
+# data would look like it passed the filter.
+_DISTANCE_FILTERABLE_SOURCES = {"google_maps", "straight_line_estimate"}
+
+# googlemaps sends GMAPS_API_KEY as a URL query param (unlike Gemini, which uses
+# a header) — on a network-level failure (not a clean API error response), the
+# underlying requests/urllib3 exception's str() embeds the full request URL,
+# key included. Strip it before any exception text reaches a print/log.
+_API_KEY_QUERY_RE = re.compile(r'([?&]key=)[^&\s]+')
+
+def _redact_api_key(text: str) -> str:
+    return _API_KEY_QUERY_RE.sub(r'\1REDACTED', text)
 
 # article.inner_text() also includes the comments section below the post — cut at
 # the first marker so a price/detail from another user's comment (not the poster's)
@@ -86,6 +127,65 @@ _COMMENT_SECTION_RE = re.compile(
 def _strip_comment_section(text: str) -> str:
     match = _COMMENT_SECTION_RE.search(text)
     return text[:match.start()].strip() if match else text
+
+# Strips the volatile per-repost header (author name, online-status/"Follow"
+# UI noise, relative timestamp) up through FB's constant "Shared with Public
+# group" marker — so the same listing crossposted to multiple groups
+# normalizes to the same text even though each post's own header differs.
+_POST_HEADER_RE = re.compile(r'^.*?Shared with Public group', re.DOTALL)
+# Below this length a normalized text is too short/generic to trust as a
+# dedup signal — collision risk on short strings isn't worth the LLM-call
+# savings, and a false-positive here would silently drop a real listing.
+_TEXT_DEDUP_MIN_LEN = 40
+# Israeli mobile (05X) and landline/VoIP (0[23489]/07[2-9]) numbers, with or
+# without a separator — a poster's own contact number doesn't change between
+# reposts even when they reword the ad text by hand (confirmed against a real
+# crosspost pair in the DB: same phones, genuinely different wording).
+_PHONE_RE = re.compile(r'0(?:5\d|7[2-9])[-\s]?\d{7}|0[23489][-\s]?\d{7}')
+_ROOMS_EXTRACT_RE = re.compile(r'([1-9](?:\.5)?)\s*חד')
+
+def _normalize_dedup_text(text: str) -> str:
+    core = _POST_HEADER_RE.sub('', text, count=1)
+    return re.sub(r'\s+', ' ', core).strip()
+
+def _phone_price_rooms_fingerprint(text: str) -> str:
+    """
+    Phone number(s) + price + room count, when all three are present — far
+    more robust to manual rewording between crossposts than comparing the ad
+    text itself, since a poster's contact number/price/room count stay fixed
+    even when the description around them gets reworded. Combining all three
+    (not phone alone) protects against the real risk of one landlord/agent
+    posting multiple DIFFERENT apartments under the same number — those will
+    very likely differ in price or room count, so they won't collide here.
+    """
+    phones = sorted(set(re.sub(r'[-\s]', '', m) for m in _PHONE_RE.findall(text)))
+    if not phones:
+        return ""
+    price_match = _PRICE_CONTEXT_RE.search(text)
+    price = (price_match.group(1) or price_match.group(2)) if price_match else None
+    rooms_match = _ROOMS_EXTRACT_RE.search(text)
+    rooms = rooms_match.group(1) if rooms_match else None
+    if not price or not rooms:
+        return ""
+    return f"{'|'.join(phones)}#{price}#{rooms}"
+
+def _text_dedup_hash(text: str) -> str:
+    """
+    Fingerprint used to catch a crosspost of the same listing to a different
+    group before it burns an LLM call. Prefers the phone+price+rooms
+    fingerprint (survives hand-rewording of the ad text); falls back to the
+    header-stripped exact text when no phone/price/rooms combination is
+    found. Both are deliberately conservative about false positives: a
+    missed duplicate just costs one extra LLM call (no regression), while a
+    wrong match would silently drop a real, distinct listing.
+    """
+    fingerprint = _phone_price_rooms_fingerprint(text)
+    if fingerprint:
+        return hashlib.sha256(fingerprint.encode('utf-8')).hexdigest()
+    normalized = _normalize_dedup_text(text)
+    if len(normalized) < _TEXT_DEDUP_MIN_LEN:
+        return ""
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
 # Price "second chance" — only a number found within ~25 chars of a price
 # word/marker, not any 4-5 digit number in the text (so it doesn't grab a phone
@@ -103,6 +203,8 @@ _PRICE_CONTEXT_RE = re.compile(
 _print_lock = threading.Lock()
 _sheet_lock = threading.Lock()  # guards seen_urls reads/writes AND sheet writes together
 _gemini_lock = threading.Lock()
+_text_dedup_lock = threading.Lock()
+_run_text_hashes: dict[str, str] = {}  # text_hash -> claiming url, this run only (fresh per process)
 _checkpoint_lock = threading.Lock()
 _resume_event = threading.Event()
 _resume_event.set()  # set = running; cleared = paused for a checkpoint on some tab
@@ -114,6 +216,34 @@ class HeadlessCheckpointAbort(Exception):
 def _safe_print(msg: str):
     with _print_lock:
         print(msg)
+
+_stealth_warned = False
+
+def _apply_stealth(page):
+    """
+    Masks automation fingerprints (navigator.webdriver, headless UA artifacts,
+    missing chrome.runtime) via tf-playwright-stealth. Must run on a page
+    BEFORE its first navigation — the patches are add_init_script based.
+    Failure is never fatal: the bot ran for months without stealth.
+    """
+    global _stealth_warned
+    if not STEALTH_ENABLED:
+        return
+    if stealth_sync is None:
+        if not _stealth_warned:
+            _stealth_warned = True
+            _safe_print("WARNING: tf-playwright-stealth not installed — running without stealth patches. Run: pip install -r requirements.txt")
+        return
+    try:
+        # navigator_user_agent/navigator_languages OFF: the package fakes them with a
+        # hardcoded Chrome 95 UA and en-US — an ancient UA is a louder bot signal than
+        # what it hides, and it would stomp the real-profile fingerprint the context
+        # was deliberately given (verified 2026-07-18 against tf-playwright-stealth 1.2.0).
+        stealth_sync(page, StealthConfig(navigator_user_agent=False, navigator_languages=False))
+    except Exception as e:
+        if not _stealth_warned:
+            _stealth_warned = True
+            _safe_print(f"WARNING: stealth patch failed, continuing without it: {e}")
 
 # ─── Helper Functions ─────────────────────────────────────────────────────────────
 
@@ -317,17 +447,25 @@ def _strip_foreign_letters(text: str) -> str:
     return cleaned
 
 _IMMEDIATE_RE = re.compile(r'מיידי|מיד|עכשיו|כניסה\s*מיידית|היום')
+_DATE_DDMM_RE = re.compile(r'(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?')
 
 def _normalize_entry_date(text: str) -> str:
     """
-    Normalizes the entry date, strips foreign-language text, and converts
-    "immediate"-type phrases to the standard "מיידי".
+    Normalizes the entry date, strips foreign-language text, converts
+    "immediate"-type phrases to the standard "מיידי", and zero-pads a
+    numeric day.month(.year) date (e.g. "1.8" / "1.8.26") to "DD/MM",
+    dropping the year. Non-numeric dates (e.g. "ספטמבר") pass through as-is.
     """
     if not text:
         return ""
     text = _strip_foreign_letters(text)
     if _IMMEDIATE_RE.search(text):
         return "מיידי"
+    m = _DATE_DDMM_RE.fullmatch(text.strip().rstrip('./'))
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        if 1 <= day <= 31 and 1 <= month <= 12:
+            return f"{day:02d}/{month:02d}"
     return text
 
 def _reject_hallucinated_address(address: str, source_text: str) -> str:
@@ -346,7 +484,7 @@ def _warn_if_fee_implausible(label: str, value, max_bimonthly: int):
     if value > max_bimonthly:
         _safe_print(f"\n    WARNING: {label} looks unusually high ({value}) - verify manually.")
 
-def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
+def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str, dict]:
     """
     Runs the threshold checks (rooms/price, including the regex "second chance")
     and all field normalization. Shared between _scan_group and --reparse-rejected
@@ -419,6 +557,13 @@ def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
 
     address = _strip_foreign_letters(data.get("address") or "")
     address = _reject_hallucinated_address(address, text)
+    address = _format_address_display(address, group_url)
+
+    dup_key = _listing_dedupe_key(address, rooms_val, price_val)
+    if dup_key and dup_key in _known_added_listing_keys():
+        _maybe_enrich_duplicate_address(dup_key, address)
+        return storage.VERDICT_DUPLICATE_LISTING, {"rooms_val": rooms_val, "price_val": price_val, "address": address}
+
     floor = _parse_floor(data.get("floor") or "")
     is_agent = _detect_agent(text, data.get("is_agent"))
     parking = _classify_parking(data.get("parking") or "")
@@ -432,6 +577,22 @@ def _evaluate_post_data(data: dict, text: str) -> tuple[str, dict]:
     }
     return storage.VERDICT_ADDED, fields
 
+# Rows are written with value_input_option="USER_ENTERED" (needed so numeric
+# columns like price/rooms are stored as real numbers, not text) — that also
+# lets Sheets interpret a cell starting with =/+/-/@ as a formula. Row content
+# ultimately comes from scraped Facebook text via an LLM (untrusted input), so
+# this is an explicit safeguard, not incidental: prefix any such string with a
+# literal-text apostrophe before it's sent. (In practice every string field
+# here is already narrowed to a fixed set or Hebrew-only text that happens to
+# exclude these characters — this guard is deliberate defense-in-depth so that
+# stays true even if that normalization changes later.)
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
+
+def _sheet_safe_cell(value):
+    if isinstance(value, str) and value.startswith(_FORMULA_TRIGGER_CHARS):
+        return "'" + value
+    return value
+
 def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     dist_text, dist_meters, address_confidence, address_warning, distance_source = get_walking_distance(fields["address"])
     fields["distance_text"] = dist_text
@@ -440,7 +601,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     fields["address_warning"] = address_warning
     fields["distance_source"] = distance_source
 
-    return [
+    row = [
         post_url,
         int(fields["price_val"]) if fields["price_val"] else "",
         fields["rooms_val"],
@@ -456,7 +617,9 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         fb_post_date,
         fields["address"],
         datetime.now().strftime("%Y-%m-%d %H:%M"),
+        scoring.compute_fit_score(fields),
     ]
+    return [_sheet_safe_cell(v) for v in row]
 
 
 def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str = "gemini_or_ollama") -> dict:
@@ -522,15 +685,236 @@ _CITY_TOKENS_RE = re.compile(r'רמת[\s-]?גן|גבעתיים|תל[\s-]?אבי�
 _ADDRESS_PUNCT_RE = re.compile(r'[",./\-–—_]')
 _POST_DATE_DDMM_RE = re.compile(r'^(\d{1,2})/(\d{1,2})$')
 _HEBREW_RE = re.compile(r'[\u0590-\u05FF]')
-_STREET_HINT_RE = re.compile(r'רחוב|רח׳|שדרות|שד׳|דרך|סמטת|סמטה|כיכר|משעול')
+_STREET_HINT_RE = re.compile(r'רחוב|רח[\'’׳]|שדרות|שד[\'’׳]|דרך|סמטת|סמטה|כיכר|משעול')
 _LANDMARK_HINT_RE = re.compile(r'ליד|בסמוך|קרוב ל|צמוד ל|באזור|בשכונת|שכונת')
+# Street-type word/abbreviation carries no distinguishing signal for dedupe —
+# "רחוב הרצל" and "רח' הרצל" are the same street. LLM output uses the ASCII
+# apostrophe (U+0027), not the Hebrew geresh (׳), so both must be recognized.
+_STREET_TYPE_RE = _STREET_HINT_RE
+# A cross-street qualifier ("X פינת Y" / "X על פינת Y") is a more specific
+# description of the same corner, not a different address — one post calling
+# it "שמחה" and another "רחוב שמחה, פינת שפירא" are very likely the same
+# listing. Dropped before keying so they collapse to the same primary street;
+# _format_core_with_city's _CORNER_DISPLAY_RE is a different, fuller parse
+# used for display formatting, not reused here since this only needs the
+# cross-street half discarded, not restructured.
+_CORNER_HINT_RE = re.compile(r'\s+(?:על\s+)?פינת\s+.+$')
 
 def _normalize_address_key(address: str) -> str:
     if not address or address == "לא צוין":
         return ""
     norm = _CITY_TOKENS_RE.sub('', address)
+    norm = _CORNER_HINT_RE.sub('', norm)
+    norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
     return re.sub(r'\s+', ' ', norm).strip()
+
+def _listing_dedupe_key(address: str, rooms, price) -> tuple | None:
+    """
+    Normalized (address, rooms, price) key identifying the same physical
+    listing regardless of URL/repost wording. None when the address is too
+    weak to key on (missing/short/generic) — such listings are never merged
+    on address+rooms+price alone, only on exact URL, so distinct apartments
+    with a thin address don't get accidentally treated as the same one.
+    """
+    address_key = _normalize_address_key(address)
+    if not address_key or len(address_key) < 4:
+        return None
+    try:
+        rooms_key = f"{float(rooms):.1f}"
+    except (TypeError, ValueError):
+        rooms_key = str(rooms)
+    try:
+        price_key = str(int(float(price)))
+    except (TypeError, ValueError):
+        price_key = str(price)
+    return (address_key, rooms_key, price_key)
+
+# ─── Address display formatting ─────────────────────────────────────────────
+# Reshapes the LLM's raw (verbatim-from-post) address into the sheet's
+# preferred display convention: "<street> <number>, <city>". Only fires when
+# an explicit city is present in the text — same "never invent" discipline as
+# _reject_hallucinated_address: a neighborhood or street mentioned without a
+# city isn't guessed at, it's left as-is.
+_CITY_DISPLAY_RES = [
+    (re.compile(r'(?:ב|ל)?רמת[\s-]?גן|(?:ב|ל)?ר["״]?ג\b|(?:ב|ל)?\bרג\b'), "רמת גן"),
+    (re.compile(r'(?:ב|ל)?גבעתיים'), "גבעתיים"),
+    # "יפו" is matched as an optional suffix of the SAME token (not a separate
+    # city/street) since "תל אביב יפו"/"תל אביב-יפו" is one compound official
+    # name — without this, _extract_city_and_core only consumed "תל אביב" and
+    # left "יפו" behind looking like a real street/neighborhood core.
+    (re.compile(r'(?:ב|ל)?תל[\s-]?אביב(?:[\s-]?יפו)?|(?:ב|ל)?ת["״]א\b|(?:ב|ל)?\bתא\b'), "תל אביב"),
+]
+_NEIGHBORHOOD_DISPLAY_RE = re.compile(r'^(?:ב)?שכונ(?:ת|ה)\s+(.+)$')
+_CORNER_DISPLAY_RE = re.compile(r'^(.+?)\s+(?:על\s+)?פינת\s+(.+)$')
+# Informal shorthand for the same "corner of X and Y" meaning ("כצנלסון/ויצמן").
+_CORNER_SLASH_RE = re.compile(r'^(.+?)\s*/\s*(.+)$')
+_TRAILING_NUMBER_RE = re.compile(r'^(.+?)\s+(\d+[א-ת]?)$')
+
+def _extract_city_and_core(address: str) -> tuple[str, str] | None:
+    """Finds an explicit city token in the address text. Returns (remaining core, canonical city), or None."""
+    for city_re, canonical in _CITY_DISPLAY_RES:
+        m = city_re.search(address)
+        if m:
+            core = address[:m.start()] + address[m.end():]
+            # Edge-trim only (not a global punctuation substitution like
+            # _ADDRESS_PUNCT_RE): a Hebrew acronym street name can carry an
+            # internal גרשיים ("הרא"ה", "ל"ה"), and an already-formatted
+            # corner keeps its internal " - " separator. Stripping those
+            # unconditionally would corrupt real content and break
+            # idempotency (re-running this on its own prior output must be
+            # a no-op).
+            core = re.sub(r'\s+', ' ', core).strip(' ,./-–—_\t')
+            return core, canonical
+    return None
+
+def _format_core_with_city(core: str, city: str) -> str:
+    """Shapes address text (city already removed) plus a resolved city into the display format. Empty string if unusable."""
+    # Nothing left after removing the city token means the post only ever
+    # named the city itself (e.g. "תל אביב יפו" with no street at all) — the
+    # honest result is the bare city name, not falling back to duplicating
+    # the raw city mention as if it were a real address.
+    if not core:
+        return city
+    if not _HEBREW_RE.search(core):
+        return ""
+
+    m = _NEIGHBORHOOD_DISPLAY_RE.match(core)
+    if m:
+        neighborhood = m.group(1).strip()
+        return f"{neighborhood}, {city}" if neighborhood else ""
+
+    m = _CORNER_DISPLAY_RE.match(core) or _CORNER_SLASH_RE.match(core)
+    if m:
+        street_a = _STREET_HINT_RE.sub('', m.group(1)).strip(' ,./-–—_\t')
+        street_b = _STREET_HINT_RE.sub('', m.group(2)).strip(' ,./-–—_\t')
+        return f"{street_a} פינת {street_b}, {city}" if street_a and street_b else ""
+
+    street_core = _STREET_HINT_RE.sub('', core, count=1).strip()
+    if not street_core:
+        return ""
+
+    m = _TRAILING_NUMBER_RE.match(street_core)
+    if m:
+        street, number = m.group(1).strip(), m.group(2).strip()
+        return f"{street} {number}, {city}" if street else ""
+
+    return f"{street_core}, {city}"
+
+def _extract_candidate_cities(group_name: str) -> list[str]:
+    """Distinct canonical cities mentioned in a FB group's real display name (e.g. 'דירות רמת גן/גבעתיים')."""
+    cities = []
+    for city_re, canonical in _CITY_DISPLAY_RES:
+        if city_re.search(group_name) and canonical not in cities:
+            cities.append(canonical)
+    return cities
+
+def _gmaps_result_matches_city(result: dict, city: str) -> bool:
+    formatted = result.get("formatted_address", "")
+    result_city = _gmaps_result_city(result)
+    return city in formatted or city == result_city or city in result_city
+
+def _resolve_ambiguous_city(street_core: str, candidate_cities: list[str]) -> str | None:
+    """
+    Resolves which of a group's candidate cities a street actually belongs to.
+    1 candidate -> trusted directly, no Maps call. >=2 -> geocode each to see
+    which ones the street exists in; if more than one does, the walking-
+    distance-closer one to DESTINATION_ADDRESS wins. Never guesses: returns
+    None (caller falls back to the address unchanged) when nothing resolves
+    confidently or Maps is unavailable/over quota.
+    """
+    if not candidate_cities:
+        return None
+    if len(candidate_cities) == 1:
+        return candidate_cities[0]
+
+    if not GMAPS_VALIDATE_ADDRESSES:
+        return None
+
+    hits = []  # (city, formatted_address)
+    for city in candidate_cities:
+        over_cap, _ = _handle_gmaps_cap_if_needed()
+        if over_cap:
+            break
+        query = f"{street_core}, {city}, ישראל"
+        try:
+            storage.increment_gmaps_usage()
+            results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
+        except Exception as e:
+            _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
+            continue
+        if not results:
+            continue
+        best = results[0]
+        if _gmaps_has_street_precision(best) and _gmaps_result_matches_city(best, city):
+            hits.append((city, best.get("formatted_address", "")))
+
+    if not hits:
+        return None
+    if len(hits) == 1:
+        return hits[0][0]
+
+    best_city, best_meters = None, float("inf")
+    for city, formatted in hits:
+        over_cap, _ = _handle_gmaps_cap_if_needed()
+        if over_cap:
+            break
+        try:
+            storage.increment_gmaps_usage()
+            result = _with_retries(lambda: gmaps_client.distance_matrix(
+                origins=formatted, destinations=DESTINATION_ADDRESS, mode="walking", language="he", region="il",
+            ))
+            element = result["rows"][0]["elements"][0]
+            if element.get("status") == "OK" and element["distance"]["value"] < best_meters:
+                best_meters = element["distance"]["value"]
+                best_city = city
+        except Exception as e:
+            _safe_print(f"\n    [Google Distance Matrix API Error]: {_redact_api_key(str(e))}")
+            continue
+
+    return best_city or hits[0][0]
+
+def _format_address_display(address: str, group_url: str | None = None) -> str:
+    """
+    "רחוב המעלות 12 בגבעתיים" -> "המעלות 12, גבעתיים"
+    "רחוב הירדן רמת גן" -> "הירדן, רמת גן" (no number)
+    "שכונת מרום נווה ברמת גן" -> "מרום נווה, רמת גן" (neighborhood, not a street)
+    "רחוב אלימלך על פינת הרצל ברמת גן" -> "אלימלך פינת הרצל, רמת גן" (corner)
+    "כצנלסון/ויצמן בגבעתיים" -> "כצנלסון פינת ויצמן, גבעתיים" (slash shorthand)
+    When no city is stated at all, falls back to resolving one from the
+    scanning group's own candidate cities (see _resolve_ambiguous_city),
+    keyed off the primary street (group1 of a corner/slash pair, since that's
+    what geocoding needs) — neighborhood phrasing alone stays out of scope
+    (too ambiguous to geocode as a single street query). Falls back to the
+    address unchanged whenever nothing resolves confidently — never guesses
+    a city.
+    """
+    if not address:
+        return address
+
+    found = _extract_city_and_core(address)
+    if found:
+        core, city = found
+        return _format_core_with_city(core, city) or address
+
+    if group_url and not _NEIGHBORHOOD_DISPLAY_RE.match(address.strip()):
+        candidates = storage.get_group_city_hint(group_url)
+        if candidates:
+            corner_m = _CORNER_DISPLAY_RE.match(address) or _CORNER_SLASH_RE.match(address)
+            if corner_m:
+                street_only = _STREET_HINT_RE.sub('', corner_m.group(1)).strip()
+                core_for_format = address
+            else:
+                street_core = _STREET_HINT_RE.sub('', address, count=1).strip()
+                m = _TRAILING_NUMBER_RE.match(street_core)
+                street_only = m.group(1).strip() if m else street_core
+                core_for_format = street_core
+            if street_only and _HEBREW_RE.search(street_only):
+                city = _resolve_ambiguous_city(street_only, candidates)
+                if city:
+                    return _format_core_with_city(core_for_format, city) or address
+
+    return address
 
 def _infer_post_date(date_str: str, now: datetime | None = None) -> datetime | None:
     """
@@ -590,22 +974,59 @@ def _classify_address_confidence(address: str) -> tuple[str, str]:
 
     return "medium", "כתובת ללא אינדיקציה ברורה לרחוב"
 
-def _listing_key(row: list) -> tuple:
+def _listing_key(row: list, db_data: dict[str, dict] | None = None) -> tuple:
+    """
+    Keys a row by address+rooms+price sourced from the bot's own original
+    parse in the DB (db_data, keyed by URL) when available, falling back to
+    the live sheet cells otherwise. Matching off the DB record means a manual
+    edit to a sheet cell (e.g. fixing a price) can't stop a later crosspost
+    of the same listing, added under a different URL, from still being
+    recognized as a duplicate.
+    """
     url = row[0] if len(row) > 0 else ""
-    address_key = _normalize_address_key(row[13] if len(row) > 13 else "")
+    db_row = (db_data or {}).get(url)
 
-    if not address_key or len(address_key) < 4:
-        return ("url", url)
+    raw_address = db_row["address"] if db_row and db_row.get("address") else (row[13] if len(row) > 13 else "")
+    raw_rooms = db_row["rooms_val"] if db_row and db_row.get("rooms_val") is not None else (row[2] if len(row) > 2 else "")
+    raw_price = db_row["price_val"] if db_row and db_row.get("price_val") is not None else (row[1] if len(row) > 1 else "")
 
-    try:
-        rooms = f"{float(row[2]):.1f}"
-    except (ValueError, IndexError):
-        rooms = row[2] if len(row) > 2 else ""
-    try:
-        price = str(int(float(row[1])))
-    except (ValueError, IndexError):
-        price = row[1] if len(row) > 1 else ""
-    return ("listing", address_key, rooms, price)
+    key = _listing_dedupe_key(raw_address, raw_rooms, raw_price)
+    return ("listing",) + key if key else ("url", url)
+
+def _known_added_listing_keys() -> set[tuple]:
+    """
+    Dedupe keys for every listing ever added, across the DB's whole history —
+    not just what's still in the (pruned/rewritten) sheet. Used to catch a
+    listing reposted under a brand-new URL (common for agents farming
+    multiple groups daily) before it burns an LLM call and re-adds a row that
+    dedupe_and_sort_sheet would just merge away anyway.
+    """
+    keys = set()
+    for row in storage.get_added_listing_data().values():
+        key = _listing_dedupe_key(row.get("address"), row.get("rooms_val"), row.get("price_val"))
+        if key:
+            keys.add(key)
+    return keys
+
+def _maybe_enrich_duplicate_address(dup_key: tuple, new_address: str):
+    """
+    A rejected duplicate sometimes states a more specific address (adds a
+    "פינת X" corner qualifier) than the originally-added post did —
+    _listing_dedupe_key deliberately treats both as the same listing so the
+    duplicate is never added as a second row, but that shouldn't mean losing
+    the more useful address text. If this duplicate's address has a corner
+    qualifier the stored one lacks, update the original's stored address so
+    the next dedupe_and_sort_sheet() pass can sync it into the sheet's כתובת
+    cell.
+    """
+    if not _CORNER_HINT_RE.search(new_address):
+        return
+    for url, row in storage.get_added_listing_data().items():
+        existing_address = row.get("address") or ""
+        key = _listing_dedupe_key(existing_address, row.get("rooms_val"), row.get("price_val"))
+        if key == dup_key and not _CORNER_HINT_RE.search(existing_address):
+            storage.update_added_listing_address(url, new_address)
+            return
 
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
@@ -636,9 +1057,10 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         elif existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_url[url] = row
 
+    db_data = storage.get_added_listing_data()
     best_by_key = {}
     for row in best_by_url.values():
-        key = _listing_key(row)
+        key = _listing_key(row, db_data)
         existing = best_by_key.get(key)
         if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_key[key] = row
@@ -646,16 +1068,187 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     deduped_rows = list(best_by_key.values())
     duplicates_removed = len(rows) - len(deduped_rows)
 
+    # A later crosspost's more specific address (e.g. a corner qualifier) may
+    # have been folded into the DB record via _maybe_enrich_duplicate_address
+    # even though its own row was never added — sync the kept row's כתובת
+    # cell from that current DB value so the enrichment actually surfaces.
+    # Distance is synced the same way: a formatting/geocoding-precision fix
+    # can let a previously-skipped address resolve a real distance after the
+    # row was already added, and this is the one place that reconciles the
+    # sheet with the DB's current state rather than what was true at add time.
+    for row in deduped_rows:
+        url = row[0] if row else ""
+        db_row = db_data.get(url)
+        if not db_row:
+            continue
+        if db_row.get("address") and len(row) > 13:
+            row[13] = db_row["address"]
+        if db_row.get("distance_text") and len(row) > 3:
+            row[3] = db_row["distance_text"]
+
     fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[12] if len(r) > 12 else "")]
     stale_removed = len(deduped_rows) - len(fresh_rows)
 
     fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
 
-    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
-    _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{len(rows) + 1}"]))
-    if fresh_rows:
-        _with_retries(lambda: sheet.update(range_name=f"A2:{last_col}{len(fresh_rows) + 1}", values=fresh_rows))
+    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows)
     return duplicates_removed, stale_removed, len(fresh_rows)
+
+_ENTRY_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך כניסה")
+_POST_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך פרסום")
+_SCAN_TIME_COL_INDEX = SHEET_HEADERS.index("זמן סריקה")
+_TEXT_FORMAT_COL_INDICES = (_ENTRY_DATE_COL_INDEX, _POST_DATE_COL_INDEX, _SCAN_TIME_COL_INDEX)
+
+def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list]):
+    """
+    Shared full-rewrite helper: clears the data range (header kept) and writes
+    new_rows back. new_rows comes from sheet.get_all_values(), which always
+    returns strings — writing those back requires care on two fronts:
+
+    1. value_input_option="USER_ENTERED" (matching the original _build_row
+       write) so numeric-looking strings ("6200", "3.5") land back as real
+       numbers instead of permanently downgrading to text on every rewrite.
+    2. Re-running every cell through _sheet_safe_cell(): the leading-apostrophe
+       formula-injection guard is an input-time signal Sheets consumes, not
+       stored content — get_all_values() returns a previously-escaped
+       "=SUM(...)" clean, with the apostrophe already gone. Under RAW (the old
+       default) that was harmless since RAW never executes formulas either
+       way; under USER_ENTERED it would be executed unless re-escaped here.
+    """
+    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
+    _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
+
+    # DD/MM text ("01/09") and the "YYYY-MM-DD HH:MM" scan timestamp both look
+    # date/datetime-like to Sheets — under USER_ENTERED they get auto-parsed
+    # into a real date/datetime serial (losing the deliberate literal-text
+    # format) unless the column is already declared Plain text *before* the
+    # value write below. Must run first, not after: setting the format on an
+    # already-date-typed cell only changes how it displays, it doesn't turn
+    # the stored value back into the original literal string.
+    _with_retries(lambda: sheet.spreadsheet.batch_update({
+        "requests": [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet.id,
+                        "startColumnIndex": col_index,
+                        "endColumnIndex": col_index + 1,
+                        "startRowIndex": 1,
+                    },
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+            for col_index in _TEXT_FORMAT_COL_INDICES
+        ]
+    }))
+
+    if new_rows:
+        safe_rows = [[_sheet_safe_cell(v) for v in row] for row in new_rows]
+        _with_retries(lambda: sheet.update(
+            range_name=f"A2:{last_col}{len(safe_rows) + 1}",
+            values=safe_rows,
+            value_input_option="USER_ENTERED",
+        ))
+
+_DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
+
+def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
+    """
+    Navigates to a post URL and checks for Facebook's generic "This content
+    isn't available right now" placeholder — shown when a post was deleted,
+    or its visibility was changed to exclude this account. Confirms with one
+    reload before concluding it's really gone, so a transient load hiccup
+    can't wipe a real listing.
+    """
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        return False
+    page.wait_for_timeout(2000)
+    _handle_checkpoint_if_present(page, url, label, headless)
+    if not _is_visible(page.get_by_text(_DEAD_POST_RE)):
+        return False
+
+    try:
+        page.reload(wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
+    except Exception:
+        return True
+    return _is_visible(page.get_by_text(_DEAD_POST_RE))
+
+def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
+    """
+    Beginning-of-run pass: visits every URL already in the sheet and removes
+    rows whose post Facebook now shows as unavailable (deleted, or visibility
+    changed) — such a link is a dead lead that would otherwise sit in the
+    sheet until MAX_POST_AGE_DAYS ages it out on its own. live=False checks
+    and reports what would be removed without writing, same dry-run contract
+    as the rest of the pipeline. Local DB rows are untouched — same reasoning
+    as stale-row pruning in dedupe_and_sort_sheet: the sheet is just the
+    "current" view, should_skip() only ever reads verdict/attempts.
+    """
+    data = sheet.get_all_values()
+    if len(data) <= 1:
+        return 0
+    rows = data[1:]
+
+    dead_indices = []
+    for i, row in enumerate(rows):
+        url = row[0] if row else ""
+        if not url:
+            continue
+        if _is_post_removed(page, url, headless, "Dead-link check"):
+            dead_indices.append(i)
+            _safe_print(f"    Dead link found (post no longer available): {url}")
+        time.sleep(random.uniform(2, 5))
+
+    if not dead_indices:
+        print("Dead-link check: 0 removed listing(s) found.")
+        return 0
+
+    if not live:
+        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Pass --live to commit.")
+        return len(dead_indices)
+
+    keep_rows = [row for i, row in enumerate(rows) if i not in dead_indices]
+    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows)
+    print(f"Removed {len(dead_indices)} dead listing(s) from the sheet (post no longer available).")
+    return len(dead_indices)
+
+# FB serves the same group post under multiple URL shapes — /posts/<id> and
+# /permalink/<id> are interchangeable, and www/m/web hosts all resolve to the
+# same post. Without canonicalization each shape looks like a new post to the
+# dedupe checks (DB primary key + sheet seen_urls) and costs a duplicate LLM call.
+_CANONICAL_GROUP_POST_RE = re.compile(
+    r'https://(?:www|m|web)\.facebook\.com/groups/([^/?#]+)/(?:posts|permalink)/(\d+)'
+)
+
+def _canonical_post_url(url: str) -> str:
+    m = _CANONICAL_GROUP_POST_RE.match(url)
+    if m:
+        # Trailing slash kept — matches the shape already stored in the DB/sheet
+        return f"https://www.facebook.com/groups/{m.group(1)}/posts/{m.group(2)}/"
+    return url  # unknown shape: pass through unchanged, never break dedupe on odd URLs
+
+# 7-selector fallback chain — FB DOM changes without warning, last resort:
+# aria-labelledby+aria-describedby holds even when role="article" is absent
+_ARTICLE_SELECTORS = [
+    'div[role="article"]',
+    'div[aria-posinset]',
+    'div.x1yztbdb',
+    'div[data-ad-preview="message"]',
+    'div[data-pagelet^="GroupFeed"] > div > div',
+    'div[role="feed"] > div > div',
+    'div[aria-labelledby][aria-describedby]',
+]
+
+def _find_articles(page) -> list:
+    for sel in _ARTICLE_SELECTORS:
+        elements = page.locator(sel).all()
+        if len(elements) > 0:
+            return elements
+    return []
 
 def extract_post_info(article) -> tuple[str, str]:
     try:
@@ -668,7 +1261,8 @@ def extract_post_info(article) -> tuple[str, str]:
                 clean = href.split("?")[0]
                 if clean.startswith("/"):
                     clean = "https://www.facebook.com" + clean
-                
+                clean = _canonical_post_url(clean)
+
                 # Extract the post date directly from the Facebook timestamp link
                 post_date = ""
                 try:
@@ -739,13 +1333,14 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
         _safe_print("[Local Ollama] ")
 
     try:
-        ollama_response = ollama.chat(
-            model='qwen2.5:7b',
-            messages=[{'role': 'user', 'content': prompt}],
-            format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
-            options={'temperature': 0, 'num_ctx': 4096},
-            keep_alive='10m',
-        )
+        with _ollama_lock:
+            ollama_response = ollama.chat(
+                model='qwen2.5:7b',
+                messages=[{'role': 'user', 'content': prompt}],
+                format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
+                options={'temperature': 0, 'num_ctx': 4096},
+                keep_alive='10m',
+            )
         return json.loads(ollama_response['message']['content'])
     except Exception as ollama_err:
         _safe_print(f"\n    ERROR: local Ollama analysis failed: {ollama_err}")
@@ -754,14 +1349,16 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
 def analyze_post_with_llm(text: str) -> dict | None:
     """
     Two attempts max: each attempt runs the LLM and then validates the output
-    against ApartmentData. Validation failure on the first attempt -> a single
-    retry; failure on the second too -> None (verdict parse_failed for the caller).
+    against ApartmentData. A raw call failure (LLM/network error) or a schema
+    validation failure both count as one attempt; failure on both -> None
+    (verdict parse_failed for the caller).
     """
     prompt = get_apartment_prompt_improved(_clean_post_for_llm(text))
     for attempt in range(2):
         raw = _get_llm_raw_result(prompt)
         if raw is None:
-            return None
+            _safe_print(f"    WARNING: LLM call returned no result (attempt {attempt + 1}/2)")
+            continue
         try:
             return ApartmentData.model_validate(raw).model_dump()
         except Exception as validation_err:
@@ -824,7 +1421,12 @@ def _gmaps_result_city(result: dict) -> str:
 
 def _gmaps_has_street_precision(result: dict) -> bool:
     types = set(result.get("types", []))
-    if "street_address" in types or "premise" in types:
+    # "intersection" (a corner query, e.g. "X פינת Y") geocodes to an exact
+    # lat/lng just like a street_address does — at least as precise for
+    # walking-distance purposes, not the vague "general area" result this
+    # check exists to filter out. Confirmed via a live geocode of a real
+    # corner address: Google returns type=intersection with a precise point.
+    if "street_address" in types or "premise" in types or "intersection" in types:
         return True
     component_types = {
         t
@@ -840,19 +1442,24 @@ def _gmaps_city_allowed(result: dict) -> bool:
     return any(target in formatted or target in city for target in GMAPS_TARGET_CITIES)
 
 
-def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str]:
+def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str, float | None]:
     """
-    Returns canonical_address, city, updated_confidence, warning, geocode_status.
+    Returns canonical_address, city, updated_confidence, warning, geocode_status, lat.
+    lat is only ever populated on the "ok" success path (a precise, city-
+    matched result) — every other path either never geocoded or got a
+    result too weak to trust for a geographic check, so callers needing lat
+    (e.g. the south-of-HaHagana exclusion) should treat None as "can't tell,
+    don't reject on this basis."
     """
     if not GMAPS_VALIDATE_ADDRESSES:
-        return address, "", confidence, "", "disabled"
+        return address, "", confidence, "", "disabled", None
 
     if confidence in {"missing", "low"}:
-        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence"
+        return "", "", confidence, "כתובת חלשה - לא נשלחה לגיאוקודינג", "skipped_low_confidence", None
 
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
-        return address, "", confidence, placeholder, "quota"
+        return address, "", confidence, placeholder, "quota", None
 
     query = address
     if not any(city in query for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
@@ -862,20 +1469,21 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
         storage.increment_gmaps_usage()
         results = _with_retries(lambda: gmaps_client.geocode(query, language="he", region="il"))
     except Exception as e:
-        _safe_print(f"\n    [Google Geocoding API Error]: {e}")
-        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error"
+        _safe_print(f"\n    [Google Geocoding API Error]: {_redact_api_key(str(e))}")
+        return address, "", confidence, "שגיאת אימות כתובת", "geocode_error", None
 
     if not results:
-        return "", "", "low", "Google לא מצא את הכתובת", "not_found"
+        return "", "", "low", "Google לא מצא את הכתובת", "not_found", None
 
     best = results[0]
     if not _gmaps_city_allowed(best):
-        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city"
+        return "", _gmaps_result_city(best), "low", "הכתובת לא אומתה בעיר יעד", "wrong_city", None
 
     if not _gmaps_has_street_precision(best):
-        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision"
+        return "", _gmaps_result_city(best), "low", "Google החזיר תוצאה כללית בלבד", "not_street_precision", None
 
-    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok"
+    lat = best.get("geometry", {}).get("location", {}).get("lat")
+    return best.get("formatted_address", address), _gmaps_result_city(best), "high", "", "ok", lat
 
 
 def get_walking_distance(address: str):
@@ -889,27 +1497,44 @@ def get_walking_distance(address: str):
 
     cached = storage.get_address_cache(address)
     if cached:
+        # Must return the ORIGINAL source ("google_maps"/"skipped"/"quota"),
+        # not a hardcoded "cache" — callers gate the > MAX_WALKING_DISTANCE_KM
+        # rejection on distance_source == "google_maps", so a hardcoded value
+        # here silently let any cached far-away address (e.g. previously
+        # geocoded by an earlier, differently-rejected post reusing the same
+        # address text) bypass the distance filter entirely.
         return (
             cached.get("distance_text") or "",
             cached.get("distance_meters") or 999999,
             cached.get("confidence") or confidence,
             cached.get("warning") or "",
-            "cache",
+            cached.get("distance_source") or "cache",
         )
 
     if address.strip() in _CITY_ONLY_ADDRESSES:
         storage.save_address_cache(address, "", "", "low", "כתובת ברמת עיר בלבד", "", 999999, "skipped", "city_only")
         return "", 999999, "low", "כתובת ברמת עיר בלבד", "skipped"
 
-    canonical_address, city, confidence, geocode_warning, geocode_status = _validate_address_with_geocoding(address, confidence)
+    canonical_address, city, confidence, geocode_warning, geocode_status, lat = _validate_address_with_geocoding(address, confidence)
     warning = geocode_warning or warning
 
     if GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS and confidence not in {"high", "medium"}:
         storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status)
         return "", 999999, confidence, warning, "skipped"
 
+    if EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT:
+        south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
+        storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status)
+        return "", 999999, confidence, south_warning, "excluded_south"
+
     over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
+        fallback = distance_fallback.estimate_straight_line_distance(canonical_address or address)
+        if fallback:
+            fallback_text, fallback_meters = fallback
+            fallback_warning = "הערכה קווית (מכסת Google הסתיימה)"
+            storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status)
+            return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate"
         storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status)
         return placeholder, 999999, confidence, warning, "quota"
 
@@ -937,7 +1562,7 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, canonical_address, city, confidence, "Distance Matrix לא החזיר מסלול תקין", "", 999999, "google_maps_failed", geocode_status)
         return "", float('inf'), confidence, "Distance Matrix לא החזיר מסלול תקין", "google_maps_failed"
     except Exception as e:
-        _safe_print(f"\n    [Google Maps API Error]: {e}")
+        _safe_print(f"\n    [Google Maps API Error]: {_redact_api_key(str(e))}")
         storage.save_address_cache(address, canonical_address, city, confidence, "שגיאת Distance Matrix", "", 999999, "google_maps_error", geocode_status)
         return "", float('inf'), confidence, "שגיאת Distance Matrix", "google_maps_error"
 
@@ -952,6 +1577,38 @@ def _dismiss_popups(page):
             page.locator(selector).first.click(timeout=2000)
         except Exception:
             pass
+
+
+def _ensure_sorted_by_new_posts(page, group_label: str):
+    """
+    Group feeds default to "Most relevant" sort (falls back to "Recent
+    activity" — comment activity, not post date — when nothing stands out),
+    either of which can surface bumped/commented-on posts out of chronological
+    order. Switching to "New posts" makes the feed strictly newest-first,
+    which is what makes it safe to stop scrolling once old posts start
+    appearing (see the scroll loop in _scan_group_page). Verified against live
+    FB DOM 2026-07-25: the sort control is a role="button" whose visible text
+    is the current selection ("Most relevant"/"Recent activity"/"New posts"),
+    and the opened menu's options are role="menuitemradio", not "menuitem".
+    Best-effort: any failure just leaves the default sort, and
+    CONSECUTIVE_OLD_POSTS_TO_STOP's tolerance covers that case too.
+    """
+    try:
+        sort_button = page.locator(
+            '[role="button"]:has-text("Most relevant"), '
+            '[role="button"]:has-text("Recent activity"), '
+            '[role="button"]:has-text("New posts")'
+        ).first
+        if not sort_button.is_visible(timeout=1500):
+            return
+        if "New posts" in sort_button.inner_text():
+            return
+        sort_button.click(timeout=1500)
+        page.locator('[role="menuitemradio"]:has-text("New posts")').first.click(timeout=1500)
+        page.wait_for_timeout(1500)
+        _safe_print(f"[{group_label}] Switched sort to New posts.")
+    except Exception:
+        pass
 
 # ─── Core Scraper ────────────────────────────────────────────────────────
 
@@ -1006,7 +1663,85 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
         except Exception:
             pass
 
-def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool) -> dict:
+def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
+                               seen_urls: set, pending_rows: list, pending_seen_urls: set,
+                               pending_records: list, stats: dict, local_lock: threading.Lock,
+                               pending_telegram: list | None = None) -> None:
+    """
+    Runs one scraped listing (any source — FB post, Yad2 ad) through LLM parse
+    -> _evaluate_post_data -> _build_row -> queue-for-sheet-write. Pulled out of
+    _scan_group_page's process_post closure so a second source (Yad2) can feed
+    the same pipeline without a second hand-copied version of this logic —
+    see CLAUDE.md on keeping _evaluate_post_data/_build_row call sites in sync.
+    """
+    _safe_print(f"[{label}] Analyzing post (URL: {post_url})...")
+
+    try:
+        data = analyze_post_with_llm(text)
+    except (GmapsQuotaHalted, HeadlessCheckpointAbort):
+        raise
+
+    with local_lock:
+        stats["llm_parsed"] += 1
+    if not data:
+        _safe_print(f"    [{label}] Skipped: LLM failed to parse or returned no data.")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_PARSE_FAILED,
+                             analysis=_analysis_from_fields({}, post_date, storage.VERDICT_PARSE_FAILED))
+        return
+
+    verdict, fields = _evaluate_post_data(data, text, group_url)
+    if verdict == storage.VERDICT_REJECTED_ROOMS:
+        _safe_print(f"    [{label}] Skipped: Room count is not suitable ({fields['rooms_val']}).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_REJECTED_PRICE:
+        _safe_print(f"    [{label}] Skipped: Price is not suitable ({int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_PRICE_UNKNOWN:
+        _safe_print(f"    [{label}] Skipped: no price stated in post (contact seller directly).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_DUPLICATE_LISTING:
+        _safe_print(f"    [{label}] Skipped: repost of an already-added listing ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+
+    new_row = _build_row(post_url, post_date, fields)
+
+    if fields.get("distance_source") == "excluded_south":
+        _safe_print(f"    [{label}] Skipped: location south of Tel Aviv HaHagana station.")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
+        return
+
+    dist_meters = fields.get("distance_meters")
+    # Only reject on distance if a real distance was actually computed against
+    # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
+    # address/quota/error, not a real distance, and shouldn't disqualify a
+    # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
+    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+        _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
+        return
+
+    with _sheet_lock:
+        seen_now = post_url in seen_urls or post_url in pending_seen_urls
+        if not seen_now:
+            pending_rows.append(new_row)
+            pending_seen_urls.add(post_url)
+            pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
+            if pending_telegram is not None:
+                pending_telegram.append((post_url, dict(fields), new_row[-1]))
+            with local_lock:
+                stats["added"] += 1
+            price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
+            prefix = "SUCCESS" if live else "DRY RUN"
+            verb = "queued" if live else "would queue (pass --live to commit)"
+            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
+        else:
+            _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
+
+def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool, live: bool = False) -> dict:
     """
     The actual scan logic for a single group, run on a page that already
     exists. Shared between parallel mode (_scan_group, which creates a
@@ -1014,6 +1749,15 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
     when MAX_CONCURRENT_GROUPS == 1, which runs every group in sequence on the
     same page inside the original persistent context, to preserve the
     profile's real fingerprint).
+
+    live=False (default, dry-run): classifies posts normally (LLM calls,
+    Maps/geocoding calls, and their quota tracking all still happen — the
+    read-side of the pipeline is identical either way) but a would-be match
+    is never written to the sheet and never recorded as VERDICT_ADDED, so a
+    dry run can never block a real future match via should_skip's cache.
+    Non-match verdicts (prefiltered/rejected/parse_failed) are still recorded
+    regardless of live, since that's just avoiding repeat LLM cost on posts
+    already known not to match, not a "commit" of a result.
 
     Returns a dict summarizing the run: added, checkpoint_hit (True when the
     group was skipped/stopped due to a checkpoint that can't be solved in
@@ -1035,13 +1779,66 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         _handle_checkpoint_if_present(page, target_url, group_label, headless)
         _dismiss_popups(page)
 
-        _safe_print(f"[{group_label}] Scrolling ({SCROLL_COUNT} times)...")
-        for _ in range(SCROLL_COUNT):
+        # Captures the group's real display name so a no-city address can later be
+        # resolved to a candidate city (see _resolve_ambiguous_city) — page.title()
+        # is far more stable across FB DOM changes than a CSS selector, and costs
+        # nothing extra since the page is already loaded.
+        try:
+            group_title = page.title()
+            if group_title:
+                storage.save_group_city_hint(target_url, group_title, _extract_candidate_cities(group_title))
+        except Exception:
+            pass
+
+        _ensure_sorted_by_new_posts(page, group_label)
+
+        scan_started_at = datetime.now()
+        last_scan_time = storage.get_last_scan_time(target_url)
+        age_cutoff = datetime.now() - timedelta(days=MAX_POST_AGE_DAYS)
+        effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
+
+        _safe_print(f"[{group_label}] Scrolling (up to {SCROLL_COUNT} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
+        seen_article_count = 0
+        consecutive_old = 0
+        scrolls_done = 0
+        for i in range(SCROLL_COUNT):
+            scrolls_done = i + 1
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
+            # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
+            if random.random() < 0.25:
+                try:
+                    page.mouse.move(random.randint(200, 1100), random.randint(200, 800), steps=random.randint(5, 15))
+                except Exception:
+                    pass
             page.mouse.wheel(0, random.randint(3000, 5000))
             jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
             page.wait_for_timeout(jittered_delay)
-        _safe_print(f"[{group_label}] Done scrolling.")
+
+            try:
+                current_articles = _find_articles(page)
+            except Exception:
+                current_articles = []
+            new_articles = current_articles[seen_article_count:]
+            seen_article_count = len(current_articles)
+
+            for article in new_articles:
+                try:
+                    _, fb_post_date = extract_post_info(article)
+                except Exception:
+                    continue
+                post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+                if post_dt is None:
+                    continue  # inconclusive (comment/unparseable) — leave streak unchanged
+                if post_dt < effective_cutoff:
+                    consecutive_old += 1
+                else:
+                    consecutive_old = 0
+
+            if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
+                if scrolls_done < SCROLL_COUNT:
+                    _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
+                break
+        _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
 
         # Click "See more" to reveal the full text of long posts
         for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
@@ -1055,21 +1852,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         page.wait_for_timeout(1500)
 
         # Dynamic Selectors fallback loop
-        selectors = [
-            'div[role="article"]',
-            'div[aria-posinset]',
-            'div.x1yztbdb',
-            'div[data-ad-preview="message"]',
-            'div[data-pagelet^="GroupFeed"] > div > div',
-            'div[role="feed"] > div > div'
-        ]
-
-        raw_articles = []
-        for sel in selectors:
-            elements = page.locator(sel).all()
-            if len(elements) > 0:
-                raw_articles = elements
-                break
+        raw_articles = _find_articles(page)
 
         # Process articles
         articles_data = []
@@ -1086,7 +1869,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
 
         if len(articles_data) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
-            page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
+            try:
+                page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
+            except Exception as e:
+                _safe_print(f"    WARNING: [{group_label}] debug screenshot failed: {e}")
             return stats
 
         valid_posts = []
@@ -1129,8 +1915,12 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 _safe_print(f"    [{group_label}] Pre-filtered: Post already exists in Google Sheets (Duplicate).")
                 continue
 
-            if fb_post_date and not _is_recent_post_date(fb_post_date):
-                _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than {MAX_POST_AGE_DAYS} days.")
+            # Same effective_cutoff the scroll loop used to decide when to stop — a post
+            # this old either predates MAX_POST_AGE_DAYS or predates the group's last scan
+            # (already handled last run), so there's no point sending it to the LLM here.
+            post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+            if post_dt is not None and post_dt < effective_cutoff:
+                _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than the scan cutoff ({effective_cutoff:%d/%m %H:%M}).")
                 storage.record_post(
                     post_url,
                     target_url,
@@ -1138,7 +1928,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     storage.VERDICT_PREFILTERED,
                     analysis={
                         "post_date": fb_post_date,
-                        "reject_reason": f"older_than_{MAX_POST_AGE_DAYS}_days",
+                        "reject_reason": "older_than_scan_cutoff",
                     },
                 )
                 stats["prefiltered"] += 1
@@ -1192,6 +1982,30 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 stats["prefiltered"] += 1
                 continue
 
+            # --- Pre-filter: same listing text already seen (this run or a past one) ---
+            # Crossposts to multiple groups are common and otherwise reach the LLM
+            # once per group even though the text is identical — this catches that
+            # before spending a call. Claiming the hash happens under the lock so
+            # concurrent group threads scanning the same crosspost at once still
+            # only let the first one through.
+            text_hash = _text_dedup_hash(text)
+            dup_of_url = None
+            if text_hash:
+                with _text_dedup_lock:
+                    dup_of_url = _run_text_hashes.get(text_hash)
+                    if dup_of_url is None:
+                        _run_text_hashes[text_hash] = post_url
+                if dup_of_url is None:
+                    existing = storage.find_by_text_hash(text_hash, exclude_url=post_url)
+                    if existing:
+                        dup_of_url = existing["url"]
+            if dup_of_url:
+                _safe_print(f"    [{group_label}] Pre-filtered: duplicate text of an already-processed post ({dup_of_url}).")
+                storage.record_post(post_url, target_url, text, storage.VERDICT_DUPLICATE_TEXT,
+                                     analysis={"text_hash": text_hash, "reject_reason": f"duplicate_text_of:{dup_of_url}"})
+                stats["prefiltered"] += 1
+                continue
+
             valid_posts.append({"url": post_url, "text": text, "post_date": fb_post_date})
 
         _safe_print(f"[{group_label}] Found {len(valid_posts)} valid posts for LLM parsing.")
@@ -1200,73 +2014,20 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         pending_records = []
         pending_rows = []
         pending_seen_urls = set()
+        pending_telegram = []
         local_lock = threading.Lock()
 
         def process_post(post):
-            post_url = post["url"]
-            text = post["text"]
-            fb_post_date = post["post_date"]
-
-            _safe_print(f"[{group_label}] Analyzing post (URL: {post_url})...")
-            
-            try:
-                data = analyze_post_with_llm(text)
-            except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-                raise
-                
-            with local_lock:
-                stats["llm_parsed"] += 1
-            if not data:
-                _safe_print(f"    [{group_label}] Skipped: LLM failed to parse or returned no data.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PARSE_FAILED)
-                return
-
-            verdict, fields = _evaluate_post_data(data, text)
-            if verdict == storage.VERDICT_REJECTED_ROOMS:
-                _safe_print(f"    [{group_label}] Skipped: Room count is not suitable ({fields['rooms_val']}).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-            if verdict == storage.VERDICT_REJECTED_PRICE:
-                _safe_print(f"    [{group_label}] Skipped: Price is not suitable ({int(fields['price_val']):,} ₪).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-            if verdict == storage.VERDICT_PRICE_UNKNOWN:
-                _safe_print(f"    [{group_label}] Skipped: no price stated in post (contact seller directly).")
-                storage.record_post(post_url, target_url, text, verdict, data, analysis=_analysis_from_fields(fields, fb_post_date, verdict))
-                return
-
-            new_row = _build_row(post_url, fb_post_date, fields)
-
-            dist_meters = fields.get("distance_meters")
-            # Only reject on distance if a real distance was actually computed
-            # against Google Maps — dist_meters is a placeholder (999999/inf)
-            # for an uncertain address/quota/error, not a real distance, and
-            # shouldn't disqualify a post as if it were far away (see
-            # CLAUDE.md, verified 2026-07-18).
-            if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-                _safe_print(f"    [{group_label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, fb_post_date, storage.VERDICT_REJECTED_DISTANCE))
-                return
-
-            with _sheet_lock:
-                seen_now = post_url in seen_urls or post_url in pending_seen_urls
-                if not seen_now:
-                    pending_rows.append(new_row)
-                    pending_seen_urls.add(post_url)
-                    pending_records.append((post_url, target_url, text, data, _analysis_from_fields(fields, fb_post_date)))
-                    with local_lock:
-                        stats["added"] += 1
-                    price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
-                    _safe_print(f"    SUCCESS: [{group_label}] Apartment queued: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
-                else:
-                    _safe_print(f"    [{group_label}] Skipped before queueing: duplicate URL.")
+            process_candidate_listing(post["url"], post["text"], post["post_date"], target_url, group_label, live,
+                                       seen_urls, pending_rows, pending_seen_urls, pending_records, stats, local_lock,
+                                       pending_telegram)
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(process_post, post) for post in valid_posts]
             for future in as_completed(futures):
                 future.result()
 
-        if pending_rows:
+        if pending_rows and live:
             with _sheet_lock:
                 try:
                     _append_rows_batch(sheet, pending_rows)
@@ -1274,16 +2035,27 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
                         storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
                     _safe_print(f"    [{group_label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
+                    if TELEGRAM_ENABLED:
+                        for tg_url, tg_fields, tg_score in pending_telegram:
+                            try:
+                                telegram_notifier.send_listing_alert(tg_url, tg_fields, tg_score)
+                            except Exception as e:
+                                _safe_print(f"    WARNING: [{group_label}] Telegram alert failed for {tg_url}: {e}")
                 except Exception as e:
                     _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
                     stats["added"] -= len(pending_rows)
+        elif pending_rows:
+            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
+
+        storage.set_last_scan_time(target_url, scan_started_at)
     except GmapsQuotaHalted:
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
         stats["checkpoint_hit"] = True
     return stats
 
-def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool) -> dict:
+def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool,
+                user_agent: str = "", browser_locale: str = "", live: bool = False) -> dict:
     """
     Parallel mode: each thread runs its own Playwright instance (the sync API
     isn't thread-safe when sharing one browser/context between threads) — the
@@ -1303,15 +2075,23 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            channel="chrome",
             headless=headless,
             ignore_default_args=["--no-sandbox", "--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+            args=_CHROME_LAUNCH_ARGS
         )
-        context = browser.new_context(storage_state=storage_state_path, viewport={"width": 1366, "height": 1600})
+        # Match the real profile's fingerprint: a worker with Playwright's default
+        # UA/locale next to the logged-in profile's real ones = same account on two
+        # different "devices" simultaneously, a stronger bot signal than either alone.
+        context_kwargs = {"storage_state": storage_state_path, "viewport": {"width": 1366, "height": 1600}}
+        if user_agent:
+            context_kwargs["user_agent"] = user_agent
+        if browser_locale:
+            context_kwargs["locale"] = browser_locale
+        context = browser.new_context(**context_kwargs)
         page = context.new_page()
+        _apply_stealth(page)
         try:
-            return _scan_group_page(page, target_url, group_label, sheet, seen_urls, headless)
+            return _scan_group_page(page, target_url, group_label, sheet, seen_urls, headless, live)
         finally:
             try:
                 context.close()
@@ -1329,7 +2109,9 @@ def _print_gmaps_quota_status():
     if GMAPS_MONTHLY_CAP > 0 and usage >= GMAPS_MONTHLY_CAP * 0.8:
         print(f"WARNING: Google Maps usage is at {usage}/{GMAPS_MONTHLY_CAP} ({usage / GMAPS_MONTHLY_CAP:.0%}) of the monthly cap.")
 
-def run_scraper(headless: bool = False):
+def run_scraper(headless: bool = False, live: bool = False):
+    if not live:
+        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
@@ -1338,6 +2120,11 @@ def run_scraper(headless: bool = False):
 
     shuffled_urls = random.sample(TARGET_URLS, len(TARGET_URLS))
     total = len(shuffled_urls)
+    if live and TELEGRAM_ENABLED:
+        try:
+            telegram_notifier.send_run_started(total)
+        except Exception as e:
+            print(f"WARNING: Telegram run-started alert failed: {e}")
     groups_scanned = 0
     total_added = 0
     total_posts_seen = 0
@@ -1348,15 +2135,31 @@ def run_scraper(headless: bool = False):
 
     # --- Login phase: single persistent-context tab, sequential ---
     with sync_playwright() as p:
+        persistent_kwargs = {}
+        if headless:
+            # Headless Chromium's UA says "HeadlessChrome" in both the HTTP header and
+            # JS — the most obvious headless tell, and a UA can only be set at context
+            # creation. Probe a throwaway browser for the real platform-correct UA and
+            # strip the "Headless" marker.
+            try:
+                probe = p.chromium.launch(headless=True)
+                probe_page = probe.new_page()
+                probe_ua = probe_page.evaluate("navigator.userAgent") or ""
+                probe.close()
+                if "HeadlessChrome" in probe_ua:
+                    persistent_kwargs["user_agent"] = probe_ua.replace("HeadlessChrome", "Chrome")
+            except Exception:
+                pass
         context = p.chromium.launch_persistent_context(
             user_data_dir=profile_dir,
-            channel="chrome",
             headless=headless,
             viewport={"width": 1366, "height": 1600},
             ignore_default_args=["--no-sandbox", "--enable-automation"],
-            args=["--disable-blink-features=AutomationControlled", "--autoplay-policy=user-gesture-required"]
+            args=_CHROME_LAUNCH_ARGS,
+            **persistent_kwargs
         )
         page = context.pages[0] if context.pages else context.new_page()
+        _apply_stealth(page)
 
         print("Opening Facebook...")
         page.goto("https://www.facebook.com", wait_until="domcontentloaded")
@@ -1384,6 +2187,9 @@ def run_scraper(headless: bool = False):
             else:
                 print("Already logged into Facebook. Skipping manual login.")
 
+        if PRUNE_DEAD_LINKS_ENABLED:
+            _prune_dead_links(page, sheet, headless, live)
+
         if sequential_mode:
             # Sequential mode: no storage_state at all — scans every group in
             # sequence on the same page inside the original context, to
@@ -1393,7 +2199,11 @@ def run_scraper(headless: bool = False):
             for i, url in enumerate(shuffled_urls, 1):
                 if i > 1:
                     time.sleep(random.uniform(5, 15))
-                stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless)
+                try:
+                    stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless, live)
+                except Exception as e:
+                    _safe_print(f"\nERROR: [Group {i}/{total}] crashed: {e}")
+                    continue
                 groups_scanned += 1
                 total_added += stats["added"]
                 total_posts_seen += stats["posts_seen"]
@@ -1406,6 +2216,16 @@ def run_scraper(headless: bool = False):
                     break
             context.close()
         else:
+            # Capture the logged-in profile's fingerprint so parallel workers can
+            # present the same one (see _scan_group). "HeadlessChrome" is stripped
+            # so a headless run's workers still claim the normal Chrome UA.
+            real_user_agent = ""
+            real_locale = ""
+            try:
+                real_user_agent = (page.evaluate("navigator.userAgent") or "").replace("HeadlessChrome", "Chrome")
+                real_locale = page.evaluate("navigator.language") or ""
+            except Exception:
+                pass
             # Exports cookies/session to a file so independent threads can use
             # them — one context/browser can't be shared between threads (Playwright's sync API isn't thread-safe)
             context.storage_state(path=storage_state_path)
@@ -1416,7 +2236,8 @@ def run_scraper(headless: bool = False):
               f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS) as executor:
             futures = {
-                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless): idx
+                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless,
+                                real_user_agent, real_locale, live): idx
                 for idx, url in enumerate(shuffled_urls, 1)
             }
             for future in as_completed(futures):
@@ -1441,14 +2262,39 @@ def run_scraper(headless: bool = False):
     if checkpoint_skipped:
         print(f"{checkpoint_skipped} group(s) skipped due to a security checkpoint — rerun headful.")
 
-    print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
-    duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
-    print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
-          f"Sheet now has {kept} listings, sorted by post date (newest first).")
+    if live:
+        print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
+        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
+              f"Sheet now has {kept} listings, sorted by post date (newest first).")
 
-    pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
-    if pruned:
-        print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+        pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
+        if pruned:
+            print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+    else:
+        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
+
+    if live and TELEGRAM_ENABLED:
+        try:
+            telegram_notifier.send_run_finished({
+                "groups_scanned": groups_scanned,
+                "total": total,
+                "posts_seen": total_posts_seen,
+                "prefiltered": total_prefiltered,
+                "llm_parsed": total_llm_parsed,
+                "added": total_added,
+                "gmaps_calls": gmaps_calls_this_month,
+                "checkpoint_skipped": checkpoint_skipped,
+            })
+        except Exception as e:
+            print(f"WARNING: Telegram run-finished alert failed: {e}")
+
+    return {
+        "groups_scanned": groups_scanned,
+        "total": total,
+        "checkpoint_skipped": checkpoint_skipped,
+        "total_added": total_added,
+    }
 
 def reparse_rejected_posts():
     """
@@ -1472,11 +2318,12 @@ def reparse_rejected_posts():
 
         data = analyze_post_with_llm(text)
         if not data:
-            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED)
+            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED,
+                                 analysis=_analysis_from_fields({}, post.get("post_date") or "", storage.VERDICT_PARSE_FAILED))
             print(f"    Still failing to parse: {url}")
             continue
 
-        verdict, fields = _evaluate_post_data(data, text)
+        verdict, fields = _evaluate_post_data(data, text, group_url)
         if verdict != storage.VERDICT_ADDED:
             storage.record_post(url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post.get("post_date") or "", verdict))
             print(f"    Still {verdict}: {url}")
@@ -1484,8 +2331,12 @@ def reparse_rejected_posts():
 
         post_date = post.get("post_date") or ""
         new_row = _build_row(url, post_date, fields)
+        if fields.get("distance_source") == "excluded_south":
+            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
+            print(f"    Still rejected_location: {url}")
+            continue
         dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
             storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
             print(f"    Still rejected_distance: {url}")
             continue
@@ -1496,6 +2347,11 @@ def reparse_rejected_posts():
             added += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
             print(f"    SUCCESS: Apartment added: {fields['rooms_val']} rooms | {price_display} | Address: {fields['address']}")
+            if TELEGRAM_ENABLED:
+                try:
+                    telegram_notifier.send_listing_alert(url, fields, new_row[-1])
+                except Exception as e:
+                    print(f"    WARNING: Telegram alert failed for {url}: {e}")
         except Exception as e:
             print(f"    ERROR: writing to sheet: {e}")
 
@@ -1535,77 +2391,55 @@ def _replay_text_prefilters(text: str) -> tuple[str, dict] | None:
 
 def replay_all_posts():
     """
-    Local replay, no browser: backs up the sheet to a new tab, clears the data
-    rows, then re-runs every post stored in SQLite (raw_text) through the
-    current code — including a fresh LLM call per post. Useful for testing a
-    prompt/filter/normalization change without re-scraping Facebook (no
-    checkpoint risk, no waiting for scrolling).
+    Read-only, no browser, no sheet, no DB writes: re-runs every post stored
+    in SQLite (raw_text) through the current filters/LLM/normalization and
+    reports which posts' verdict would change vs. what's stored. The tuning
+    workflow after editing a prompt/filter/threshold — see exactly what flips
+    without rebuilding the sheet (which would wipe hand-edited rows) or
+    mutating the DB's cached verdicts.
     Note: the relative date stored at original scan time ("3 days ago") doesn't
     update with time — replay doesn't re-apply the MAX_POST_AGE_DAYS filter, only filters/LLM/normalization.
     """
-    sheet, _ = setup_google_sheet()
-
-    backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    try:
-        sheet.duplicate(new_sheet_name=backup_name)
-        print(f"Backed up current sheet to tab '{backup_name}'.")
-    except Exception as e:
-        print(f"WARNING: could not create backup tab ({e}) — continuing anyway.")
-
-    row_count = len(sheet.get_all_values())
-    if row_count > 1:
-        sheet.batch_clear([f"A2:Z{row_count}"])
-    seen_urls = set()
-
     posts = storage.get_all_posts()
-    print(f"\nReplaying {len(posts)} stored post(s) through the current code (no browser)...")
+    print(f"\nReplaying {len(posts)} stored post(s) through the current code (read-only — no sheet/DB writes)...")
 
-    added = 0
+    changed = []
+    skipped_no_text = 0
     for post in posts:
         url = post["url"]
-        group_url = post["group_url"]
-        post_date = post.get("post_date") or ""
+        old_verdict = post.get("verdict") or "(none)"
+        group_url = post.get("group_url") or ""
         text = post.get("raw_text") or ""
-        if not text or url in seen_urls:
+        if not text:
+            skipped_no_text += 1
             continue
         text = _strip_comment_section(BIDI_RE.sub('', text))
 
         prefiltered = _replay_text_prefilters(text)
         if prefiltered is not None:
-            verdict, analysis = prefiltered
-            storage.record_post(url, group_url, text, verdict, analysis=analysis)
-            continue
+            new_verdict, _ = prefiltered
+        else:
+            data = analyze_post_with_llm(text)
+            if not data:
+                new_verdict = storage.VERDICT_PARSE_FAILED
+            else:
+                new_verdict, fields = _evaluate_post_data(data, text, group_url)
+                if new_verdict == storage.VERDICT_ADDED:
+                    if fields.get("distance_source") == "excluded_south":
+                        new_verdict = storage.VERDICT_REJECTED_LOCATION
+                    else:
+                        dist_meters = fields.get("distance_meters")
+                        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+                            new_verdict = storage.VERDICT_REJECTED_DISTANCE
 
-        data = analyze_post_with_llm(text)
-        if not data:
-            storage.record_post(url, group_url, text, storage.VERDICT_PARSE_FAILED)
-            continue
+        if new_verdict != old_verdict:
+            changed.append((url, old_verdict, new_verdict))
+            print(f"    CHANGED: {old_verdict} -> {new_verdict}  {url}")
 
-        verdict, fields = _evaluate_post_data(data, text)
-        if verdict != storage.VERDICT_ADDED:
-            storage.record_post(url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
-            continue
-
-        new_row = _build_row(url, post_date, fields)
-        dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") == "google_maps" and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
-            continue
-
-        try:
-            _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED"))
-            seen_urls.add(url)
-            storage.record_post(url, group_url, text, storage.VERDICT_ADDED, data, analysis=_analysis_from_fields(fields, post_date))
-            added += 1
-            price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
-            print(f"    SUCCESS: Apartment added: {fields['rooms_val']} rooms | {price_display} | Address: {fields['address']}")
-        except Exception as e:
-            print(f"    ERROR: writing to sheet: {e}")
-
-    if added:
-        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
-        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings, sorted by post date (newest first).")
-    print(f"\nDone. {added} apartment(s) added from replay (out of {len(posts)} stored posts).")
+    print(f"\nDone. {len(changed)} verdict(s) changed out of {len(posts)} stored posts "
+          f"({skipped_no_text} skipped: raw_text pruned). Nothing was written — "
+          f"re-run the real scraper (--live) to actually commit any newly-matching posts.")
+    return changed
 
 def print_stats():
     counts, month, gmaps_calls = storage.get_stats()
@@ -1613,6 +2447,27 @@ def print_stats():
     for verdict in storage.ALL_VERDICTS:
         print(f"  {verdict}: {counts.get(verdict, 0)}")
     print(f"\nGoogle Maps calls this month ({month}): {gmaps_calls}")
+
+    group_stats = storage.get_group_stats()
+    if group_stats:
+        print("\n--- per-group yield (added | total) ---")
+        for group_url, verdict_counts in sorted(group_stats.items()):
+            added = verdict_counts.get(storage.VERDICT_ADDED, 0)
+            total = sum(verdict_counts.values())
+            flag = "   <- 0 matches, candidate to drop from TARGET_URLS" if added == 0 else ""
+            print(f"  {group_url}   {added:>3} | {total:>4}{flag}")
+
+    top_locations = storage.top_excluded_locations()
+    if top_locations:
+        print("\n--- top excluded locations (tune EXCLUDED_LOCATIONS) ---")
+        for location, cnt in top_locations:
+            print(f"  {cnt:4}  {location}")
+
+    top_addresses = storage.top_rejected_distance_addresses()
+    if top_addresses:
+        print("\n--- top rejected_distance addresses (tune MAX_WALKING_DISTANCE_KM/geocoding) ---")
+        for address, cnt in top_addresses:
+            print(f"  {cnt:4}  {address}")
 
 def prune_data():
     """
@@ -1630,10 +2485,13 @@ def prune_data():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
     parser.add_argument("--headless", action="store_true", help="Run without UI")
+    parser.add_argument("--live", action="store_true",
+                         help="Commit results: write matches to Google Sheets, record verdicts, dedupe/prune. "
+                              "Default is dry-run (classify + print only, nothing written).")
     parser.add_argument("--reparse-rejected", action="store_true",
                          help="Re-run LLM + filters on stored rejected/failed posts, no browser")
     parser.add_argument("--replay", action="store_true",
-                         help="Backup + clear the sheet, then rebuild it from ALL stored posts via the current code, no browser")
+                         help="Re-run ALL stored posts through the current code and report which verdicts would change, no browser, no sheet/DB writes")
     parser.add_argument("--stats", action="store_true",
                          help="Print verdict counts and Maps usage from the local DB, then exit")
     parser.add_argument("--prune", action="store_true",
@@ -1667,4 +2525,14 @@ if __name__ == "__main__":
     print(f"  Distance to: {DESTINATION_ADDRESS}")
     print("=======================================================")
 
-    run_scraper(headless=args.headless)
+    try:
+        result = run_scraper(headless=args.headless, live=args.live)
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
+
+    if result["checkpoint_skipped"] > 0:
+        sys.exit(2)
+    if result["groups_scanned"] == 0:
+        sys.exit(1)
+    sys.exit(0)
