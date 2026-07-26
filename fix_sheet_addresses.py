@@ -22,7 +22,8 @@ from google.oauth2.service_account import Credentials
 
 from config import CREDENTIALS_FILE, SHEET_HEADERS
 from env import get_sheet_id
-from apartment_bot import get_gmaps_client, get_walking_distance, dedupe_and_sort_sheet
+from maps import get_gmaps_client, get_walking_distance
+from apartment_bot import dedupe_and_sort_sheet
 
 DRY_RUN = "--write" not in sys.argv
 
