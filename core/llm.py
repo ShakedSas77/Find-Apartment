@@ -19,7 +19,7 @@ from typing import Optional
 import env
 from config import GEMINI_MODEL, GEMINI_MAX_CONSECUTIVE_ERRORS
 from prompts import get_apartment_prompt_improved
-from core.util import _safe_print
+from core.util import _safe_print, _with_retries
 from core.normalize import _clean_post_for_llm
 
 
@@ -121,12 +121,16 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
 
     try:
         with _ollama_lock:
-            ollama_response = ollama.chat(
-                model='qwen2.5:7b',
-                messages=[{'role': 'user', 'content': prompt}],
-                format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
-                options={'temperature': 0, 'num_ctx': 4096},
-                keep_alive='10m',
+            ollama_response = _with_retries(
+                lambda: ollama.chat(
+                    model='qwen2.5:7b',
+                    messages=[{'role': 'user', 'content': prompt}],
+                    format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
+                    options={'temperature': 0, 'num_ctx': 4096},
+                    keep_alive='10m',
+                ),
+                attempts=3,
+                base_delay=2.0,
             )
         return json.loads(ollama_response['message']['content'])
     except Exception as ollama_err:
