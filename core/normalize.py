@@ -82,6 +82,8 @@ _RELATIVE_DATE_UNITS = {
 
 _YESTERDAY_RE = re.compile(r'^yesterday$', re.IGNORECASE)
 
+_JUST_NOW_RE = re.compile(r'^just now$', re.IGNORECASE)
+
 # Detects absolute English-language dates that Facebook sometimes shows instead of relative text (e.g. "July 9 at 5:50 PM")
 _MONTH_NAMES = {
     'jan': 1, 'january': 1, 'feb': 2, 'february': 2, 'mar': 3, 'march': 3,
@@ -126,6 +128,9 @@ def relative_to_date(rel: str) -> str:
 
     if _YESTERDAY_RE.match(text):
         return (datetime.now() - timedelta(days=1)).strftime("%d/%m")
+
+    if _JUST_NOW_RE.match(text):
+        return datetime.now().strftime("%d/%m")
 
     match = _RELATIVE_DATE_RE.match(text)
     if match:
