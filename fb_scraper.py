@@ -34,7 +34,7 @@ from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
     BIDI_RE, _strip_comment_section, relative_to_date, _infer_post_date,
-    _extract_candidate_cities, _ROOMMATE_COUPLE_EXCEPTION_RE,
+    _extract_candidate_cities, _ROOMMATE_COUPLE_EXCEPTION_RE, _is_recognized_fb_date_text,
 )
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing
@@ -192,8 +192,18 @@ def _wait_for_button_settle(button_locator):
             return
 
 def extract_post_info(article) -> tuple[str, str]:
+    """
+    Finds the post's own permalink + timestamp among the article's links. On a
+    "shared post" layout, a nested/preview link inside the embedded content can
+    also have an href matching /posts//permalink//marketplace-item — but its
+    visible text is the preview's own content (sometimes a raw URL), not a
+    timestamp. Prefer the first candidate whose text actually looks like a real
+    FB date; only fall back to the first href match if none do (unchanged
+    behavior for the common non-shared-post case, where there's just one).
+    """
     try:
         links = article.locator('a[role="link"]').all()
+        first_candidate = None
         for link in links:
             href = link.get_attribute("href") or ""
             if any(seg in href for seg in ("/posts/", "/permalink/", "/marketplace/item/")):
@@ -204,16 +214,20 @@ def extract_post_info(article) -> tuple[str, str]:
                     clean = "https://www.facebook.com" + clean
                 clean = _canonical_post_url(clean)
 
-                # Extract the post date directly from the Facebook timestamp link
-                post_date = ""
+                link_text = ""
                 try:
                     link_text = link.inner_text().strip()
-                    if link_text:
-                        post_date = relative_to_date(link_text)
                 except Exception:
                     pass
 
-                return clean, post_date
+                if link_text and _is_recognized_fb_date_text(link_text):
+                    return clean, relative_to_date(link_text)
+
+                if first_candidate is None:
+                    first_candidate = (clean, relative_to_date(link_text) if link_text else "")
+
+        if first_candidate:
+            return first_candidate
     except Exception:
         pass
     return "Link not extracted", ""

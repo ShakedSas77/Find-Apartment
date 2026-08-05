@@ -114,6 +114,20 @@ _date_warning_lock = threading.Lock()
 
 _unparsed_date_logged = False
 
+def _is_recognized_fb_date_text(text: str) -> bool:
+    """True if text matches one of the date formats relative_to_date() actually
+    converts. Side-effect-free (no warning log) — used to pick the right link out
+    of several href candidates before committing to one, not to convert a date."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    return bool(
+        _YESTERDAY_RE.match(text)
+        or _JUST_NOW_RE.match(text)
+        or _RELATIVE_DATE_RE.match(text)
+        or _parse_absolute_fb_date(text)
+    )
+
 def relative_to_date(rel: str) -> str:
     """
     Converts the relative/absolute date Facebook shows to a DD/MM date. The bot
