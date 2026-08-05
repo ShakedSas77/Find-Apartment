@@ -17,11 +17,21 @@ CREDENTIALS_FILE = "credentials.json"
 # Gemini LLM – API key for parsing listings
 # Create one at: https://aistudio.google.com/app/apikey
 
-# Gemini LLM – model name. Dated snapshot names (gemini-2.5-flash, gemini-2.5-flash-lite)
-# get pulled from new users without warning (404, verified 2026-07-18). "-latest"
-# is an alias that auto-updates to the active version and isn't blocked the same way.
-# gemini-flash-latest is the higher-quality alternative (smaller free-tier quota).
-GEMINI_MODEL = "gemini-flash-lite-latest"
+# Gemini LLM – model fallback chain, quality-first. Dated snapshot names (gemini-2.5-flash,
+# gemini-2.5-flash-lite) get pulled from new users without warning (404, verified 2026-07-18).
+# "-latest" is an alias that auto-updates to the active version and isn't blocked the same way.
+# On a model-level error (404/quota, or GEMINI_MAX_CONSECUTIVE_ERRORS transient errors like a
+# 503 "high demand"), core/llm.py advances to the next entry instead of dropping straight to the
+# local Ollama fallback — a transient Gemini outage is usually model-specific, not account-wide.
+# Verified callable against this key 2026-08-04 (client.models.list() lists names the key can't
+# actually call, e.g. gemini-3.5-flash-lite/gemini-flash-lite-latest were both 503ing that day —
+# re-probe with a real generate_content call, not just list(), before trusting a new entry here).
+GEMINI_MODELS = [
+    "gemini-3.6-flash",       # newest/strongest verified — primary
+    "gemini-3.5-flash",
+    "gemini-flash-latest",    # higher-quality alias, smaller free-tier quota
+    "gemini-3.1-flash-lite",  # lightest — last resort before Ollama
+]
 
 # ─── Target locations ────────────────────────────────────────────────────────────
 # Facebook groups to scan — placeholder examples, replace with groups you're a member of
@@ -163,7 +173,7 @@ PRUNE_DEAD_LINKS_ENABLED = True
 # fingerprint than the real profile. If checkpoints start happening, the safest
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
-MAX_CONCURRENT_GROUPS = 32
+MAX_CONCURRENT_GROUPS = 6
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [

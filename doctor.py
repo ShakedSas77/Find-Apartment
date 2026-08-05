@@ -88,10 +88,18 @@ def _check_gemini():
     try:
         from google import genai
         client = genai.Client(api_key=key)
-        list(client.models.list())  # metadata call, not generation — doesn't spend quota
-        return ("gemini", PASS, f"reachable, model={config.GEMINI_MODEL}", "")
+        # Metadata call, not generation — doesn't spend quota. Note: a model being listed
+        # here doesn't guarantee it's actually callable (dated snapshots can 404 for a key
+        # even while listed) — this only catches an entry that's plainly gone.
+        listed = {m.name.rsplit("/", 1)[-1] for m in client.models.list()}
     except Exception as exc:
         return ("gemini", FAIL, f"unreachable: {exc}", "check GEMINI_API_KEY / network")
+    missing = [m for m in config.GEMINI_MODELS if m not in listed]
+    if not missing:
+        return ("gemini", PASS, f"reachable, chain={config.GEMINI_MODELS}", "")
+    if len(missing) < len(config.GEMINI_MODELS):
+        return ("gemini", WARN, f"reachable, but not listed for this key: {missing}", "remove dead entries from GEMINI_MODELS in config.py")
+    return ("gemini", FAIL, f"none of GEMINI_MODELS listed for this key: {config.GEMINI_MODELS}", "update GEMINI_MODELS in config.py")
 
 
 def _ollama_base() -> str:
