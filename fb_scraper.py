@@ -374,6 +374,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         seen_article_count = 0
         consecutive_old = 0
         scrolls_done = 0
+        caught_up = False
         for i in range(SCROLL_COUNT):
             scrolls_done = i + 1
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
@@ -408,10 +409,14 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     consecutive_old = 0
 
             if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
+                caught_up = True
                 if scrolls_done < SCROLL_COUNT:
                     _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
                 break
         _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
+        if not caught_up:
+            _safe_print(f"[{group_label}] Did not catch up to the last scan within {SCROLL_COUNT} scrolls — "
+                         f"last_scan_time not advanced, will retry this range next run.")
 
         # Click "See more" to reveal the full text of long posts
         for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
@@ -619,7 +624,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         elif pending_rows:
             _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
 
-        storage.set_last_scan_time(target_url, scan_started_at)
+        if caught_up:
+            storage.set_last_scan_time(target_url, scan_started_at)
     except GmapsQuotaHalted:
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
