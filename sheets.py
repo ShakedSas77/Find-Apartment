@@ -122,7 +122,14 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
 
     fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
 
-    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows)
+    # A manually-added column past the defined headers (e.g. a note) makes
+    # get_all_values() pad every row to that wider width. Rewriting with a
+    # range narrower than the actual data width raises a 400 from the Sheets
+    # API — and since the clear happens before the write, a crash there wipes
+    # the sheet with nothing written back. Sizing the range off the real data
+    # width (never narrower than SHEET_HEADERS) keeps such columns intact.
+    total_cols = max(len(SHEET_HEADERS), max((len(r) for r in data), default=0))
+    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows, total_cols)
     return duplicates_removed, stale_removed, len(fresh_rows)
 
 _ENTRY_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך כניסה")
@@ -133,7 +140,7 @@ _SCAN_TIME_COL_INDEX = SHEET_HEADERS.index("זמן סריקה")
 
 _TEXT_FORMAT_COL_INDICES = (_ENTRY_DATE_COL_INDEX, _POST_DATE_COL_INDEX, _SCAN_TIME_COL_INDEX)
 
-def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list]):
+def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list], total_cols: int = len(SHEET_HEADERS)):
     """
     Shared full-rewrite helper: clears the data range (header kept) and writes
     new_rows back. new_rows comes from sheet.get_all_values(), which always
@@ -148,8 +155,14 @@ def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list
        "=SUM(...)" clean, with the apostrophe already gone. Under RAW (the old
        default) that was harmless since RAW never executes formulas either
        way; under USER_ENTERED it would be executed unless re-escaped here.
+
+    total_cols defaults to the defined header count, but callers whose rows
+    may be padded wider (e.g. a manually-added note column past the last
+    header) must pass the real data width — writing a range narrower than
+    the row data raises a Sheets API 400, and since the clear below runs
+    first, a crash there would wipe the sheet without writing anything back.
     """
-    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
+    last_col = chr(ord('A') + total_cols - 1)
     _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
 
     # DD/MM text ("01/09") and the "YYYY-MM-DD HH:MM" scan timestamp both look

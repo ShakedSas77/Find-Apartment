@@ -26,7 +26,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
-    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED,
+    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _is_visible, _dismiss_popups
@@ -107,7 +107,8 @@ def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
         return len(dead_indices)
 
     keep_rows = [row for i, row in enumerate(rows) if i not in dead_indices]
-    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows)
+    total_cols = max(len(SHEET_HEADERS), max((len(r) for r in data), default=0))
+    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows, total_cols)
     print(f"Removed {len(dead_indices)} dead listing(s) from the sheet (post no longer available).")
     return len(dead_indices)
 
