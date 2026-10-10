@@ -22,7 +22,8 @@ from playwright.sync_api import sync_playwright
 import storage
 import telegram_notifier
 from config import (
-    TARGET_URLS, SCROLL_COUNT, SCROLL_DELAY_MS, MIN_SCROLLS_BEFORE_EARLY_STOP,
+    TARGET_URLS, SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
+    MIN_SCROLLS_BEFORE_EARLY_STOP,
     CONSECUTIVE_OLD_POSTS_TO_STOP, MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
@@ -65,11 +66,13 @@ def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
     if not _is_visible(page.get_by_text(_DEAD_POST_RE)):
         return False
 
+    # A failed reload is inconclusive, not proof the post is gone — treat it as
+    # alive so a transient network error can't delete a real listing's row.
     try:
         page.reload(wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2000)
     except Exception:
-        return True
+        return False
     return _is_visible(page.get_by_text(_DEAD_POST_RE))
 
 def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
@@ -175,23 +178,6 @@ def _wait_for_text_growth(article, before_len: int) -> str:
             return text
     return text
 
-def _wait_for_button_settle(button_locator):
-    """Bounded poll after clicking a page-level "See more" button: FB typically
-    removes/hides the button once text expands, so poll for that instead of a fixed
-    sleep. Same no-extra-request reasoning as _wait_for_text_growth."""
-    elapsed = 0
-    while elapsed < SEE_MORE_SETTLE_MAX_MS:
-        try:
-            button_locator.page.wait_for_timeout(SEE_MORE_SETTLE_POLL_MS)
-        except Exception:
-            return
-        elapsed += SEE_MORE_SETTLE_POLL_MS
-        try:
-            if not button_locator.is_visible():
-                return
-        except Exception:
-            return
-
 def extract_post_info(article) -> tuple[str, str]:
     """
     Finds the post's own permalink + timestamp among the article's links. On a
@@ -232,6 +218,40 @@ def extract_post_info(article) -> tuple[str, str]:
     except Exception:
         pass
     return "Link not extracted", ""
+
+def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> list:
+    """
+    Facebook unmounts posts that scroll far out of view, so reading the feed once
+    after the scroll loop only sees the last few screens. Called after every scroll
+    instead: records each not-yet-seen post (keyed by URL) while it is still in the
+    DOM. "See more" is expanded here, in place, since the element is gone later.
+    Posts already older than the cutoff skip the expansion — they get pre-filtered
+    anyway. Returns the newly harvested (url, post_dt) pairs in feed order.
+    """
+    new_posts = []
+    for article in _find_articles(page):
+        try:
+            post_url, fb_post_date = extract_post_info(article)
+            if post_url == "Link not extracted" or post_url in harvested:
+                continue
+            post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+            text = article.inner_text().strip()
+            if post_dt is None or post_dt >= effective_cutoff:
+                for attempt in range(2):
+                    try:
+                        if article.evaluate(_SEE_MORE_CLICK_JS):
+                            text = _wait_for_text_growth(article, len(text)) or text
+                        break
+                    except Exception:
+                        if attempt == 0:
+                            page.wait_for_timeout(SEE_MORE_RETRY_DELAY_MS)
+        except Exception:
+            continue
+        if len(text) <= 20:
+            continue
+        harvested[post_url] = {"text": text, "date": fb_post_date}
+        new_posts.append((post_url, post_dt))
+    return new_posts
 
 def _ensure_sorted_by_new_posts(page, group_label: str):
     """
@@ -372,7 +392,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
 
         _safe_print(f"[{group_label}] Scrolling (up to {SCROLL_COUNT} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
-        seen_article_count = 0
+        harvested = {}
         consecutive_old = 0
         scrolls_done = 0
         caught_up = False
@@ -385,23 +405,16 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     page.mouse.move(random.randint(200, 1100), random.randint(200, 800), steps=random.randint(5, 15))
                 except Exception:
                     pass
-            page.mouse.wheel(0, random.randint(3000, 5000))
+            page.mouse.wheel(0, random.randint(SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX))
             jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
             page.wait_for_timeout(jittered_delay)
 
             try:
-                current_articles = _find_articles(page)
+                new_posts = _harvest_new_articles(page, harvested, effective_cutoff)
             except Exception:
-                current_articles = []
-            new_articles = current_articles[seen_article_count:]
-            seen_article_count = len(current_articles)
+                new_posts = []
 
-            for article in new_articles:
-                try:
-                    _, fb_post_date = extract_post_info(article)
-                except Exception:
-                    continue
-                post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+            for _, post_dt in new_posts:
                 if post_dt is None:
                     continue  # inconclusive (comment/unparseable) — leave streak unchanged
                 if post_dt < effective_cutoff:
@@ -419,34 +432,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             _safe_print(f"[{group_label}] Did not catch up to the last scan within {SCROLL_COUNT} scrolls — "
                          f"last_scan_time not advanced, will retry this range next run.")
 
-        # Click "See more" to reveal the full text of long posts
-        for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
-            for el in page.locator(f'div[role="button"]:has-text("{text_pattern}"), span:has-text("{text_pattern}")').all():
-                try:
-                    if el.is_visible():
-                        el.click(timeout=1000)
-                        _wait_for_button_settle(el)
-                except Exception:
-                    pass
-        page.wait_for_timeout(1500)
+        _safe_print(f"[{group_label}] Found {len(harvested)} real posts.")
+        stats["posts_seen"] = len(harvested)
 
-        # Dynamic Selectors fallback loop
-        raw_articles = _find_articles(page)
-
-        # Process articles
-        articles_data = []
-        for article in raw_articles:
-            try:
-                text = article.inner_text().strip()
-                if len(text) > 20:
-                    articles_data.append({"element": article, "text": text})
-            except Exception:
-                continue
-
-        _safe_print(f"[{group_label}] Found {len(articles_data)} real posts.")
-        stats["posts_seen"] = len(articles_data)
-
-        if len(articles_data) == 0:
+        if len(harvested) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
             try:
                 page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
@@ -455,33 +444,10 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             return stats
 
         valid_posts = []
-        for item in articles_data:
-            article = item["element"]
-            text = item["text"]
-
-            # Per-article "See more" — JS click bypasses visibility/off-screen issues.
-            # One retry on a transient failure (DOM not settled yet) — otherwise a post's
-            # text stays truncated forever: storage.should_skip() makes any non-parse_failed
-            # verdict permanent, and --reparse-rejected/--replay only ever re-read the
-            # already-truncated stored raw_text, never re-click.
-            for attempt in range(2):
-                try:
-                    article.scroll_into_view_if_needed(timeout=500)
-                    clicked = article.evaluate(_SEE_MORE_CLICK_JS)
-                    if clicked:
-                        text = _wait_for_text_growth(article, len(text))
-                    break
-                except Exception:
-                    if attempt == 0:
-                        page.wait_for_timeout(SEE_MORE_RETRY_DELAY_MS)
-                        continue
-
-            text = BIDI_RE.sub('', text)
+        for post_url, item in harvested.items():
+            fb_post_date = item["date"]
+            text = BIDI_RE.sub('', item["text"])
             text = _strip_comment_section(text)
-
-            post_url, fb_post_date = extract_post_info(article)
-            if post_url == "Link not extracted":
-                continue  # skip comments or elements that aren't a real post
 
             if storage.should_skip(post_url):
                 _safe_print(f"    [{group_label}] Pre-filtered: Already processed (cached verdict in local DB).")

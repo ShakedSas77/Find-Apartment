@@ -20,7 +20,7 @@ def get_apartment_prompt_hebrew(text: str) -> str:
 - "vaad" (String): עלות ועד בית. אותו כלל יחידת זמן כמו ארנונה (למשל "200 לחודש", "400 לחודשיים", "כלול במחיר").
 - "shelter" (Boolean): האם יש ממ"ד או מקלט? (true = יש, false = אין, null = לא צוין).
 - "parking" (String): פרטי חניה (למשל "חניה בטאבו", "ברחוב", "אין חניה").
-- "entry_date" (String): תאריך כניסה. למשל "1.8", "ספטמבר", "מיידי". סנן רעשי רקע וסמיילים.
+- "entry_date" (String): תאריך כניסה. אם צוין תאריך מדויק, החזר אותו בפורמט "D.M" (למשל "1.8"). אם צוין רק חודש, החזר את שם החודש בעברית, אפשר עם "תחילת"/"אמצע"/"סוף" (למשל "ספטמבר", "תחילת אוקטובר"). אם הטקסט מציין כניסה מיידית/גמישה/בהקדם, החזר "מיידי". אם יש טווח תאריכים, החזר את התאריך המוקדם ביותר בטווח. סנן רעשי רקע וסמיילים.
 - "floor" (String): קומה. למשל "2", "קרקע", "3 מתוך 4".
 - "elevator" (Boolean): האם יש מעלית? (true = יש, false = אין, null = לא צוין).
 - "is_agent" (Boolean): האם המודעה מתיווך? (true = תיווך, false = ללא תיווך, null = לא צוין).
@@ -29,7 +29,7 @@ def get_apartment_prompt_hebrew(text: str) -> str:
   - אם אין שם רחוב מפורש אך הטקסט כן מזכיר קרבה מפורשת לציון דרך/שכונה (למשל "ליד הפארק הלאומי", "בשכונת שנקין") — החזר את הביטוי הזה בדיוק כפי שהוא מופיע בטקסט, בלי לשנות, לקצר או להוסיף עליו.
   - **חובה מוחלטת: המחרוזת חייבת להכיל אך ורק אותיות עבריות — אסור בהחלט שיופיעו בה אותיות לטיניות (A-Z/a-z), אפילו לא כתעתיק לפני או אחרי הכתיב העברי.** אל תתרגם, אל תתעתק, ואל תוסיף גרסה אנגלית "בשביל בהירות". דוגמה שגויה: "etur habrisot רחוב טור הברושים" (אסור). דוגמה נכונה: "רחוב טור הברושים 5".
   - **לעולם אל תמציא כתובת, רחוב, שכונה, או ציון דרך שאינו כתוב במפורש בטקסט המקורי — גם לא כניחוש סביר.** אם שום מידע מיקום אמיתי אינו מופיע בטקסט, החזר null.
-  - אם עיר לא מוזכרת כלל בטקסט, הנח שהיא "רמת גן / גבעתיים" בלבד — בלי להמציא רחוב או ציון דרך.
+  - אם עיר לא מוזכרת כלל בטקסט, הנח שהיא "רמת גן / גבעתיים" בלבד — בלי להמציא רחוב או ציון דרך. יוצא מן הכלל: שכונות תל אביב (תל חיים, ביצרון, רמת ישראל, שיכון חברת החשמל, שיכון עממי ג', יד אליהו, נחלת יצחק, רמת הטייסים) שייכות לתל אביב ולא לרמת גן / גבעתיים.
 
 הטקסט לפענוח:
 ---
@@ -58,7 +58,7 @@ Required keys and types:
 - "vaad" (String): building committee fee. Same billing-period rule as arnona, e.g. "200 לחודש", "400 לחודשיים", "כלול במחיר" (included in rent).
 - "shelter" (Boolean): is there a ממ"ד/מקלט (safe room/shelter)? (true = yes, false = no, null = not mentioned).
 - "parking" (String): parking details, e.g. "חניה בטאבו", "ברחוב", "אין חניה".
-- "entry_date" (String): move-in date, e.g. "1.8", "ספטמבר", "מיידי" (immediate). Strip background noise and emoji.
+- "entry_date" (String): move-in date. If an exact date is stated, return it in "D.M" format (e.g. "1.8"). If only a month is stated, return the Hebrew month name, optionally with "תחילת"/"אמצע"/"סוף" (beginning/middle/end) — e.g. "ספטמבר", "תחילת אוקטובר". If the text says immediate/flexible/ASAP, return "מיידי". On a date range, return the earliest date in the range. Strip background noise and emoji.
 - "floor" (String): floor number, e.g. "2", "קרקע" (ground floor), "3 מתוך 4".
 - "elevator" (Boolean): is there an elevator? (true = yes, false = no, null = not mentioned).
 - "is_agent" (Boolean): is this listing from a real-estate agent/agency? (true = agent, false = private/no agent, null = not mentioned).
@@ -67,7 +67,7 @@ Required keys and types:
   - If there's no explicit street name but the text mentions an explicit nearby landmark or neighborhood (e.g. "ליד הפארק הלאומי", "בשכונת שנקין") — return that exact phrase as it appears in the text, unchanged, not shortened, not expanded.
   - **Absolute requirement: the string must contain Hebrew letters only — Latin letters (A-Z/a-z) are strictly forbidden, even as a transliteration before or after the Hebrew.** Do not translate, transliterate, or add an English version "for clarity". Wrong example: "etur habrisot רחוב טור הברושים" (forbidden). Correct example: "רחוב טור הברושים 5".
   - **Never invent an address, street, neighborhood, or landmark that isn't explicitly written in the source text — not even as a reasonable guess.** If no real location info appears in the text, return null.
-  - If no city is mentioned at all, assume "רמת גן / גבעתיים" only — without inventing a street or landmark.
+  - If no city is mentioned at all, assume "רמת גן / גבעתיים" only — without inventing a street or landmark. Exception: these neighborhoods belong to Tel Aviv, not Ramat Gan / Givatayim: תל חיים, ביצרון, רמת ישראל, שיכון חברת החשמל, שיכון עממי ג', יד אליהו, נחלת יצחק, רמת הטייסים.
 
 Text to parse:
 ---

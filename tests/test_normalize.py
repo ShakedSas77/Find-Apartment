@@ -7,7 +7,9 @@ from core.normalize import (
     _detect_agent,
     _infer_post_date,
     _normalize_bimonthly_fee,
+    _normalize_entry_date,
     _parse_floor,
+    resolve_entry_date,
 )
 from core.dedupe import (
     _listing_dedupe_key,
@@ -132,3 +134,55 @@ def test_detect_agent_explicit_agency_signal_overrides_to_true():
 
 def test_detect_agent_no_signal_defers_to_llm_value():
     assert _detect_agent("דירה יפה", None) is None
+
+
+# --- _normalize_entry_date ---
+
+def test_normalize_entry_date_extracts_embedded_date_with_prefix():
+    assert _normalize_entry_date("החל מ-1.9") == "01/09"
+
+
+def test_normalize_entry_date_prefers_date_over_flexible_phrase():
+    assert _normalize_entry_date("1.9 גמיש") == "01/09"
+
+
+def test_normalize_entry_date_range_uses_earliest_date():
+    assert _normalize_entry_date("1.9-15.9") == "01/09"
+
+
+def test_normalize_entry_date_month_with_position_qualifier():
+    assert _normalize_entry_date("תחילת אוקטובר") == "05/10"
+
+
+def test_normalize_entry_date_day_before_month_name():
+    assert _normalize_entry_date("1 בספטמבר") == "01/09"
+
+
+def test_normalize_entry_date_flexible_phrase_becomes_immediate():
+    assert _normalize_entry_date("בהקדם") == "מיידי"
+
+
+def test_normalize_entry_date_negated_immediate_is_not_immediate():
+    assert _normalize_entry_date("לא מיידי") != "מיידי"
+
+
+def test_normalize_entry_date_unrecognized_text_passes_through():
+    assert _normalize_entry_date("בתאריך שיסוכם בהמשך") == "בתאריך שיסוכם בהמשך"
+
+
+# --- resolve_entry_date ---
+
+def test_resolve_entry_date_immediate_is_today():
+    from datetime import date
+    today = date(2026, 9, 28)
+    assert resolve_entry_date("מיידי", today=today) == today
+
+
+def test_resolve_entry_date_rolls_past_date_to_next_year():
+    from datetime import date
+    today = date(2026, 9, 28)
+    assert resolve_entry_date("01/01", today=today) == date(2027, 1, 1)
+
+
+def test_resolve_entry_date_unparseable_text_is_none():
+    assert resolve_entry_date("ספטמבר") is None

@@ -28,12 +28,13 @@ VERDICT_PRICE_UNKNOWN = "price_unknown"
 VERDICT_DUPLICATE_LISTING = "duplicate_listing"
 VERDICT_DUPLICATE_TEXT = "duplicate_text"
 VERDICT_REJECTED_LOCATION = "rejected_location"
+VERDICT_REJECTED_ENTRY_DATE = "rejected_entry_date"
 
 ALL_VERDICTS = [
     VERDICT_ADDED, VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS,
     VERDICT_REJECTED_DISTANCE, VERDICT_PREFILTERED, VERDICT_PARSE_FAILED,
     VERDICT_PRICE_UNKNOWN, VERDICT_DUPLICATE_LISTING, VERDICT_DUPLICATE_TEXT,
-    VERDICT_REJECTED_LOCATION,
+    VERDICT_REJECTED_LOCATION, VERDICT_REJECTED_ENTRY_DATE,
 ]
 
 # Max LLM attempts for a post that failed to parse, before giving up on it permanently
@@ -409,11 +410,12 @@ def set_last_scan_time(group_url: str, when: datetime):
 
 
 def get_reparse_candidates() -> list[dict]:
-    """Posts rejected on price/rooms/distance, that failed to parse, or with no stated price — reparse-rejected candidates."""
+    """Posts rejected on price/rooms/distance/entry date, that failed to parse, or with no stated price — reparse-rejected candidates."""
     with _lock, _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE verdict IN (?, ?, ?, ?, ?)",
-            (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN, VERDICT_REJECTED_DISTANCE),
+            "SELECT * FROM posts WHERE verdict IN (?, ?, ?, ?, ?, ?)",
+            (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN,
+             VERDICT_REJECTED_DISTANCE, VERDICT_REJECTED_ENTRY_DATE),
         ).fetchall()
     return [dict(row) for row in rows]
 

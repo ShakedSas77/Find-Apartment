@@ -6,6 +6,8 @@ against. None of these reach the dedup-key check (a real bot_data.db
 read): either they return early on a rejected price, or no address is
 given so _listing_dedupe_key returns None.
 """
+from datetime import date, timedelta
+
 import storage
 import core.evaluate as evaluate
 
@@ -48,3 +50,37 @@ def test_no_price_anywhere_is_price_unknown_verdict():
     verdict, fields = evaluate._evaluate_post_data(data, text)
 
     assert verdict == storage.VERDICT_PRICE_UNKNOWN
+
+
+def test_far_out_entry_date_is_rejected():
+    # ~90 days out, past SCORE_ENTRY_DATE_MAX_DAYS_AHEAD (60) — a confidently
+    # resolved date this far ahead should never reach the sheet.
+    future = date.today() + timedelta(days=90)
+    text = "להשכרה 3 חדרים ברמת גן, 6,300 ₪ לחודש."
+    data = {"rooms": 3, "price": 6300, "entry_date": future.strftime("%d.%m")}
+
+    verdict, fields = evaluate._evaluate_post_data(data, text)
+
+    assert verdict == storage.VERDICT_REJECTED_ENTRY_DATE
+
+
+def test_unparseable_entry_date_is_not_rejected():
+    # No resolvable date at all — never rejected on this basis, only scores 0.
+    text = "להשכרה 3 חדרים ברמת גן, 6,300 ₪ לחודש."
+    data = {"rooms": 3, "price": 6300, "entry_date": "מועד לא סופי עדיין"}
+
+    verdict, fields = evaluate._evaluate_post_data(data, text)
+
+    assert verdict != storage.VERDICT_REJECTED_ENTRY_DATE
+
+
+def test_rooms_pre_filter_accepts_two_and_a_half_rooms():
+    import re
+    from config import ROOMS_PRE_FILTER_REGEX
+    assert re.search(ROOMS_PRE_FILTER_REGEX, "להשכרה דירת 2.5 חדרים ברמת גן")
+
+
+def test_rooms_pre_filter_rejects_twelve_and_a_half_rooms():
+    import re
+    from config import ROOMS_PRE_FILTER_REGEX
+    assert not re.search(ROOMS_PRE_FILTER_REGEX, "12.5 חדרים")

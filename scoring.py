@@ -11,7 +11,6 @@ SCORE_WEIGHT_* constants): price, location, entry date, floor/elevator +
 shelter, rooms, parking.
 """
 import math
-import re
 from datetime import date
 
 from config import (
@@ -20,14 +19,14 @@ from config import (
     SCORE_WEIGHT_PRICE, SCORE_WEIGHT_LOCATION, SCORE_WEIGHT_ENTRY_DATE,
     SCORE_WEIGHT_AMENITIES, SCORE_WEIGHT_ROOMS, SCORE_WEIGHT_PARKING,
     AGENT_FEE_AMORTIZE_MONTHS, SCORE_PRICE_SOFT_CEILING,
-    SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY,
-    SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE, SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER,
+    SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER,
     SCORE_LOCATION_NORTH_BONUS_PER_KM, SCORE_LOCATION_SOUTH_PENALTY_PER_KM,
     SCORE_LOCATION_EAST_PENALTY_PER_KM, SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT,
-    SCORE_LOCATION_GIVATAIM_BONUS,
+    SCORE_LOCATION_GIVATAIM_BONUS, FOCUS_NEIGHBORHOODS, SCORE_FOCUS_NEIGHBORHOOD_BONUS,
     SCORE_NO_ELEVATOR_FLOOR_THRESHOLD, SCORE_NO_ELEVATOR_PENALTY_PER_FLOOR,
     SCORE_SHELTER_BONUS, SCORE_ROOMS_MAX_PENALTY_FRACTION,
 )
+from core.normalize import resolve_entry_date
 
 
 def _clamp01(x: float) -> float:
@@ -96,73 +95,37 @@ def _location_score(fields: dict) -> float:
     return max(0.0, min(SCORE_WEIGHT_LOCATION, base + adjustment))
 
 
-_ENTRY_DATE_DDMM_RE = re.compile(r'^(\d{1,2})/(\d{1,2})$')
-
-_HEBREW_MONTH_NAMES = {
-    'ינואר': 1, 'פברואר': 2, 'מרץ': 3, 'אפריל': 4, 'מאי': 5, 'יוני': 6,
-    'יולי': 7, 'אוגוסט': 8, 'ספטמבר': 9, 'אוקטובר': 10, 'נובמבר': 11, 'דצמבר': 12,
-}
-
-
 def _entry_date_curve(days_signed: int) -> float:
     """
-    Continuous decay, not stepped tiers: 1.0 exactly on target, ~0.61 at
-    one sigma away, ~0.14 at 2*sigma, tapering smoothly from there rather
-    than jumping between fixed bands. This is what makes e.g. Sep 1 (further
-    away) score lower than Sep 20 (closer), even though both are "September".
-
-    Asymmetric: days_signed < 0 (before target) decays on
-    SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE, days_signed > 0 (after target) decays
-    on the more forgiving SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER.
+    On or before target (days_signed <= 0): full marks — moving in ASAP is
+    always best, never penalized for being early. After target: continuous
+    Gaussian decay, not stepped tiers — ~0.61 at one sigma away, ~0.14 at
+    2*sigma — so e.g. Nov 20 (further) scores lower than Nov 1 (closer), even
+    though both are "November". Sigma is tuned so December-or-later is
+    already very low.
     """
-    sigma = SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER if days_signed > 0 else SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE
-    return math.exp(-(days_signed ** 2) / (2 * sigma ** 2))
-
-
-def _score_month_day(month: int, day: int) -> float:
-    """
-    Fraction (0..1) of SCORE_WEIGHT_ENTRY_DATE for a specific month/day, via a
-    fixed placeholder year — fine for a target near October, but would need
-    wraparound handling if SCORE_ENTRY_DATE_TARGET_MONTH ever moved close to
-    December/January.
-    """
-    target = date(2001, SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY)
-    try:
-        candidate = date(2001, month, day)
-    except ValueError:
-        return 0.0
-    return _entry_date_curve((candidate - target).days)
+    if days_signed <= 0:
+        return 1.0
+    return math.exp(-(days_signed ** 2) / (2 * SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER ** 2))
 
 
 def _entry_date_score(entry_date: str | None, today: date | None = None) -> float:
     """
-    "מיידי" (immediate) is scored against today's *real* distance from the
-    target date (not the year-agnostic placeholder used for parsed dates) —
-    it's a real "right now", so it should decay the same continuous curve
-    everything else does. A missing/unparseable value is the only hard 0:
-    there's genuinely no date to measure a distance from. `today` is
-    injectable so tests don't depend on the wall clock.
+    Resolves entry_date to a concrete date via core.normalize.resolve_entry_date
+    ("מיידי" or "DD/MM" — see there for how free text becomes one of those)
+    and scores it by real distance from today, so "ASAP" always means the
+    same thing regardless of the wall-clock date. A missing/unparseable
+    entry_date is the only case that scores a hard 0, since there's genuinely
+    no date to measure. `today` is injectable so tests don't depend on the
+    wall clock.
     """
     if not entry_date:
         return 0.0
-
-    if entry_date == "מיידי":
-        today = today or date.today()
-        target_this_year = date(today.year, SCORE_ENTRY_DATE_TARGET_MONTH, SCORE_ENTRY_DATE_TARGET_DAY)
-        return SCORE_WEIGHT_ENTRY_DATE * _entry_date_curve((today - target_this_year).days)
-
-    match = _ENTRY_DATE_DDMM_RE.match(entry_date.strip())
-    if match:
-        day, month = int(match.group(1)), int(match.group(2))
-        return SCORE_WEIGHT_ENTRY_DATE * _score_month_day(month, day)
-
-    for name, month in _HEBREW_MONTH_NAMES.items():
-        if name in entry_date:
-            # No exact day in free text ("ספטמבר") — the 15th is a reasonable
-            # mid-month stand-in for the curve.
-            return SCORE_WEIGHT_ENTRY_DATE * _score_month_day(month, day=15)
-
-    return 0.0
+    today = today or date.today()
+    resolved = resolve_entry_date(entry_date, today=today)
+    if resolved is None:
+        return 0.0
+    return SCORE_WEIGHT_ENTRY_DATE * _entry_date_curve((resolved - today).days)
 
 
 def _amenities_score(fields: dict) -> float:
@@ -182,7 +145,7 @@ def _amenities_score(fields: dict) -> float:
 
 
 def _rooms_score(rooms_val) -> float:
-    """3.0 rooms is full marks; scales down toward MAX_ROOMS by up to SCORE_ROOMS_MAX_PENALTY_FRACTION."""
+    """MIN_ROOMS is full marks; scales down toward MAX_ROOMS by up to SCORE_ROOMS_MAX_PENALTY_FRACTION."""
     if not isinstance(rooms_val, (int, float)):
         return 0.0
     span = MAX_ROOMS - MIN_ROOMS
@@ -193,6 +156,18 @@ def _rooms_score(rooms_val) -> float:
 def _parking_score(parking: str | None) -> float:
     """Only private parking is granted points — street parking and no parking both score 0."""
     return SCORE_WEIGHT_PARKING if parking == "פרטית" else 0.0
+
+
+def mentions_focus_neighborhood(*texts: str | None) -> bool:
+    return any(name in text for text in texts if text for name in FOCUS_NEIGHBORHOODS)
+
+
+def _focus_bonus(fields: dict) -> float:
+    # in_focus_area is set from the full post text at evaluation time; a sheet row
+    # rebuilt by --recompute-scores only has the address cell to go on.
+    if fields.get("in_focus_area") or mentions_focus_neighborhood(fields.get("address")):
+        return SCORE_FOCUS_NEIGHBORHOOD_BONUS
+    return 0.0
 
 
 def compute_fit_score(fields: dict) -> int:
@@ -212,5 +187,6 @@ def compute_fit_score(fields: dict) -> int:
         + _amenities_score(fields)
         + _rooms_score(fields.get("rooms_val"))
         + _parking_score(fields.get("parking"))
+        + _focus_bonus(fields)
     )
-    return round(total)
+    return min(100, round(total))

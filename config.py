@@ -52,7 +52,7 @@ LOCATIONS = [
 ]
 
 # ─── Criteria (AI-based filtering) ───────────────────────────────────────────────
-MIN_ROOMS = 3.0
+MIN_ROOMS = 2.5
 MAX_ROOMS = 3.5
 MIN_PRICE = 5500
 MAX_PRICE = 6700
@@ -67,14 +67,14 @@ INCLUDE_PRICE_UNKNOWN = False
 
 # Posts older than this are skipped. The sheet still displays DD/MM, but filtering
 # internally uses the full date.
-MAX_POST_AGE_DAYS = 21
+MAX_POST_AGE_DAYS = 14
 
 # Scheduled-run log files (logs/run_*.log) older than this get deleted by run_scheduled.bat.
 LOG_RETENTION_DAYS = 14
 
 # ─── Pre-filters (before the AI) ──────────────────────────────────────────────────
 # The post must contain at least one of these phrases to pass the check (saves a lot of time)
-ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|(?<!\d)3\s*וחצי\s*חד'
+ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(2\.5|3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|שתיים\s*וחצי\s*חד|(?<!\d)[23]\s*וחצי\s*חד'
 
 # Words that automatically disqualify a post:
 NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות'
@@ -112,6 +112,8 @@ MAX_WALKING_DISTANCE_KM = 5.0
 # Set to None to disable. Default: Tel Aviv HaHagana rail station
 # (32.054062, 34.7847899), confirmed via Google Geocoding directly.
 EXCLUDE_SOUTH_OF_LAT = 32.054062
+# NOTE: an address naming one of FOCUS_NEIGHBORHOODS_TEL_AVIV (defined further down) is
+# exempt from this cutoff — several of them sit near or below that latitude.
 
 # Cities allowed as a result when validating an address against Google Geocoding
 GMAPS_TARGET_CITIES = ["רמת גן", "גבעתיים", "תל אביב-יפו", "תל אביב"]
@@ -135,8 +137,13 @@ GMAPS_ON_CAP = "skip"
 # Hard upper bound on scroll iterations per group — a safety cap for when a group's
 # post dates are unavailable/unparseable and early-stop can never trigger, not the
 # normal case (see MIN_SCROLLS_BEFORE_EARLY_STOP / CONSECUTIVE_OLD_POSTS_TO_STOP).
-SCROLL_COUNT = 20
-SCROLL_DELAY_MS = 500
+SCROLL_COUNT = 30
+SCROLL_DELAY_MS = 1000
+# Per-scroll wheel distance range. Kept near the viewport height (1600px): Facebook only
+# renders posts close to the viewport and loads new ones lazily, so a step far beyond it
+# (the old 3000-5000) outruns the feed and stalls.
+SCROLL_STEP_MIN_PX = 1200
+SCROLL_STEP_MAX_PX = 2000
 
 # Bounded poll after a "See more" click, replacing a blind fixed sleep — returns as
 # soon as the click visibly took effect instead of always waiting the full ceiling.
@@ -184,9 +191,9 @@ SHEET_HEADERS = [
 
 # ─── Fit score ──────────────────────────────────────────────────────────────────
 # compute_fit_score() (scoring.py) weights, must sum to 100.
-SCORE_WEIGHT_PRICE = 30
-SCORE_WEIGHT_LOCATION = 30
-SCORE_WEIGHT_ENTRY_DATE = 15
+SCORE_WEIGHT_PRICE = 25
+SCORE_WEIGHT_LOCATION = 25
+SCORE_WEIGHT_ENTRY_DATE = 25
 SCORE_WEIGHT_AMENITIES = 10  # floor/elevator condition (primary) + shelter (minor bonus)
 SCORE_WEIGHT_ROOMS = 10
 SCORE_WEIGHT_PARKING = 5
@@ -201,24 +208,23 @@ AGENT_FEE_AMORTIZE_MONTHS = 12
 # and beyond — "~6500 is still ok, but it gets bad fast after that."
 SCORE_PRICE_SOFT_CEILING = 6500
 
-# Entry-date scoring target: a smooth (Gaussian) curve peaking at 1.0 exactly
-# on this month/day and decaying continuously as the listing's date gets
-# further away — not stepped tiers, so e.g. Sep 1 scores lower than Sep 20
-# even though both are "September". Deliberately ASYMMETRIC, not a plain
-# Gaussian: moving in a bit late (after the target, toward Oct/Nov) is more
-# tolerable than moving in early (before the target, toward Sept/earlier), so
-# the "after" side decays slower — e.g. Oct 20 (16 days after) scores higher
-# than Sep 23 (11 days before) despite being further away in raw days.
-# score = exp(-days_signed^2 / (2*sigma^2)), sigma chosen per side by sign;
-# at days_signed == sigma the score is ~0.61, at 2*sigma it's ~0.14. "מיידי"
-# (immediate) is scored the same way against today's actual distance from the
-# target (real calendar date, not year-agnostic) — a missing/unparseable
-# entry date is the only case that scores a hard 0, since there's genuinely
-# no date to measure.
-SCORE_ENTRY_DATE_TARGET_MONTH = 10
-SCORE_ENTRY_DATE_TARGET_DAY = 4
-SCORE_ENTRY_DATE_SIGMA_DAYS_BEFORE = 20
-SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER = 45
+# Entry-date scoring is rolling, measured from *today* (not a fixed calendar
+# date) — full marks (1.0) for on-or-before today, since moving in ASAP is
+# always best and never penalized for being early, then a smooth (Gaussian)
+# decay the later the listing's entry date gets, not stepped tiers, so e.g.
+# Nov 20 scores lower than Nov 1 even though both are "November".
+# score = 1.0 if days_signed <= 0, else exp(-days_signed^2 / (2*sigma^2));
+# at days_signed == sigma the score is ~0.61, at 2*sigma it's ~0.14. Sigma is
+# tuned so December-or-later is already very low (see scoring._entry_date_score,
+# core.normalize.resolve_entry_date). A missing/unparseable entry date is the
+# only case that scores a hard 0, since there's genuinely no date to measure.
+SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER = 25
+
+# Listings whose entry date is confidently parsed as more than this many days
+# out are rejected outright (verdict rejected_entry_date), not just scored
+# low — see core/evaluate.py. An unparseable/missing entry date is never
+# rejected on this basis, only an actual resolved date this far out.
+SCORE_ENTRY_DATE_MAX_DAYS_AHEAD = 60
 
 # Directional location adjustment relative to DESTINATION_LAT/DESTINATION_LON:
 # north of the destination is a bonus, south or east is a penalty (west is neutral —
@@ -231,6 +237,21 @@ SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT = 4
 # Givataim is preferred over Ramat Gan — a flat bonus added to the same
 # direction-adjustment budget above (detected from the formatted address string).
 SCORE_LOCATION_GIVATAIM_BONUS = 2
+
+# Preferred neighborhoods (Tel Aviv + Givatayim): a listing whose address or post text
+# mentions one gets SCORE_FOCUS_NEIGHBORHOOD_BONUS added to its total fit score (clamped
+# at 100). A ranking boost only — nothing outside these areas is filtered out. Spelling
+# variants (gershayim/quote forms) are listed explicitly because matching is a plain substring.
+FOCUS_NEIGHBORHOODS_TEL_AVIV = [
+    "תל חיים", "ביצרון", "רמת ישראל", "שיכון חברת החשמל", "שכון חברת החשמל",
+    "שיכון עממי ג", "שכון עממי ג", "יד אליהו", "נחלת יצחק", "רמת הטייסים",
+]
+FOCUS_NEIGHBORHOODS_GIVATAYIM = [
+    "גבעת רמב\"ם", "גבעת רמב״ם", "גבעת רמבם", "תל גנים", "ארלוזורוב",
+    "הל\"ה", "הל״ה",
+]
+FOCUS_NEIGHBORHOODS = FOCUS_NEIGHBORHOODS_TEL_AVIV + FOCUS_NEIGHBORHOODS_GIVATAYIM
+SCORE_FOCUS_NEIGHBORHOOD_BONUS = 15
 
 # No-elevator is only penalized once the floor is high enough that stairs are a
 # real burden; below this floor a walk-up is considered fine.

@@ -9,14 +9,14 @@ can feed the same pipeline without a hand-copied duplicate — see CLAUDE.md.
 """
 import re
 import threading
-from datetime import datetime
+from datetime import date, datetime
 
 import storage
 import scoring
 from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
-    NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX,
+    NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
 )
 from core.util import _safe_print, _sheet_lock
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
@@ -24,7 +24,7 @@ from core.llm import analyze_post_with_llm
 from core.normalize import (
     BIDI_RE, _PRICE_CONTEXT_RE, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
-    _classify_parking, _normalize_entry_date, map_bool, _sheet_safe_cell,
+    _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
@@ -123,11 +123,21 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     parking = _classify_parking(data.get("parking") or "")
     entry_date = _normalize_entry_date(data.get("entry_date") or "")
 
+    # Reject only a confidently-resolved far-out date — an unparseable/missing
+    # one (resolve_entry_date returns None) is never rejected on this basis,
+    # same caution rule as weak addresses elsewhere in this pipeline.
+    resolved_entry_date = resolve_entry_date(entry_date)
+    if resolved_entry_date and (resolved_entry_date - date.today()).days > SCORE_ENTRY_DATE_MAX_DAYS_AHEAD:
+        return storage.VERDICT_REJECTED_ENTRY_DATE, {
+            "rooms_val": rooms_val, "price_val": price_val, "address": address, "entry_date": entry_date,
+        }
+
     fields = {
         "rooms_val": rooms_val, "price_val": price_val, "arnona": arnona, "vaad": vaad,
         "address": address, "floor": floor, "is_agent": is_agent, "parking": parking,
         "entry_date": entry_date, "elevator": data.get("elevator"),
         "shelter": data.get("shelter"),
+        "in_focus_area": scoring.mentions_focus_neighborhood(text, address),
     }
     return storage.VERDICT_ADDED, fields
 
@@ -215,6 +225,10 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
         return
     if verdict == storage.VERDICT_DUPLICATE_LISTING:
         _safe_print(f"    [{label}] Skipped: repost of an already-added listing ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
+        return
+    if verdict == storage.VERDICT_REJECTED_ENTRY_DATE:
+        _safe_print(f"    [{label}] Skipped: entry date too far out ({fields.get('entry_date')}).")
         storage.record_post(post_url, group_url, text, verdict, data, analysis=_analysis_from_fields(fields, post_date, verdict))
         return
 

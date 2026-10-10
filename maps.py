@@ -21,6 +21,7 @@ import distance_fallback
 from config import (
     DESTINATION_ADDRESS, GMAPS_MONTHLY_CAP, GMAPS_ON_CAP, GMAPS_TARGET_CITIES,
     GMAPS_VALIDATE_ADDRESSES, GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, EXCLUDE_SOUTH_OF_LAT,
+    FOCUS_NEIGHBORHOODS_TEL_AVIV,
 )
 from core.util import _safe_print, _with_retries
 from core.errors import GmapsQuotaHalted
@@ -212,6 +213,18 @@ def _gmaps_city_allowed(result: dict) -> bool:
     city = _gmaps_result_city(result)
     return any(target in formatted or target in city for target in GMAPS_TARGET_CITIES)
 
+def _is_tel_aviv_focus_address(address: str) -> bool:
+    return any(name in address for name in FOCUS_NEIGHBORHOODS_TEL_AVIV)
+
+def _anchor_default_city(query: str) -> str:
+    """Appends the search-area default when the text names no city. A named Tel Aviv
+    neighborhood must anchor to Tel Aviv, not the Ramat Gan/Givatayim default."""
+    if any(city in query for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
+        return query
+    if _is_tel_aviv_focus_address(query):
+        return f"{query}, תל אביב, ישראל"
+    return f"{query}, רמת גן, גבעתיים, ישראל"
+
 def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str, str, str, str, str, float | None, float | None]:
     """
     Returns canonical_address, city, updated_confidence, warning, geocode_status, lat, lon.
@@ -231,9 +244,7 @@ def _validate_address_with_geocoding(address: str, confidence: str) -> tuple[str
     if over_cap:
         return address, "", confidence, placeholder, "quota", None, None
 
-    query = address
-    if not any(city in query for city in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
-        query = f"{query}, רמת גן, גבעתיים, ישראל"
+    query = _anchor_default_city(address)
 
     try:
         storage.increment_gmaps_usage()
@@ -299,7 +310,8 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status, lat, lon)
         return "", 999999, confidence, warning, "skipped", lat, lon
 
-    if EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT:
+    if (EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT
+            and not _is_tel_aviv_focus_address(address)):
         south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
         storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
         return "", 999999, confidence, south_warning, "excluded_south", lat, lon
@@ -316,9 +328,7 @@ def get_walking_distance(address: str):
         return placeholder, 999999, confidence, warning, "quota", lat, lon
 
     # Safety-net addition for Google Maps: anchoring the search area
-    origin = canonical_address or address
-    if not any(city_name in origin for city_name in ["רמת גן", "גבעתיים", "תל אביב", "רמת-גן", "ר\"ג"]):
-        origin = f"{origin}, רמת גן, גבעתיים, ישראל"
+    origin = _anchor_default_city(canonical_address or address)
 
     try:
         storage.increment_gmaps_usage()  # counted before the call — origins×destinations is always 1×1 here

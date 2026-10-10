@@ -8,7 +8,7 @@ credentials or a browser.
 """
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from config import MAX_POST_AGE_DAYS
 from core.util import _safe_print
@@ -274,28 +274,101 @@ def _strip_foreign_letters(text: str) -> str:
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' \t-–—,/')
     return cleaned
 
-_IMMEDIATE_RE = re.compile(r'מיידי|מיד|עכשיו|כניסה\s*מיידית|היום')
+# "לא מיידי" (not immediate) must not match — negative lookbehind on "לא ".
+# "גמיש"/"בהקדם"/"מתי שתרצו"/"בתיאום" are flexible/ASAP phrasing: a landlord who
+# can accommodate any timing can accommodate now, which is exactly the ASAP
+# signal we want to reward the same as an explicit "מיידי".
+_IMMEDIATE_RE = re.compile(
+    r'(?<!לא\s)(?:מיידי|מיד|עכשיו|כניסה\s*מיידית|היום|גמיש|בהקדם|מתי\s*שתרצו|בתיאום|פנוי[הת]?\s*עכשיו)'
+)
 
+# Embedded (not full-match), so a date survives extra wording around it, e.g.
+# "החל מ-1.9", "1.9 גמיש". On a range ("1.9-15.9") the leftmost/earliest match
+# wins, which is the ASAP-correct choice.
 _DATE_DDMM_RE = re.compile(r'(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?')
+
+# Canonical + common abbreviated Hebrew month names, month number.
+_HEBREW_MONTH_NAMES = {
+    'ינואר': 1, 'פברואר': 2, 'מרץ': 3, 'מרס': 3, 'אפריל': 4, 'מאי': 5, 'יוני': 6,
+    'יולי': 7, 'אוגוסט': 8, 'ספטמבר': 9, "ספט'": 9, 'אוקטובר': 10, "אוק'": 10,
+    'נובמבר': 11, "נוב'": 11, 'דצמבר': 12, "דצמ'": 12,
+}
+
+# Position-in-month qualifiers when only a month is named, no day.
+_MONTH_POSITION_DAY = {'תחילת': 5, 'אמצע': 15, 'סוף': 25}
+
+def _resolve_hebrew_month_mention(text: str) -> str:
+    """
+    Finds a Hebrew month name in free text and returns canonical "DD/MM":
+    a day immediately before it wins (e.g. "1 בספטמבר" -> "01/09"); else a
+    תחילת/אמצע/סוף position qualifier; else the 15th as a mid-month
+    stand-in (e.g. bare "ספטמבר"). "" if no month name is present.
+    """
+    for name, month in sorted(_HEBREW_MONTH_NAMES.items(), key=lambda kv: -len(kv[0])):
+        idx = text.find(name)
+        if idx == -1:
+            continue
+        prefix = text[:idx]
+        day_match = re.search(r'(\d{1,2})\s*(?:ב|ל)?\s*$', prefix)
+        if day_match:
+            day = int(day_match.group(1))
+        else:
+            day = 15
+            for word, qualifier_day in _MONTH_POSITION_DAY.items():
+                if word in prefix:
+                    day = qualifier_day
+                    break
+        return f"{day:02d}/{month:02d}"
+    return ""
 
 def _normalize_entry_date(text: str) -> str:
     """
-    Normalizes the entry date, strips foreign-language text, converts
-    "immediate"-type phrases to the standard "מיידי", and zero-pads a
-    numeric day.month(.year) date (e.g. "1.8" / "1.8.26") to "DD/MM",
-    dropping the year. Non-numeric dates (e.g. "ספטמבר") pass through as-is.
+    Normalizes the entry date, strips foreign-language text, and resolves it
+    to one of: "מיידי" (immediate/flexible), "DD/MM" (an embedded numeric
+    date or a Hebrew month-name mention), or the stripped text unchanged if
+    none of those match — kept for display honesty, scores 0 at fit-scoring
+    time rather than being rejected. A concrete date always wins over a vague
+    phrase (checked first) — e.g. "כניסה מיידית 1.9" resolves to "01/09".
     """
     if not text:
         return ""
     text = _strip_foreign_letters(text)
-    if _IMMEDIATE_RE.search(text):
-        return "מיידי"
-    m = _DATE_DDMM_RE.fullmatch(text.strip().rstrip('./'))
+    m = _DATE_DDMM_RE.search(text)
     if m:
         day, month = int(m.group(1)), int(m.group(2))
         if 1 <= day <= 31 and 1 <= month <= 12:
             return f"{day:02d}/{month:02d}"
+    month_match = _resolve_hebrew_month_mention(text)
+    if month_match:
+        return month_match
+    if _IMMEDIATE_RE.search(text):
+        return "מיידי"
     return text
+
+def resolve_entry_date(entry_date: str, today: date | None = None) -> date | None:
+    """
+    Resolves a normalized entry_date ("מיידי" / "DD/MM") to a concrete
+    calendar date for scoring/filtering. Year is inferred for "DD/MM": if
+    that day/month already passed this year, it's assumed to mean next year
+    — entry dates point forward, unlike a post's own date (see
+    _infer_post_date, which rolls backward instead). Anything else
+    (unparseable free text) resolves to None — unknown, never penalized or
+    rejected on that basis alone.
+    """
+    today = today or date.today()
+    if entry_date == "מיידי":
+        return today
+    match = re.match(r'^(\d{1,2})/(\d{1,2})$', (entry_date or "").strip())
+    if not match:
+        return None
+    day, month = int(match.group(1)), int(match.group(2))
+    try:
+        candidate = date(today.year, month, day)
+    except ValueError:
+        return None
+    if candidate < today:
+        candidate = candidate.replace(year=today.year + 1)
+    return candidate
 
 def _reject_hallucinated_address(address: str, source_text: str) -> str:
     """
