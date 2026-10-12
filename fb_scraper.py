@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 import storage
 import telegram_notifier
 from config import (
-    TARGET_URLS, SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
+    TARGET_URLS, SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
     MIN_SCROLLS_BEFORE_EARLY_STOP,
     CONSECUTIVE_OLD_POSTS_TO_STOP, MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
     NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS, LOGIN_MAX_ATTEMPTS,
@@ -391,12 +391,14 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         age_cutoff = datetime.now() - timedelta(days=MAX_POST_AGE_DAYS)
         effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
 
-        _safe_print(f"[{group_label}] Scrolling (up to {SCROLL_COUNT} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
+        max_scrolls = SCROLL_COUNT if last_scan_time else FIRST_SCAN_SCROLL_COUNT
+
+        _safe_print(f"[{group_label}] Scrolling (up to {max_scrolls} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
         harvested = {}
         consecutive_old = 0
         scrolls_done = 0
         caught_up = False
-        for i in range(SCROLL_COUNT):
+        for i in range(max_scrolls):
             scrolls_done = i + 1
             # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
             # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
@@ -424,12 +426,12 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
 
             if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
                 caught_up = True
-                if scrolls_done < SCROLL_COUNT:
+                if scrolls_done < max_scrolls:
                     _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
                 break
         _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
         if not caught_up:
-            _safe_print(f"[{group_label}] Did not catch up to the last scan within {SCROLL_COUNT} scrolls — "
+            _safe_print(f"[{group_label}] Did not catch up to the last scan within {max_scrolls} scrolls — "
                          f"last_scan_time not advanced, will retry this range next run.")
 
         _safe_print(f"[{group_label}] Found {len(harvested)} real posts.")
@@ -654,6 +656,11 @@ def _print_gmaps_quota_status():
     if GMAPS_MONTHLY_CAP > 0 and usage >= GMAPS_MONTHLY_CAP * 0.8:
         print(f"WARNING: Google Maps usage is at {usage}/{GMAPS_MONTHLY_CAP} ({usage / GMAPS_MONTHLY_CAP:.0%}) of the monthly cap.")
 
+def _make_group_label(index: int, total: int, url: str) -> str:
+    # Order is shuffled every run, so "Group 5/33" alone can't be traced back to TARGET_URLS.
+    group_id = url.rstrip("/").rsplit("/", 1)[-1]
+    return f"Group {index}/{total} {group_id}"
+
 def run_scraper(headless: bool = False, live: bool = False):
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
@@ -745,9 +752,9 @@ def run_scraper(headless: bool = False, live: bool = False):
                 if i > 1:
                     time.sleep(random.uniform(5, 15))
                 try:
-                    stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless, live)
+                    stats = _scan_group_page(page, url, _make_group_label(i, total, url), sheet, seen_urls, headless, live)
                 except Exception as e:
-                    _safe_print(f"\nERROR: [Group {i}/{total}] crashed: {e}")
+                    _safe_print(f"\nERROR: [{_make_group_label(i, total, url)}] crashed: {e}")
                     continue
                 groups_scanned += 1
                 total_added += stats["added"]
@@ -787,7 +794,7 @@ def run_scraper(headless: bool = False, live: bool = False):
               f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS) as executor:
             futures = {
-                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless,
+                executor.submit(_scan_group, url, _make_group_label(idx, total, url), sheet, seen_urls, storage_state_path, headless,
                                 real_user_agent, real_locale, live): idx
                 for idx, url in enumerate(shuffled_urls, 1)
             }
@@ -803,7 +810,7 @@ def run_scraper(headless: bool = False, live: bool = False):
                     if stats["checkpoint_hit"]:
                         checkpoint_skipped += 1
                 except Exception as e:
-                    _safe_print(f"\nERROR: [Group {idx}/{total}] crashed: {e}")
+                    _safe_print(f"\nERROR: [{_make_group_label(idx, total, shuffled_urls[idx - 1])}] crashed: {e}")
 
     gmaps_calls_this_month = storage.get_gmaps_usage()
     print(f"\nScraping finished successfully. {total_added} apartments added.")

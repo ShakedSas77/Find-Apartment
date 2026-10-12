@@ -106,7 +106,7 @@ python bot_listener.py
 ## Google Sheets
 
 - `SHEET_ID` lives in `.env` (not `config.py` — repo is public), accessed via `env.get_sheet_id()` alongside `env.get_gemini_api_key()`/`env.get_gmaps_api_key()`; `env.require_env()` (called from `apartment_bot.py`'s `__main__`, not at import) exits at startup if any of the three are missing. Sheet must be shared with the service account email from `credentials.json`
-- 16 Hebrew headers defined in `config.py` (`SHEET_HEADERS`) — the 14 data columns, a `זמן סריקה` (scan timestamp) column, then a trailing `ציון התאמה` (fit score, see Fit Score section below)
+- 17 Hebrew headers defined in `config.py` (`SHEET_HEADERS`) — the 14 data columns, a `זמן סריקה` (scan timestamp) column, `ציון התאמה` (fit score, see Fit Score section below), then a trailing `עלות חודשית כוללת` (`scoring.compute_total_monthly_cost()`: rent + arnona/2 + vaad/2 + rent/`TOTAL_COST_AGENT_FEE_AMORTIZE_MONTHS` (24) if agent; blank arnona/vaad fall back to `DEFAULT_ARNONA_MONTHLY_BY_CITY`/`DEFAULT_VAAD_MONTHLY` in config.py; `--recompute-scores` backfills existing rows)
 - `setup_google_sheet()` auto-seeds headers if sheet is empty
 - Uses `sheet1` (first tab)
 - No conditional formatting/colors/filters/frozen row are applied — plain sheet, as-is. (A `format_google_sheet()` step existed briefly and was removed; don't re-add it without being asked.)

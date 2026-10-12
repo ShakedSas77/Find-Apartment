@@ -77,7 +77,7 @@ LOG_RETENTION_DAYS = 14
 ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(2\.5|3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|שתיים\s*וחצי\s*חד|(?<!\d)[23]\s*וחצי\s*חד'
 
 # Words that automatically disqualify a post:
-NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות'
+NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות|לא רלוונטי'
 
 # 'שותפ'/'שותף' (roommate) is handled separately: disqualifies roommate posts, unless
 # 'זוג' (couple) is mentioned nearby — e.g. a landlord describing tenant-type flexibility
@@ -87,7 +87,7 @@ NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
 # Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
-EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה"]
+EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה", "מרום נווה", "עוזיאל", "נגבה", "נווה שאנן"]
 
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
@@ -138,6 +138,11 @@ GMAPS_ON_CAP = "skip"
 # post dates are unavailable/unparseable and early-stop can never trigger, not the
 # normal case (see MIN_SCROLLS_BEFORE_EARLY_STOP / CONSECUTIVE_OLD_POSTS_TO_STOP).
 SCROLL_COUNT = 30
+# Scroll cap for a group with no saved last-scan time. Its early-stop cutoff is the full
+# MAX_POST_AGE_DAYS lookback, which a busy group can't reach in SCROLL_COUNT scrolls (~1.5
+# new posts each); without a higher cap it never catches up, never saves a baseline, and
+# re-crawls the same range every run. One deep backfill sets the baseline.
+FIRST_SCAN_SCROLL_COUNT = 80
 SCROLL_DELAY_MS = 1000
 # Per-scroll wheel distance range. Kept near the viewport height (1600px): Facebook only
 # renders posts close to the viewport and loads new ones lazily, so a step far beyond it
@@ -186,8 +191,22 @@ MAX_CONCURRENT_GROUPS = 6
 SHEET_HEADERS = [
     "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה (ק\"מ)", "תאריך כניסה",
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
-    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה"
+    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה", "עלות חודשית כוללת"
 ]
+
+# Bi-monthly arnona above this is treated as an extraction bug and dropped (left blank).
+ARNONA_MAX_BIMONTHLY = 2000
+
+# ─── Total monthly cost ─────────────────────────────────────────────────────────
+# compute_total_monthly_cost() (scoring.py): rent + arnona + vaad + agent fee amortized.
+# Arnona/vaad missing from a post fall back to these *monthly* amounts. City is matched
+# as a substring of the address; no match uses TOTAL_COST_DEFAULT_CITY.
+DEFAULT_ARNONA_MONTHLY_BY_CITY = {"גבעתיים": 900, "רמת גן": 700, "תל אביב": 500}
+TOTAL_COST_DEFAULT_CITY = "רמת גן"
+DEFAULT_VAAD_MONTHLY = 250
+# One month's rent as broker fee, spread over this many months of lease. Separate from
+# AGENT_FEE_AMORTIZE_MONTHS, which only feeds the fit score.
+TOTAL_COST_AGENT_FEE_AMORTIZE_MONTHS = 24
 
 # ─── Fit score ──────────────────────────────────────────────────────────────────
 # compute_fit_score() (scoring.py) weights, must sum to 100.

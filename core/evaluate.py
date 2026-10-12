@@ -17,6 +17,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
+    ARNONA_MAX_BIMONTHLY,
 )
 from core.util import _safe_print, _sheet_lock
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
@@ -107,7 +108,11 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     arnona = _normalize_bimonthly_fee(data.get("arnona") or "")
     vaad = _normalize_bimonthly_fee(data.get("vaad") or "")
     _warn_if_fee_implausible("Vaad bayit", vaad, 2400)
-    _warn_if_fee_implausible("Arnona", arnona, 3000)
+    if arnona and arnona > ARNONA_MAX_BIMONTHLY:
+        # A value this high is an extraction bug (e.g. a price or phone fragment), not a real bill —
+        # blank it so it neither lands in the sheet nor inflates the total monthly cost.
+        _safe_print(f"    WARNING: Arnona {arnona} exceeds {ARNONA_MAX_BIMONTHLY} bi-monthly - treating as missing.")
+        arnona = ""
 
     address = _strip_foreign_letters(data.get("address") or "")
     address = _reject_hallucinated_address(address, text)
@@ -168,6 +173,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         fields["address"],
         datetime.now().strftime("%Y-%m-%d %H:%M"),
         scoring.compute_fit_score(fields),
+        scoring.compute_total_monthly_cost(fields),
     ]
     return [_sheet_safe_cell(v) for v in row]
 

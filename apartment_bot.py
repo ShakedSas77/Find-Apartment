@@ -185,6 +185,7 @@ def _number_cell(s: str) -> float | None:
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
 _COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
+_TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
 
 def _fields_from_sheet_row(row: list) -> dict:
     """
@@ -218,7 +219,7 @@ def _fields_from_sheet_row(row: list) -> dict:
 
 def recompute_sheet_scores():
     """
-    Rewrites the ציון התאמה cell of every existing sheet row using the current
+    Rewrites the ציון התאמה and עלות חודשית כוללת cells of every existing sheet row using the current
     scoring.compute_fit_score() formula — for when the formula itself changes
     (as in the entry-date curve redesign) and old rows are left holding scores
     from the previous version. No browser, no Maps/Gemini calls.
@@ -234,14 +235,16 @@ def recompute_sheet_scores():
     new_scores = []
     for row in rows:
         old_score = row[_SCORE_COL_INDEX] if len(row) > _SCORE_COL_INDEX else ""
-        new_score = scoring.compute_fit_score(_fields_from_sheet_row(row))
+        fields = _fields_from_sheet_row(row)
+        new_score = scoring.compute_fit_score(fields)
         if str(new_score) != old_score.strip():
             changed += 1
-        new_scores.append([new_score])
+        new_scores.append([new_score, scoring.compute_total_monthly_cost(fields)])
 
     col_letter = chr(ord('A') + _SCORE_COL_INDEX)
+    last_col_letter = chr(ord('A') + _TOTAL_COST_COL_INDEX)
     _with_retries(lambda: sheet.update(
-        range_name=f"{col_letter}2:{col_letter}{len(rows) + 1}",
+        range_name=f"{col_letter}2:{last_col_letter}{len(rows) + 1}",
         values=new_scores,
         value_input_option="RAW",
     ))

@@ -97,24 +97,19 @@ def _format_listing_message(fields: dict, score: int) -> str:
 def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> dict:
     """
     Shared reply_markup for a listing message: the ⭐/🗑 vote row (drives real
-    sheet actions — see bot_listener.py) plus two rows of 0-10 rating buttons
-    (pure data collection — storage.record_rating() — no sheet side effect).
-    Rebuilt on every callback (bot_listener.py), not just at send time, so a
-    vote tap doesn't wipe the rating buttons off the message and vice versa.
+    sheet actions — see bot_listener.py). The 0-10 rating rows were dropped from
+    new messages; bot_listener.py still records `rate:` taps on older messages.
+    Rebuilt on every callback (bot_listener.py), not just at send time.
     """
     vote_row = [
         {"text": f"⭐ מעניין ({up})", "callback_data": f"up:{group_id}:{post_id}"},
         {"text": f"🗑 לא רלוונטי ({down})", "callback_data": f"down:{group_id}:{post_id}"},
     ]
-    rating_rows = [
-        [{"text": str(n), "callback_data": f"rate:{n}:{group_id}:{post_id}"} for n in range(0, 6)],
-        [{"text": str(n), "callback_data": f"rate:{n}:{group_id}:{post_id}"} for n in range(6, 11)],
-    ]
-    return {"inline_keyboard": [vote_row, *rating_rows]}
+    return {"inline_keyboard": [vote_row]}
 
 
 def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
-    """Sends a new match to the shared Telegram chat with vote + rating buttons.
+    """Sends a new match to the shared Telegram chat with vote buttons.
     Returns the sent message_id, or None on any failure/misconfiguration."""
     if not _configured():
         return None

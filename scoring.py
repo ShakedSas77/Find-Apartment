@@ -11,6 +11,7 @@ SCORE_WEIGHT_* constants): price, location, entry date, floor/elevator +
 shelter, rooms, parking.
 """
 import math
+import re
 from datetime import date
 
 from config import (
@@ -25,6 +26,8 @@ from config import (
     SCORE_LOCATION_GIVATAIM_BONUS, FOCUS_NEIGHBORHOODS, SCORE_FOCUS_NEIGHBORHOOD_BONUS,
     SCORE_NO_ELEVATOR_FLOOR_THRESHOLD, SCORE_NO_ELEVATOR_PENALTY_PER_FLOOR,
     SCORE_SHELTER_BONUS, SCORE_ROOMS_MAX_PENALTY_FRACTION,
+    DEFAULT_ARNONA_MONTHLY_BY_CITY, TOTAL_COST_DEFAULT_CITY, DEFAULT_VAAD_MONTHLY,
+    TOTAL_COST_AGENT_FEE_AMORTIZE_MONTHS,
 )
 from core.normalize import resolve_entry_date
 
@@ -190,3 +193,22 @@ def compute_fit_score(fields: dict) -> int:
         + _focus_bonus(fields)
     )
     return min(100, round(total))
+
+
+def _monthly_fee(bimonthly_raw, default_monthly: float) -> float:
+    """Sheet arnona/vaad are bi-monthly; blank/unparseable falls back to the monthly default."""
+    digits = re.sub(r"[^\d]", "", str(bimonthly_raw if bimonthly_raw is not None else ""))
+    return int(digits) / 2 if digits else default_monthly
+
+
+def compute_total_monthly_cost(fields: dict) -> int | str:
+    """Rent + monthly arnona + monthly vaad + broker fee amortized. "" when the rent is unknown."""
+    price_val = fields.get("price_val") or 0
+    if not price_val:
+        return ""
+    address = fields.get("address") or ""
+    city = next((c for c in DEFAULT_ARNONA_MONTHLY_BY_CITY if c in address), TOTAL_COST_DEFAULT_CITY)
+    arnona = _monthly_fee(fields.get("arnona"), DEFAULT_ARNONA_MONTHLY_BY_CITY[city])
+    vaad = _monthly_fee(fields.get("vaad"), DEFAULT_VAAD_MONTHLY)
+    agent_fee = price_val / TOTAL_COST_AGENT_FEE_AMORTIZE_MONTHS if fields.get("is_agent") else 0
+    return round(price_val + arnona + vaad + agent_fee)
