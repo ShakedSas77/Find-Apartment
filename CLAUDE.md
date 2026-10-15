@@ -80,7 +80,7 @@ python bot_listener.py
    - Pre-filter: excluded locations, negative keywords, sale detector, room-count regex, price pre-filter (`_price_prefilter_reject()` in `core/evaluate.py`: rejects without an LLM call when every marker-adjacent rent-sized price (≥ `PRICE_PREFILTER_MIN_RENT`) is outside `MIN_PRICE`–`MAX_PRICE` **and** no bare 4-5 digit number anywhere in the text is in range, so old-price/stepped-price posts still reach the LLM; recorded as `rejected_price` so `--reparse-rejected` re-checks it)
    - LLM parse → price/room-count fallback regex (if LLM value out of range)
    - Filter by rooms + price → compute walking distance → append row to sheet
-6. End of run: a summary line reports groups scanned, posts seen, pre-filtered, sent to the LLM, matches added, this month's Maps calls used, and checkpoints hit
+6. End of run: a summary line reports groups scanned, posts seen, pre-filtered, sent to the LLM, matches added, this month's Maps calls used, and checkpoints hit; a final `Timing:` line gives the run's wall time plus cumulative per-phase seconds across group threads (`scroll`, `llm`, `maps`, `sheets`, via `core.util.timed()`) — read it before optimizing anything, since parallel groups make the phase sums exceed wall time
 
 ## Concurrency
 

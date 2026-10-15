@@ -49,7 +49,7 @@ def _call(method: str, payload: dict) -> dict | list | None:
             return None
         return data.get("result")
     except Exception as e:
-        print(f"WARNING: Telegram {method} request failed: {e}")
+        print(f"WARNING: Telegram {method} request failed: {telegram_notifier._redact_bot_token(str(e))}")
         return None
 
 

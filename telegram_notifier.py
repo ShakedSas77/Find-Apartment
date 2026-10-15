@@ -10,6 +10,7 @@ the sheet).
 """
 
 import os
+import re
 import time
 
 import requests
@@ -25,6 +26,15 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _warned_not_configured = False
+
+# Telegram puts the bot token in the URL path (not a header), so on a network-level failure the
+# requests/urllib3 exception's str() embeds ".../bot<TOKEN>/sendMessage". Strip it before any
+# exception text reaches a print, log, or the doctor.py --alert DM.
+_BOT_TOKEN_IN_URL_RE = re.compile(r'(/bot)[^/\s]+')
+
+
+def _redact_bot_token(text: str) -> str:
+    return _BOT_TOKEN_IN_URL_RE.sub(lambda match: match.group(1) + 'REDACTED', text)
 
 
 def _configured() -> bool:
@@ -55,7 +65,7 @@ def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
             return None
         return data.get("result")
     except Exception as e:
-        print(f"WARNING: Telegram {method} request failed: {e}")
+        print(f"WARNING: Telegram {method} request failed: {_redact_bot_token(str(e))}")
         return None
 
 

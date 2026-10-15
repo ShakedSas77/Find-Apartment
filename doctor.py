@@ -142,6 +142,7 @@ def _check_gmaps():
 def _check_telegram():
     if not config.TELEGRAM_ENABLED:
         return ("telegram", WARN, "TELEGRAM_ENABLED=False", "optional — set True + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env to enable")
+    import telegram_notifier
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -152,7 +153,7 @@ def _check_telegram():
             return ("telegram", PASS, "bot token valid", "")
         return ("telegram", FAIL, "getMe rejected the token", "check TELEGRAM_BOT_TOKEN")
     except Exception as exc:
-        return ("telegram", FAIL, f"unreachable: {exc}", "check network / TELEGRAM_BOT_TOKEN")
+        return ("telegram", FAIL, f"unreachable: {telegram_notifier._redact_bot_token(str(exc))}", "check network / TELEGRAM_BOT_TOKEN")
 
 
 _CHECKS = [
@@ -184,7 +185,7 @@ def main(argv=None) -> int:
             )
             telegram_notifier.send_failure_alert(summary)
         except Exception as exc:
-            print(f"(could not send Telegram alert: {exc})")
+            print(f"(could not send Telegram alert: {telegram_notifier._redact_bot_token(str(exc))})")
 
     return 1 if any_fail else 0
 
