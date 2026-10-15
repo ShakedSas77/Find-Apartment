@@ -90,7 +90,7 @@ NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
 # Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
-EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה", "מרום נווה", "עוזיאל", "נגבה", "נווה שאנן"]
+EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה", "התקווה", "מרום נווה", "עוזיאל", "נגבה", "נווה שאנן"]
 
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
@@ -119,8 +119,6 @@ MAX_WALKING_DISTANCE_KM = 5.0
 # Set to None to disable. Default: Tel Aviv HaHagana rail station
 # (32.054062, 34.7847899), confirmed via Google Geocoding directly.
 EXCLUDE_SOUTH_OF_LAT = 32.054062
-# NOTE: an address naming one of FOCUS_NEIGHBORHOODS_TEL_AVIV (defined further down) is
-# exempt from this cutoff — several of them sit near or below that latitude.
 
 # Cities allowed as a result when validating an address against Google Geocoding
 GMAPS_TARGET_CITIES = ["רמת גן", "גבעתיים", "תל אביב-יפו", "תל אביב"]

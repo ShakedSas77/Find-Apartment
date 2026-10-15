@@ -185,3 +185,9 @@ def test_in_run_repost_is_recorded_as_a_duplicate_listing(monkeypatch):
     _queue_listing(monkeypatch, "https://www.facebook.com/groups/1/posts/2/", pending_rows, recorded)
 
     assert recorded == [("https://www.facebook.com/groups/1/posts/2/", storage.VERDICT_DUPLICATE_LISTING)]
+
+
+def test_content_prefilter_rejects_the_hatikva_neighborhood():
+    _, analysis, _ = evaluate._content_prefilter("להשכרה 3 חדרים בשכונת התקווה, תל אביב, 6,000 ₪")
+
+    assert analysis["reject_reason"] == "excluded_location:התקווה"

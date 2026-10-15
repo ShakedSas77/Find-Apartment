@@ -310,8 +310,7 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status, lat, lon)
         return "", 999999, confidence, warning, "skipped", lat, lon
 
-    if (EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT
-            and not _is_tel_aviv_focus_address(address)):
+    if EXCLUDE_SOUTH_OF_LAT is not None and lat is not None and lat < EXCLUDE_SOUTH_OF_LAT:
         south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
         storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
         return "", 999999, confidence, south_warning, "excluded_south", lat, lon
