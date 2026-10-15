@@ -4,6 +4,7 @@ Unit tests for the pure text-normalization/dedupe helpers.
 from datetime import datetime
 
 from core.normalize import (
+    _extract_price_candidates,
     _detect_agent,
     _infer_post_date,
     _normalize_bimonthly_fee,
@@ -186,3 +187,15 @@ def test_resolve_entry_date_rolls_past_date_to_next_year():
 
 def test_resolve_entry_date_unparseable_text_is_none():
     assert resolve_entry_date("ספטמבר") is None
+
+
+def test_extract_price_candidates_reads_price_next_to_marker():
+    assert _extract_price_candidates("דירה להשכרה 9,000 ₪ לחודש") == [9000]
+
+
+def test_extract_price_candidates_returns_old_and_new_price():
+    assert _extract_price_candidates('היה 6,500 עכשיו 7,200 ש"ח') == [7200]
+
+
+def test_extract_price_candidates_ignores_phone_number():
+    assert _extract_price_candidates("לפרטים 050-1234567") == []

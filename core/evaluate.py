@@ -17,13 +17,13 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT,
 )
 from core.util import _safe_print, _sheet_lock
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.llm import analyze_post_with_llm
 from core.normalize import (
-    BIDI_RE, _PRICE_CONTEXT_RE, _normalize_bimonthly_fee, _warn_if_fee_implausible,
+    BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE,
@@ -38,6 +38,23 @@ from maps import _format_address_display, get_walking_distance
 # with no real number) must NOT be gated on, or a listing with no real distance
 # data would look like it passed the filter.
 _DISTANCE_FILTERABLE_SOURCES = {"google_maps", "straight_line_estimate"}
+
+def _price_prefilter_reject(text: str) -> int | None:
+    """
+    Returns the first stated rent if every rent-sized price in the text is outside
+    [MIN_PRICE, MAX_PRICE], so the post can skip the LLM. One in-range candidate
+    (e.g. an "old price" next to the real one) keeps it going to the LLM, and so does
+    any bare in-range number anywhere in the text (a stepped price like "5200 until
+    March, 5500 after" only has a marker next to the first figure).
+    """
+    candidates = [p for p in _extract_price_candidates(text) if p >= PRICE_PREFILTER_MIN_RENT]
+    if not candidates:
+        return None
+    flat_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', BIDI_RE.sub('', text))
+    bare_numbers = (int(n) for n in re.findall(r'(?<![0-9])[0-9]{4,5}(?![0-9])', flat_text))
+    if any(MIN_PRICE <= n <= MAX_PRICE for n in bare_numbers):
+        return None
+    return candidates[0]
 
 def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str, dict]:
     """
@@ -71,12 +88,7 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     # price", annual committee fee, etc.) — that's exactly what created false
     # positives before.
     if not (MIN_PRICE <= price_val <= MAX_PRICE):
-        clean_text = BIDI_RE.sub('', text)
-        clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
-        possible_prices = [
-            int(m.group(1) or m.group(2))
-            for m in _PRICE_CONTEXT_RE.finditer(clean_text)
-        ]
+        possible_prices = _extract_price_candidates(text)
         if possible_prices:
             valid_prices = [p for p in possible_prices if MIN_PRICE <= p <= MAX_PRICE]
             if valid_prices and price_missing_or_invalid:
@@ -272,31 +284,52 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
         else:
             _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
 
-def _replay_text_prefilters(text: str) -> tuple[str, dict] | None:
+def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] | None:
     """
-    Content-based filter checks (not URL/date/live cache) for --replay — mirrors
-    _scan_group_page (where the conditions also live for the live group_label
-    prints), but here without a browser. If you change NEGATIVE_KEYWORDS/
-    EXCLUDED_LOCATIONS/etc., update both places.
-    Returns (verdict, reject_reason) if it should stop, otherwise None to continue to the LLM.
+    Content-based filter checks (nothing URL/date/DB-dependent) shared by the live scan
+    (_scan_group_page) and --replay. Returns (verdict, analysis, message) for the first
+    check that rejects the post, or None to continue to the LLM. `message` is the
+    scan's console reason; `post_url` only enriches the room-count message.
     """
     excluded_found = [loc for loc in EXCLUDED_LOCATIONS if loc in text]
     if excluded_found:
-        return storage.VERDICT_PREFILTERED, {"reject_reason": f"excluded_location:{excluded_found[0]}"}
+        return (storage.VERDICT_PREFILTERED, {"reject_reason": f"excluded_location:{excluded_found[0]}"},
+                f"Contains excluded location '{excluded_found[0]}'.")
 
+    # Roommate/shared-room posts, unless explicitly also couple-friendly
     roommate_match = re.search(ROOMMATE_KEYWORDS, text)
     if roommate_match and not _ROOMMATE_COUPLE_EXCEPTION_RE.search(text):
-        return storage.VERDICT_PREFILTERED, {"reject_reason": f"roommate_keyword:{roommate_match.group(0)}"}
+        return (storage.VERDICT_PREFILTERED, {"reject_reason": f"roommate_keyword:{roommate_match.group(0)}"},
+                f"Contains negative keyword '{roommate_match.group(0)}'.")
 
+    # Other obvious non-relevant posts (sublets, studios, commercial, seekers)
     neg_match = re.search(NEGATIVE_KEYWORDS, text)
     if neg_match:
-        return storage.VERDICT_PREFILTERED, {"reject_reason": f"negative_keyword:{neg_match.group(0)}"}
+        return (storage.VERDICT_PREFILTERED, {"reject_reason": f"negative_keyword:{neg_match.group(0)}"},
+                f"Contains negative keyword '{neg_match.group(0)}'.")
 
+    # Sales instead of rentals. Many agent posts omit the word "for sale" and just write
+    # "Price: 3,395,000 ₪" — a 7+ digit price (or "X million") is an unambiguous sale signal.
+    # The separator requirement ([.,]\d{3}) blocks a false match on a phone number (050-1234567).
     sale_price_match = re.search(r'(?<!\d)[1-9]\d{0,2}(?:[.,]\d{3}){2,}(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
     if sale_price_match:
-        return storage.VERDICT_PREFILTERED, {"reject_reason": f"for_sale:{sale_price_match.group(0).strip()}"}
+        return (storage.VERDICT_PREFILTERED, {"reject_reason": f"for_sale:{sale_price_match.group(0).strip()}"},
+                f"Apartment for sale (price {sale_price_match.group(0).strip()}).")
 
     if not re.search(ROOMS_PRE_FILTER_REGEX, text):
-        return storage.VERDICT_PREFILTERED, {"reject_reason": "room_count_mismatch"}
+        clean_snip = text[:100].replace('\n', ' ')
+        detail = f"\n      URL: {post_url}\n      Text: {clean_snip}..." if post_url else ""
+        actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
+        if actual_rooms_match:
+            message = f"Post is for {actual_rooms_match.group(1)} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS})."
+        else:
+            message = "No mention of matching room count."
+        return storage.VERDICT_PREFILTERED, {"reject_reason": "room_count_mismatch"}, message + detail
+
+    # Recorded as rejected_price (not prefiltered) so --reparse-rejected re-checks it if MIN_PRICE/MAX_PRICE change.
+    rejected_price = _price_prefilter_reject(text)
+    if rejected_price is not None:
+        return (storage.VERDICT_REJECTED_PRICE, {"price_val": rejected_price, "reject_reason": f"price_prefilter:{rejected_price}"},
+                f"price {rejected_price:,} out of range.")
 
     return None

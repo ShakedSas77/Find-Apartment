@@ -15,7 +15,7 @@ from core.normalize import BIDI_RE, _strip_comment_section
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
-    _replay_text_prefilters,
+    _content_prefilter,
 )
 from sheets import setup_google_sheet, dedupe_and_sort_sheet
 from fb_scraper import run_scraper
@@ -116,9 +116,9 @@ def replay_all_posts():
             continue
         text = _strip_comment_section(BIDI_RE.sub('', text))
 
-        prefiltered = _replay_text_prefilters(text)
+        prefiltered = _content_prefilter(text)
         if prefiltered is not None:
-            new_verdict, _ = prefiltered
+            new_verdict, _, _ = prefiltered
         else:
             data = analyze_post_with_llm(text)
             if not data:

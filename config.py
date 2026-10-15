@@ -56,6 +56,9 @@ MIN_ROOMS = 2.5
 MAX_ROOMS = 3.5
 MIN_PRICE = 5500
 MAX_PRICE = 6700
+# Price pre-filter ignores candidates below this: arnona/vaad-sized numbers sit next to
+# the same ₪ markers as rent but must never trigger a rejection.
+PRICE_PREFILTER_MIN_RENT = 3000
 
 # A post that passed every filter (rooms/address/distance) but never stated a price
 # in the text at all (both the LLM and the regex "second chance" found nothing) —
@@ -176,6 +179,18 @@ CONSECUTIVE_OLD_POSTS_TO_STOP = 5
 # headless UA artifacts, missing chrome.runtime). Kill switch in case a stealth
 # patch ever breaks Facebook rendering — the bot runs fine without it.
 STEALTH_ENABLED = True
+# A live scrape snapshots bot_data.db (backup_db.py) at the end once the newest backup is older than this.
+BACKUP_MAX_AGE_DAYS = 7
+# Locale the headless session presents (navigator.language/languages + Accept-Language). Headless
+# Chromium otherwise follows the OS regional setting (en-GB here) while this machine's headful
+# Chrome reports en-US, so the same account would show two different locales.
+BROWSER_LOCALE = "en-US"
+# WebGL identity the stealth layer presents. Headless has no real GPU (SwiftShader, a known headless
+# tell) and tf-playwright-stealth's own spoof picks a random Mac/mobile GPU each run, which clashes
+# with a Windows UA. Set both to this machine's real headful values (machine-specific, so override
+# them in config_local.py); None leaves WebGL unspoofed rather than random.
+WEBGL_VENDOR = None
+WEBGL_RENDERER = None
 
 # At the start of every run, visit every URL already in the sheet and remove any
 # whose post Facebook now shows as unavailable (deleted, or visibility changed).

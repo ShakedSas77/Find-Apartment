@@ -53,6 +53,11 @@ _PRICE_CONTEXT_RE = re.compile(
     rf'|(?<![0-9])([0-9]{{4,5}})(?![0-9])\D{{0,25}}{_PRICE_MARKER}'
 )
 
+def _extract_price_candidates(text: str) -> list[int]:
+    clean_text = BIDI_RE.sub('', text)
+    clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
+    return [int(m.group(1) or m.group(2)) for m in _PRICE_CONTEXT_RE.finditer(clean_text)]
+
 # Converts the relative date Facebook shows ("6h", "1d", "3w", plus the longer
 # forms Facebook sometimes renders: "3 hrs", "1 day", "2 wks") to an absolute date (DD/MM)
 _RELATIVE_DATE_RE = re.compile(

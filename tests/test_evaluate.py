@@ -84,3 +84,72 @@ def test_rooms_pre_filter_rejects_twelve_and_a_half_rooms():
     import re
     from config import ROOMS_PRE_FILTER_REGEX
     assert not re.search(ROOMS_PRE_FILTER_REGEX, "12.5 חדרים")
+
+
+def test_price_prefilter_rejects_clearly_out_of_range_rent():
+    assert evaluate._price_prefilter_reject("להשכרה 3 חדרים, 9,000 ₪ לחודש") == 9000
+
+
+def test_price_prefilter_keeps_in_range_rent():
+    assert evaluate._price_prefilter_reject("להשכרה 3 חדרים, 6,300 ₪ לחודש") is None
+
+
+def test_price_prefilter_keeps_post_with_in_range_price_beside_old_price():
+    assert evaluate._price_prefilter_reject("להשכרה 3 חדרים. היה 6,500 ₪ עכשיו 7,200 ₪") is None
+
+
+def test_price_prefilter_ignores_arnona_sized_amount():
+    assert evaluate._price_prefilter_reject("להשכרה 3 חדרים, ארנונה 1,200 ₪ לחודשיים") is None
+
+
+def test_price_prefilter_ignores_post_without_price():
+    assert evaluate._price_prefilter_reject("להשכרה 3 חדרים ברמת גן") is None
+
+
+def test_price_prefilter_keeps_stepped_price_with_in_range_figure_unmarked():
+    assert evaluate._price_prefilter_reject("שכר דירה 5200 עד 1/3/27 ו5500 לאחר מכן") is None
+
+
+def test_content_prefilter_rejects_excluded_location():
+    verdict, analysis, _ = evaluate._content_prefilter("להשכרה 3 חדרים בחולון, 6,000 ₪")
+
+    assert (verdict, analysis["reject_reason"]) == (storage.VERDICT_PREFILTERED, "excluded_location:חולון")
+
+
+def test_content_prefilter_rejects_roommate_post():
+    verdict, _, _ = evaluate._content_prefilter("מחפשת שותפה לדירת 3 חדרים")
+
+    assert verdict == storage.VERDICT_PREFILTERED
+
+
+def test_content_prefilter_allows_roommate_mention_alongside_couple():
+    assert evaluate._content_prefilter("דירת 3 חדרים ברמת גן, מתאימה לזוג או ל-2 שותפים, 6,000 ₪") is None
+
+
+def test_content_prefilter_rejects_sale_price():
+    _, analysis, _ = evaluate._content_prefilter("למכירה דירת 3 חדרים, מחיר: 3,395,000 ₪")
+
+    assert analysis["reject_reason"] == "for_sale:3,395,000"
+
+
+def test_content_prefilter_rejects_non_matching_room_count():
+    _, analysis, _ = evaluate._content_prefilter("להשכרה 5 חדרים ברמת גן, 6,000 ₪")
+
+    assert analysis["reject_reason"] == "room_count_mismatch"
+
+
+def test_content_prefilter_marks_out_of_range_price_as_rejected_price():
+    verdict, _, _ = evaluate._content_prefilter("להשכרה 3 חדרים ברמת גן, 9,000 ₪ לחודש")
+
+    assert verdict == storage.VERDICT_REJECTED_PRICE
+
+
+def test_content_prefilter_includes_post_url_in_room_count_message():
+    _, _, message = evaluate._content_prefilter("להשכרה 5 חדרים ברמת גן", "https://example.test/p/1")
+
+    assert "https://example.test/p/1" in message
+
+
+def test_content_prefilter_passes_clean_post():
+    assert evaluate._content_prefilter("להשכרה 3 חדרים ברמת גן, 6,000 ₪ לחודש") is None
+
