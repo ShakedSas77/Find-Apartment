@@ -9,16 +9,19 @@ printed warning and a match that just doesn't get an alert (it's still in
 the sheet).
 """
 
+import html
 import os
 import re
 import time
+from urllib.parse import urlencode
 
 import requests
 from dotenv import load_dotenv
 
 import config
+import scoring
 import storage
-from core.normalize import map_bool
+from core.normalize import _classify_address_confidence, map_bool
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -78,44 +81,118 @@ def _group_post_ids(post_url: str) -> tuple[str, str] | None:
     return parts[-3], parts[-1]
 
 
-def _format_listing_message(fields: dict, score: int) -> str:
-    price = fields.get("price_val")
-    price_line = f"{int(price):,} ₪" if price else "מחיר לא ידוע"
-    entry_date = fields.get("entry_date") or "?"
-    elevator = map_bool(fields.get("elevator")) or "?"
-    parking = fields.get("parking") or "אין"
-    shelter = map_bool(fields.get("shelter")) or "?"
-    arnona = fields.get("arnona") or "?"
-    vaad = fields.get("vaad") or "?"
+def _escape(value) -> str:
+    """Telegram HTML parse mode: address/warning/entry-date text comes from scraped Facebook text via
+    an LLM, so it is untrusted — an unescaped `<` or `&` makes Telegram reject the whole message."""
+    return html.escape(str(value), quote=False)
 
-    lines = [
-        f"דירה חדשה — ציון התאמה {score}/100",
-        f"{fields.get('rooms_val', '')} חדרים | {price_line} | כניסה: {entry_date}",
-        f"מרחק הליכה: {fields.get('distance_text') or '?'} ק\"מ",
-        f"קומה: {fields.get('floor', '')} | מעלית: {elevator} | חניה: {parking} | ממ\"ד: {shelter}",
-        f"ארנונה: {arnona} | ועד בית: {vaad}",
-        f"כתובת: {fields.get('address', '')}",
+
+def _post_url(group_id: str, post_id: str) -> str:
+    return f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
+
+
+def _score_tier(score: int) -> str:
+    if score >= config.TELEGRAM_SCORE_GOOD:
+        return "🟢"
+    if score >= config.TELEGRAM_SCORE_OK:
+        return "🟡"
+    return "🔴"
+
+
+def _as_number(value) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_floor(floor) -> str:
+    if floor is None or floor == "":
+        return ""
+    return "קרקע" if _as_number(floor) == 0 else _escape(floor)
+
+
+def _format_listing_message(fields: dict, score: int) -> str:
+    """HTML message body; a line (or field) with no data is left out rather than shown as a placeholder."""
+    headline = [f"{_score_tier(score)} <b>ציון {score}/100</b>"]
+    rooms = _as_number(fields.get("rooms_val"))
+    if rooms:
+        headline.append(f"{rooms:g} חדרים")
+    price = fields.get("price_val")
+    if price:
+        headline.append(f"<b>{int(price):,} ₪</b>")
+    lines = [" · ".join(headline)]
+
+    total_cost = scoring.compute_total_monthly_cost(fields)
+    if total_cost:
+        lines.append(f"💰 עלות חודשית כוללת: <b>{total_cost:,} ₪</b>")
+    if fields.get("address"):
+        lines.append(f"📍 {_escape(fields['address'])}")
+    distance_km = _as_number(fields.get("distance_text"))
+    if distance_km is not None:
+        lines.append(f"🚶 {distance_km:g} ק\"מ הליכה")
+
+    details = [
+        ("קומה", _format_floor(fields.get("floor"))),
+        ("מעלית", map_bool(fields.get("elevator"))),
+        ("חניה", _escape(fields["parking"]) if fields.get("parking") else ""),
+        ("ממ\"ד", map_bool(fields.get("shelter"))),
     ]
+    detail_line = " | ".join(f"{label}: {value}" for label, value in details if value)
+    if detail_line:
+        lines.append(f"🏢 {detail_line}")
+    if fields.get("entry_date"):
+        lines.append(f"📅 כניסה: {_escape(fields['entry_date'])}")
+    fees = [f"{label}: {_escape(fields[key])}" for label, key in (("ארנונה", "arnona"), ("ועד בית", "vaad")) if fields.get(key)]
+    if fees:
+        lines.append(f"🧾 {' | '.join(fees)}")
     if fields.get("address_warning"):
-        lines.append(f"⚠️ {fields['address_warning']}")
+        lines.append(f"⚠️ {_escape(fields['address_warning'])}")
     if fields.get("is_agent"):
         lines.append("תיווך")
-    lines.append("דרג את הדירה (0-10) 👇 — עוזר לנו לכייל את מערכת הניקוד")
     return "\n".join(lines)
+
+
+def _maps_url(fields: dict) -> str | None:
+    """Google Maps search link for the listing's address, or None unless at least the street is known.
+    Telegram URL buttons only accept http(s)/tg links, so this is the https maps link; on a phone it
+    hands off to the Google Maps app. Uses the address's stored confidence when the pipeline computed
+    one (it can be downgraded by geocoding), else classifies the text the way the pipeline does — strict
+    on purpose: a missing button beats a button to the wrong place."""
+    address = (fields.get("address") or "").strip()
+    if not address:
+        return None
+    confidence = fields.get("address_confidence") or _classify_address_confidence(address)[0]
+    if confidence != "high":
+        return None
+    query = address if "ישראל" in address else f"{address}, ישראל"
+    return "https://www.google.com/maps/search/?" + urlencode({"api": 1, "query": query})
+
+
+def _link_row(post_url: str, maps_url: str | None = None) -> list:
+    row = [{"text": "🔗 פתח פוסט", "url": post_url}]
+    if maps_url:
+        row.append({"text": "🗺 פתח במפות", "url": maps_url})
+    return row
+
+
+def build_link_keyboard(group_id: str, post_id: str, maps_url: str | None = None) -> dict:
+    """reply_markup for every new listing message: "open post", plus "open in Maps" when the street is
+    known. The ⭐/🗑 vote buttons and the 0-10 rating rows were dropped from new messages."""
+    return {"inline_keyboard": [_link_row(_post_url(group_id, post_id), maps_url)]}
 
 
 def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> dict:
     """
-    Shared reply_markup for a listing message: the ⭐/🗑 vote row (drives real
-    sheet actions — see bot_listener.py). The 0-10 rating rows were dropped from
-    new messages; bot_listener.py still records `rate:` taps on older messages.
-    Rebuilt on every callback (bot_listener.py), not just at send time.
+    Vote keyboard (⭐/🗑 row + "open post" link row) for messages sent *before* the vote buttons
+    were removed: bot_listener.py rebuilds it on a tap on one of those old messages so the tally
+    and the link row stay put. New messages use build_link_keyboard().
     """
     vote_row = [
         {"text": f"⭐ מעניין ({up})", "callback_data": f"up:{group_id}:{post_id}"},
         {"text": f"🗑 לא רלוונטי ({down})", "callback_data": f"down:{group_id}:{post_id}"},
     ]
-    return {"inline_keyboard": [vote_row]}
+    return {"inline_keyboard": [vote_row, _link_row(_post_url(group_id, post_id))]}
 
 
 def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
@@ -131,8 +208,10 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": f"{_format_listing_message(fields, score)}\n\n{post_url}",
-        "reply_markup": build_listing_keyboard(0, 0, group_id, post_id),
+        "text": _format_listing_message(fields, score),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": build_link_keyboard(group_id, post_id, _maps_url(fields)),
     }
     result = _call("sendMessage", payload)
     if not result:
@@ -143,19 +222,39 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
 
 
 def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str, address: str,
-                          entry_date: str = "", floor: str = "", elevator: str = ""):
+                          entry_date: str = "", floor: str = "", elevator: str = "",
+                          score: str = "", total_cost: str = ""):
     """Sent by bot_listener.py once a listing crosses VOTES_TO_HIGHLIGHT up-votes
-    — a distinct, no-buttons message calling out a listing both voters liked."""
+    — a distinct, vote-less message calling out a listing both voters liked.
+    Values are the sheet row's raw cells (strings), so each is escaped and a blank one is left out."""
     if not _configured():
         return
-    price_line = f"{price} ₪" if price else "מחיר לא ידוע"
-    text = (
-        f"🔥 דירה חמה — {config.VOTES_TO_HIGHLIGHT}+ הצבעות חיוביות!\n"
-        f"{rooms} חדרים | {price_line} | מרחק הליכה {distance_km or '?'} ק\"מ | כניסה: {entry_date or '?'}\n"
-        f"קומה: {floor or '?'} | מעלית: {elevator or '?'}\n"
-        f"{address}\n\n{post_url}"
-    )
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
+    summary = [part for part in (
+        f"ציון {_escape(score)}/100" if score else "",
+        f"{_escape(rooms)} חדרים" if rooms else "",
+        f"<b>{_escape(price)} ₪</b>" if price else "",
+    ) if part]
+    lines = [f"🔥 <b>דירה חמה</b> — {config.VOTES_TO_HIGHLIGHT}+ הצבעות חיוביות!"]
+    if summary:
+        lines.append(" · ".join(summary))
+    if total_cost:
+        lines.append(f"💰 עלות חודשית כוללת: <b>{_escape(total_cost)} ₪</b>")
+    if address:
+        lines.append(f"📍 {_escape(address)}")
+    if distance_km:
+        lines.append(f"🚶 {_escape(distance_km)} ק\"מ הליכה")
+    detail_line = " | ".join(f"{label}: {_escape(value)}" for label, value in (("קומה", floor), ("מעלית", elevator)) if value)
+    if detail_line:
+        lines.append(f"🏢 {detail_line}")
+    if entry_date:
+        lines.append(f"📅 כניסה: {_escape(entry_date)}")
+    _call("sendMessage", {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": "\n".join(lines),
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {"inline_keyboard": [_link_row(post_url, _maps_url({"address": address}))]},
+    })
 
 
 def send_backfill_announcement(count: int):

@@ -37,6 +37,7 @@ _POLL_TIMEOUT_SECONDS = 30
 _SCORE_COL = config.SHEET_HEADERS.index("ציון התאמה") + 1
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ADDRESS = 1, 2, 3, 13  # 0-based row indexes
 _COL_ENTRY_DATE, _COL_FLOOR, _COL_ELEVATOR = 4, 5, 6
+_COL_TOTAL_COST = config.SHEET_HEADERS.index("עלות חודשית כוללת")
 
 
 def _call(method: str, payload: dict) -> dict | list | None:
@@ -154,6 +155,8 @@ def _handle_callback_query(cq: dict, sheet):
                 entry_date=row[_COL_ENTRY_DATE] if len(row) > _COL_ENTRY_DATE else "",
                 floor=row[_COL_FLOOR] if len(row) > _COL_FLOOR else "",
                 elevator=row[_COL_ELEVATOR] if len(row) > _COL_ELEVATOR else "",
+                score=row[_SCORE_COL - 1] if len(row) >= _SCORE_COL else "",
+                total_cost=row[_COL_TOTAL_COST] if len(row) > _COL_TOTAL_COST else "",
             )
 
     if chat_id and message_id:
