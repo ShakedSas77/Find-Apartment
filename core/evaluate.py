@@ -19,7 +19,7 @@ from config import (
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
     ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT,
 )
-from core.util import _safe_print, _sheet_lock
+from core.util import _safe_print, _sheet_lock, timed
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.llm import analyze_post_with_llm
 from core.normalize import (
@@ -159,7 +159,8 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     return storage.VERDICT_ADDED, fields
 
 def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
-    dist_text, dist_meters, address_confidence, address_warning, distance_source, lat, lon = get_walking_distance(fields["address"])
+    with timed("maps"):
+        dist_text, dist_meters, address_confidence, address_warning, distance_source, lat, lon = get_walking_distance(fields["address"])
     fields["distance_text"] = dist_text
     fields["distance_meters"] = dist_meters
     fields["address_confidence"] = address_confidence
@@ -216,7 +217,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
     _safe_print(f"[{label}] Analyzing post (URL: {post_url})...")
 
     try:
-        data = analyze_post_with_llm(text)
+        with timed("llm"):
+            data = analyze_post_with_llm(text)
     except (GmapsQuotaHalted, HeadlessCheckpointAbort):
         raise
 

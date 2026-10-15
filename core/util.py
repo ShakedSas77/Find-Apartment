@@ -7,12 +7,36 @@ fb_scraper, yad2_scraper) without ever risking a circular import.
 """
 import threading
 import time
+from collections import defaultdict
+from contextlib import contextmanager
 
 _print_lock = threading.Lock()
 _sheet_lock = threading.Lock()  # guards seen_urls reads/writes AND sheet writes together
 _checkpoint_lock = threading.Lock()
 _resume_event = threading.Event()
 _resume_event.set()  # set = running; cleared = paused for a checkpoint on some tab
+
+
+_phase_lock = threading.Lock()
+_phase_seconds: dict[str, float] = defaultdict(float)
+
+
+@contextmanager
+def timed(phase: str):
+    """Adds the block's wall time to a per-run total for `phase`. Totals are summed across
+    threads (cumulative thread-seconds), so parallel groups can exceed the run's wall time."""
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - started
+        with _phase_lock:
+            _phase_seconds[phase] += elapsed
+
+
+def get_phase_seconds() -> dict[str, float]:
+    with _phase_lock:
+        return dict(_phase_seconds)
 
 
 def _safe_print(msg: str):

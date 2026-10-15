@@ -30,7 +30,7 @@ from config import (
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
-from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock
+from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
     BIDI_RE, _strip_comment_section, relative_to_date, _infer_post_date,
@@ -38,6 +38,7 @@ from core.normalize import (
 )
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter
+from backup_db import backup_if_stale
 from sheets import setup_google_sheet, dedupe_and_sort_sheet, _append_rows_batch, _rewrite_sheet_data_rows
 
 _text_dedup_lock = threading.Lock()
@@ -529,7 +530,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
 
         max_scrolls = SCROLL_COUNT if last_scan_time else FIRST_SCAN_SCROLL_COUNT
 
-        harvested, caught_up = _scroll_and_harvest(page, group_label, effective_cutoff, max_scrolls)
+        with timed("scroll"):
+            harvested, caught_up = _scroll_and_harvest(page, group_label, effective_cutoff, max_scrolls)
 
         _safe_print(f"[{group_label}] Found {len(harvested)} real posts.")
         stats["posts_seen"] = len(harvested)
@@ -566,7 +568,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         if pending_rows and live:
             with _sheet_lock:
                 try:
-                    _append_rows_batch(sheet, pending_rows)
+                    with timed("sheets"):
+                        _append_rows_batch(sheet, pending_rows)
                     seen_urls.update(pending_seen_urls)
                     for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
                         storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
@@ -656,6 +659,7 @@ def _make_group_label(index: int, total: int, url: str) -> str:
 def run_scraper(headless: bool = False, live: bool = False):
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
+    run_started = time.perf_counter()
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
@@ -814,13 +818,19 @@ def run_scraper(headless: bool = False, live: bool = False):
 
     if live:
         print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
-        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        with timed("sheets"):
+            duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
         print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
               f"Sheet now has {kept} listings, sorted by post date (newest first).")
 
         pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
         if pruned:
             print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+
+        try:
+            backup_if_stale()
+        except Exception as e:
+            print(f"WARNING: DB backup failed: {e}")
     else:
         print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
 
@@ -838,6 +848,9 @@ def run_scraper(headless: bool = False, live: bool = False):
             })
         except Exception as e:
             print(f"WARNING: Telegram run-finished alert failed: {e}")
+
+    phases = ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(get_phase_seconds().items()))
+    print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
 
     return {
         "groups_scanned": groups_scanned,

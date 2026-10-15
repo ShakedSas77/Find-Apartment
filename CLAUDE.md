@@ -30,8 +30,8 @@ ollama pull qwen2.5:7b
 python doctor.py
 python doctor.py --alert   # also DMs a Telegram alert if anything FAILs
 
-# Timestamped SQLite backup of bot_data.db (the sole dedupe/verdict store) — schedule
-# it yourself (e.g. weekly) if you want it automatic; no Task Scheduler wiring exists
+# Timestamped SQLite backup of bot_data.db (the sole dedupe/verdict store) — a live
+# scrape already runs this automatically once the newest backup is over 7 days old
 python backup_db.py
 
 # Telegram vote listener (only relevant if TELEGRAM_ENABLED=True) — separate
