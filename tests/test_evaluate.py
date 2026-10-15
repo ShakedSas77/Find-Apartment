@@ -6,6 +6,7 @@ against. None of these reach the dedup-key check (a real bot_data.db
 read): either they return early on a rejected price, or no address is
 given so _listing_dedupe_key returns None.
 """
+import threading
 from datetime import date, timedelta
 
 import storage
@@ -153,3 +154,34 @@ def test_content_prefilter_includes_post_url_in_room_count_message():
 def test_content_prefilter_passes_clean_post():
     assert evaluate._content_prefilter("להשכרה 3 חדרים ברמת גן, 6,000 ₪ לחודש") is None
 
+
+def _queue_listing(monkeypatch, post_url, pending_rows, recorded):
+    """Runs process_candidate_listing for one fake post of the same apartment; only the LLM, the
+    evaluation result, the row builder and the DB write (network/DB boundaries) are faked."""
+    fields = {"rooms_val": 3.5, "price_val": 6000.0, "address": "קרל נטר 9, רמת גן"}
+    monkeypatch.setattr(evaluate, "analyze_post_with_llm", lambda text: {"rooms": 3.5})
+    monkeypatch.setattr(evaluate, "_evaluate_post_data", lambda data, text, group_url="": (storage.VERDICT_ADDED, dict(fields)))
+    monkeypatch.setattr(evaluate, "_build_row", lambda url, date, f: [url, "", "", "", "", "", "", "", "", "", "", "", "", "", "", 70])
+    monkeypatch.setattr(evaluate.storage, "record_post", lambda url, group, text, verdict, *args, **kwargs: recorded.append((url, verdict)))
+    evaluate.process_candidate_listing(post_url, "text", "1h", "group", "label", True, set(), pending_rows, set(), [],
+                                       {"llm_parsed": 0, "added": 0}, threading.Lock())
+
+
+def test_repost_of_a_listing_queued_earlier_in_the_run_is_not_queued_again(monkeypatch):
+    evaluate._run_queued_listing_keys.clear()
+    pending_rows, recorded = [], []
+
+    _queue_listing(monkeypatch, "https://www.facebook.com/groups/1/posts/1/", pending_rows, recorded)
+    _queue_listing(monkeypatch, "https://www.facebook.com/groups/1/posts/2/", pending_rows, recorded)
+
+    assert len(pending_rows) == 1
+
+
+def test_in_run_repost_is_recorded_as_a_duplicate_listing(monkeypatch):
+    evaluate._run_queued_listing_keys.clear()
+    pending_rows, recorded = [], []
+
+    _queue_listing(monkeypatch, "https://www.facebook.com/groups/1/posts/1/", pending_rows, recorded)
+    _queue_listing(monkeypatch, "https://www.facebook.com/groups/1/posts/2/", pending_rows, recorded)
+
+    assert recorded == [("https://www.facebook.com/groups/1/posts/2/", storage.VERDICT_DUPLICATE_LISTING)]

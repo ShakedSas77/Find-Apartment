@@ -39,6 +39,9 @@ from maps import _format_address_display, get_walking_distance
 # data would look like it passed the filter.
 _DISTANCE_FILTERABLE_SOURCES = {"google_maps", "straight_line_estimate"}
 
+# Dedupe keys of listings queued during this process's run (guarded by _sheet_lock) — see process_candidate_listing.
+_run_queued_listing_keys: set[tuple] = set()
+
 def _price_prefilter_reject(text: str) -> int | None:
     """
     Returns the first stated rent if every rent-sized price in the text is outside
@@ -269,9 +272,19 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
         storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
         return
 
+    # _known_added_listing_keys() only knows listings already *recorded* as added, which happens at
+    # the group's batch flush — so a repost sitting in the same in-flight window (same group batch,
+    # or another group scanning in parallel) would slip through and be sent to Telegram twice.
+    # Claiming the key here, under the same lock that queues the row, closes that window.
+    listing_key = _listing_dedupe_key(fields["address"], fields["rooms_val"], fields["price_val"])
     with _sheet_lock:
         seen_now = post_url in seen_urls or post_url in pending_seen_urls
-        if not seen_now:
+        repost_in_flight = not seen_now and listing_key is not None and listing_key in _run_queued_listing_keys
+        if repost_in_flight:
+            pass
+        elif not seen_now:
+            if listing_key is not None:
+                _run_queued_listing_keys.add(listing_key)
             pending_rows.append(new_row)
             pending_seen_urls.add(post_url)
             pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
@@ -285,6 +298,10 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
         else:
             _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
+    if repost_in_flight:
+        _safe_print(f"    [{label}] Skipped: repost of a listing queued earlier this run ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
+        storage.record_post(post_url, group_url, text, storage.VERDICT_DUPLICATE_LISTING, data,
+                             analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_DUPLICATE_LISTING))
 
 def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] | None:
     """
