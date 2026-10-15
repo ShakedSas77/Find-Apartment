@@ -26,10 +26,10 @@ from config import (
     MIN_SCROLLS_BEFORE_EARLY_STOP,
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
-    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS,
+    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
-from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _is_visible, _dismiss_popups
+from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
 from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
@@ -679,7 +679,7 @@ def run_scraper(headless: bool = False, live: bool = False):
 
     # --- Login phase: single persistent-context tab, sequential ---
     with sync_playwright() as p:
-        persistent_kwargs = {}
+        persistent_kwargs = {"locale": BROWSER_LOCALE}
         if headless:
             # Headless Chromium's UA says "HeadlessChrome" in both the HTTP header and
             # JS — the most obvious headless tell, and a UA can only be set at context
@@ -691,7 +691,7 @@ def run_scraper(headless: bool = False, live: bool = False):
                 probe_ua = probe_page.evaluate("navigator.userAgent") or ""
                 probe.close()
                 if "HeadlessChrome" in probe_ua:
-                    persistent_kwargs["user_agent"] = probe_ua.replace("HeadlessChrome", "Chrome")
+                    persistent_kwargs["user_agent"] = _normalize_user_agent(probe_ua)
             except Exception:
                 pass
         context = p.chromium.launch_persistent_context(
@@ -769,7 +769,7 @@ def run_scraper(headless: bool = False, live: bool = False):
             real_user_agent = ""
             real_locale = ""
             try:
-                real_user_agent = (page.evaluate("navigator.userAgent") or "").replace("HeadlessChrome", "Chrome")
+                real_user_agent = _normalize_user_agent(page.evaluate("navigator.userAgent") or "")
                 real_locale = page.evaluate("navigator.language") or ""
             except Exception:
                 pass

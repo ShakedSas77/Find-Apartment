@@ -6,6 +6,8 @@ nothing Facebook-specific here. Both fb_scraper.py and yad2_scraper.py use
 these; kept out of apartment_bot.py so a second source doesn't have to reach
 into a script's private namespace for them.
 """
+import json
+import re
 import sys
 
 try:
@@ -15,7 +17,7 @@ except ImportError:
     StealthConfig = None
 
 
-from config import STEALTH_ENABLED
+from config import STEALTH_ENABLED, BROWSER_LOCALE, WEBGL_VENDOR, WEBGL_RENDERER
 from core.util import _safe_print
 
 # On Linux, Chrome's sandbox can fail to initialize in some VM/container
@@ -30,6 +32,33 @@ if sys.platform.startswith("linux"):
     _CHROME_LAUNCH_ARGS += ["--no-sandbox", "--disable-gpu"]
 
 _stealth_warned = False
+
+_CHROME_VERSION_RE = re.compile(r'Chrome/(\d+)\.\d+\.\d+\.\d+')
+
+# UNMASKED_VENDOR_WEBGL / UNMASKED_RENDERER_WEBGL enum values of WEBGL_debug_renderer_info
+_WEBGL_SPOOF_JS = """(() => {
+  const vendor = %s, renderer = %s;
+  for (const proto of [WebGLRenderingContext.prototype, WebGL2RenderingContext.prototype]) {
+    proto.getParameter = new Proxy(proto.getParameter, {
+      apply(target, self, args) {
+        if (args[0] === 37445) return vendor;
+        if (args[0] === 37446) return renderer;
+        return Reflect.apply(target, self, args);
+      },
+    });
+  }
+})();"""
+
+# navigator.languages as headful Chrome reports it (["en-US", "en"]); Playwright's locale option alone yields just ["en-US"]
+_LANGUAGES_JS = "Object.defineProperty(Object.getPrototypeOf(navigator), 'languages', {get: () => Object.freeze(%s), configurable: true});"
+
+def _normalize_user_agent(user_agent: str) -> str:
+    """
+    Makes a headless UA match what headful Chrome sends: drops the "Headless" marker and
+    applies Chrome's UA reduction (full build number -> "<major>.0.0.0"). The old headless
+    shell still sends the full build (149.0.7827.55) where a real browser sends 149.0.0.0.
+    """
+    return _CHROME_VERSION_RE.sub(lambda match: f"Chrome/{match.group(1)}.0.0.0", user_agent.replace("HeadlessChrome", "Chrome"))
 
 def _apply_stealth(page):
     """
@@ -47,11 +76,19 @@ def _apply_stealth(page):
             _safe_print("WARNING: tf-playwright-stealth not installed — running without stealth patches. Run: pip install -r requirements.txt")
         return
     try:
-        # navigator_user_agent/navigator_languages OFF: the package fakes them with a
-        # hardcoded Chrome 95 UA and en-US — an ancient UA is a louder bot signal than
-        # what it hides, and it would stomp the real-profile fingerprint the context
-        # was deliberately given (verified 2026-07-18 against tf-playwright-stealth 1.2.0).
-        stealth_sync(page, StealthConfig(navigator_user_agent=False, navigator_languages=False))
+        # navigator_user_agent/navigator_languages OFF: the package fakes the UA with a
+        # hardcoded Chrome 95 string — an ancient UA is a louder bot signal than what it
+        # hides, and it would stomp the real-profile fingerprint the context was deliberately
+        # given. Its languages patch ignores StealthConfig.languages and uses a randomly
+        # generated Accept-Language instead (seen: ["en-IO", "*"]) — also worse than nothing.
+        # Both verified against tf-playwright-stealth 1.2.0. Languages are set below from
+        # BROWSER_LOCALE instead, matching the context's locale / Accept-Language header.
+        # webgl_vendor OFF: the package's spoof is a random Mac/mobile GPU per run; the
+        # WEBGL_* config pair below replaces it with one stable, Windows-consistent identity.
+        stealth_sync(page, StealthConfig(navigator_user_agent=False, navigator_languages=False, webgl_vendor=False))
+        page.add_init_script(_LANGUAGES_JS % json.dumps([BROWSER_LOCALE, BROWSER_LOCALE.split("-")[0]]))
+        if WEBGL_VENDOR and WEBGL_RENDERER:
+            page.add_init_script(_WEBGL_SPOOF_JS % (json.dumps(WEBGL_VENDOR), json.dumps(WEBGL_RENDERER)))
     except Exception as e:
         if not _stealth_warned:
             _stealth_warned = True
