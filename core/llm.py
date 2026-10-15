@@ -25,7 +25,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 import env
-from config import GEMINI_MODELS, GEMINI_MAX_CONSECUTIVE_ERRORS
+from config import (
+    GEMINI_MODELS, GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_UNAVAILABLE_RETRIES, GEMINI_UNAVAILABLE_BACKOFF_S,
+)
 from prompts import get_apartment_prompt_improved
 from core.util import _safe_print, _with_retries
 from core.normalize import _clean_post_for_llm
@@ -115,11 +117,19 @@ def _ensure_ollama_running():
             continue
     _safe_print("\n    WARNING: Ollama did not become reachable within 10s.")
 
-def _advance_gemini_model():
+def _is_current_gemini_model(model: str) -> bool:
+    """True while `model` is still the chain's active entry. Caller must hold _gemini_lock."""
+    return _gemini_model_idx < len(GEMINI_MODELS) and GEMINI_MODELS[_gemini_model_idx] == model
+
+def _advance_gemini_model(failed_model: str):
     """Moves the chain pointer to the next model, resetting its error count. Runs
     Gemini fully exhausted (-> Ollama) once the pointer passes the last entry.
-    Caller must hold _gemini_lock."""
+    A no-op unless `failed_model` is still the active entry: concurrent threads that
+    all hit the same 429 would otherwise each advance the pointer and skip every
+    model after the failed one. Caller must hold _gemini_lock."""
     global _gemini_model_idx, GEMINI_ERROR_COUNT, GEMINI_EXHAUSTED
+    if not _is_current_gemini_model(failed_model):
+        return
     _gemini_model_idx += 1
     GEMINI_ERROR_COUNT = 0
     if _gemini_model_idx >= len(GEMINI_MODELS):
@@ -145,22 +155,32 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
                 model = GEMINI_MODELS[_gemini_model_idx]
             models_tried += 1
 
-            with _gemini_rate_lock:
-                now = time.time()
-                elapsed = now - _last_gemini_call
-                if elapsed < 4.0:
-                    time.sleep(4.0 - elapsed)
-                _last_gemini_call = time.time()
-
             try:
-                response = get_gemini_client().models.generate_content(
-                    model=model,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=ApartmentData,
-                    ),
-                )
+                for unavailable_attempt in range(GEMINI_UNAVAILABLE_RETRIES + 1):
+                    with _gemini_rate_lock:
+                        now = time.time()
+                        elapsed = now - _last_gemini_call
+                        if elapsed < 4.0:
+                            time.sleep(4.0 - elapsed)
+                        _last_gemini_call = time.time()
+
+                    try:
+                        response = get_gemini_client().models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=ApartmentData,
+                            ),
+                        )
+                        break
+                    except Exception as call_err:
+                        is_unavailable = "503" in str(call_err) or "UNAVAILABLE" in str(call_err)
+                        if not is_unavailable or unavailable_attempt >= GEMINI_UNAVAILABLE_RETRIES:
+                            raise
+                        # A 503 "high demand" is transient and usually clears within seconds — retry the
+                        # same model instead of sending this post to the much weaker Ollama fallback.
+                        time.sleep(GEMINI_UNAVAILABLE_BACKOFF_S * (unavailable_attempt + 1))
                 result = response.parsed.model_dump() if response.parsed else json.loads(response.text)
                 with _gemini_lock:
                     GEMINI_ERROR_COUNT = 0
@@ -168,23 +188,25 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
             except Exception as gemini_err:
                 error_msg = str(gemini_err)
                 if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                    _safe_print(f"\n    Gemini quota exhausted on '{model}'. Advancing to next model...")
+                    _safe_print(f"\n    Gemini quota exhausted on '{model}' ({error_msg[:300]}). Advancing to next model...")
                     with _gemini_lock:
-                        _advance_gemini_model()
+                        _advance_gemini_model(model)
                 elif "404" in error_msg or "NOT_FOUND" in error_msg:
                     _safe_print(f"\n    WARNING: Gemini model '{model}' not found ({error_msg}).")
                     _safe_print("    Advancing to next model — remove the dead entry from GEMINI_MODELS in config.py.")
                     with _gemini_lock:
-                        _advance_gemini_model()
+                        _advance_gemini_model(model)
                 else:
                     with _gemini_lock:
-                        GEMINI_ERROR_COUNT += 1
+                        # Errors from a model another thread already moved past don't count against the new one.
+                        if _is_current_gemini_model(model):
+                            GEMINI_ERROR_COUNT += 1
                         current_count = GEMINI_ERROR_COUNT
                     _safe_print(f"\n    WARNING: Gemini error on '{model}' ({error_msg}). Falling back to Ollama for this post...")
                     if current_count >= GEMINI_MAX_CONSECUTIVE_ERRORS:
                         _safe_print(f"\n    {current_count} consecutive errors on '{model}'. Advancing to next model...")
                         with _gemini_lock:
-                            _advance_gemini_model()
+                            _advance_gemini_model(model)
                     else:
                         break
 

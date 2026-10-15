@@ -92,6 +92,10 @@ EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
 GEMINI_MAX_CONSECUTIVE_ERRORS = 3
+# Same-model retries on a transient 503 "high demand" before it counts as an error, and the
+# base sleep between them (multiplied by the attempt number).
+GEMINI_UNAVAILABLE_RETRIES = 2
+GEMINI_UNAVAILABLE_BACKOFF_S = 5.0
 # Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 
