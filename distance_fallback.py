@@ -71,8 +71,8 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def estimate_straight_line_distance(address: str) -> tuple[str, int] | None:
-    """(distance_text, distance_meters) via free geocoding + calibrated
+def estimate_straight_line_distance(address: str) -> tuple[str, int, float, float] | None:
+    """(distance_text, distance_meters, lat, lon) via free geocoding + calibrated
     haversine, or None if the address couldn't be geocoded."""
     coords = nominatim_geocode(address)
     if not coords:
@@ -80,4 +80,4 @@ def estimate_straight_line_distance(address: str) -> tuple[str, int] | None:
     lat, lon = coords
     km = haversine_km(lat, lon, DESTINATION_LAT, DESTINATION_LON) * STRAIGHT_LINE_CALIBRATION_FACTOR
     meters = int(km * 1000)
-    return f"{km:.1f}", meters
+    return f"{km:.1f}", meters, lat, lon

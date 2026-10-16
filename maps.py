@@ -19,7 +19,7 @@ import env
 import storage
 import distance_fallback
 from config import (
-    DESTINATION_ADDRESS, GMAPS_MONTHLY_CAP, GMAPS_ON_CAP, GMAPS_TARGET_CITIES,
+    DESTINATION_ADDRESS, GMAPS_ENABLED, GMAPS_MONTHLY_CAP, GMAPS_ON_CAP, GMAPS_TARGET_CITIES,
     GMAPS_VALIDATE_ADDRESSES, GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, EXCLUDE_SOUTH_OF_LAT,
     FOCUS_NEIGHBORHOODS_TEL_AVIV,
 )
@@ -165,6 +165,8 @@ _gmaps_cap_notice_printed = False
 
 def _handle_gmaps_cap_if_needed() -> tuple[bool, str]:
     global _gmaps_cap_notice_printed
+    if not GMAPS_ENABLED:
+        return True, "Google Maps כבוי"
     if storage.get_gmaps_usage() < GMAPS_MONTHLY_CAP:
         return False, ""
 
@@ -319,8 +321,14 @@ def get_walking_distance(address: str):
     if over_cap:
         fallback = distance_fallback.estimate_straight_line_distance(canonical_address or address)
         if fallback:
-            fallback_text, fallback_meters = fallback
-            fallback_warning = "הערכה קווית (מכסת Google הסתיימה)"
+            fallback_text, fallback_meters, fallback_lat, fallback_lon = fallback
+            lat = lat if lat is not None else fallback_lat
+            lon = lon if lon is not None else fallback_lon
+            if EXCLUDE_SOUTH_OF_LAT is not None and lat < EXCLUDE_SOUTH_OF_LAT:
+                south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
+                storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
+                return "", 999999, confidence, south_warning, "excluded_south", lat, lon
+            fallback_warning = "הערכה קווית (Google כבוי או מכסה הסתיימה)"
             storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status, lat, lon)
             return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate", lat, lon
         storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status, lat, lon)

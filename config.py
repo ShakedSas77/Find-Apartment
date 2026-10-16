@@ -131,6 +131,10 @@ GMAPS_VALIDATE_ADDRESSES = True
 # True = don't waste Distance Matrix calls on a city-only or weak address.
 GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS = True
 
+# False = never call Google (billing off): geocoding and distance both use the free
+# Nominatim + calibrated straight-line estimate in distance_fallback.py instead.
+GMAPS_ENABLED = False
+
 # Monthly Distance Matrix call quota (safety margin below the free tier's ~10,000 elements/month).
 # Over the cap -> behavior per GMAPS_ON_CAP. The counter resets itself every month (keyed by YYYY-MM).
 GMAPS_MONTHLY_CAP = 9000
