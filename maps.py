@@ -166,7 +166,7 @@ _gmaps_cap_notice_printed = False
 def _handle_gmaps_cap_if_needed() -> tuple[bool, str]:
     global _gmaps_cap_notice_printed
     if not GMAPS_ENABLED:
-        return True, "Google Maps כבוי"
+        return True, ""
     if storage.get_gmaps_usage() < GMAPS_MONTHLY_CAP:
         return False, ""
 
