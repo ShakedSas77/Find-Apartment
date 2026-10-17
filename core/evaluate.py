@@ -17,7 +17,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS,
 )
 from core.util import _safe_print, _sheet_lock, timed
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
@@ -30,6 +30,8 @@ from core.normalize import (
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
+
+_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 # distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
 # rejection on. "straight_line_estimate" (distance_fallback.py, used only once
@@ -289,7 +291,7 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             pending_seen_urls.add(post_url)
             pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
             if pending_telegram is not None:
-                pending_telegram.append((post_url, dict(fields), new_row[-1]))
+                pending_telegram.append((post_url, dict(fields), new_row[_SCORE_COL_INDEX]))
             with local_lock:
                 stats["added"] += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"

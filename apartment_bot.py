@@ -78,7 +78,7 @@ def reparse_rejected_posts():
             print(f"    SUCCESS: Apartment added: {fields['rooms_val']} rooms | {price_display} | Address: {fields['address']}")
             if TELEGRAM_ENABLED:
                 try:
-                    telegram_notifier.send_listing_alert(url, fields, new_row[-1])
+                    telegram_notifier.send_listing_alert(url, fields, new_row[_SCORE_COL_INDEX])
                 except Exception as e:
                     print(f"    WARNING: Telegram alert failed for {url}: {e}")
         except Exception as e:
