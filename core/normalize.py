@@ -243,7 +243,10 @@ def _clean_post_for_llm(raw_text: str) -> str:
 
 _NOT_AGENT_RE = re.compile(r'ללא\s+תיווך|לא\s+מתיווך|בלי\s+תיווך|לא\s+תיווך')
 
-_AGENT_SIGNAL_RE = re.compile(r'תיווך|נדל["״]?ן')
+# Beyond the words themselves: agency-only wording and tools. "בלעדיות" (an exclusive listing) appeared in
+# 302 stored posts that never say תיווך/נדל"ן; a go.yaeli.ai booking link marked a realtor post the LLM left
+# as unknown (2026-11-07). "בלעדי/ת" alone is deliberately absent — "חניה בלעדית" is private parking.
+_AGENT_SIGNAL_RE = re.compile(r'תיווך|נדל["״]?ן|בלעדיות|ניהול נכסים|נכסים נוספים|go\.yaeli\.ai')
 
 def _detect_agent(text: str, llm_is_agent):
     """

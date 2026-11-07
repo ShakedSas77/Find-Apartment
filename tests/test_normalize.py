@@ -241,3 +241,15 @@ def test_address_key_without_a_house_number_keeps_its_words():
 
 def test_room_count_in_the_address_field_is_not_taken_as_a_house_number():
     assert _normalize_address_key("דירת 3.5 חדרים, רמת גן") != _normalize_address_key("דירת 3 חדרים, רמת גן")
+
+
+def test_exclusive_listing_wording_marks_an_agent():
+    assert _detect_agent("דירת 3 חדרים להשכרה בבלעדיות, 6,000 ש\"ח", None) is True
+
+
+def test_a_realtor_booking_link_marks_an_agent():
+    assert _detect_agent("לפרטים ותיאום ביקור בדירה https://go.yaeli.ai/i/cqqzNw", None) is True
+
+
+def test_private_parking_is_not_an_agent_signal():
+    assert _detect_agent("דירת 3 חדרים עם חניה בלעדית", None) is None
