@@ -43,7 +43,8 @@ GEMINI_MODELS = [
 # Local fallback once the whole free chain above is exhausted. Pick it by measurement: pull a candidate
 # (`ollama pull aya-expanse:8b`) and compare with `python apartment_bot.py --eval --ollama-model <name>`.
 # RTX 2060 (6 GB VRAM): models up to ~8B at 4-bit run fully on the GPU; 12-14B ones split with RAM (slower).
-OLLAMA_MODEL = "qwen2.5:7b"
+# --eval 2026-11-07: aya-expanse:8b 39/42 (93%) at 10.0s/post beat qwen2.5:7b 38/42 (90%) at 10.9s/post.
+OLLAMA_MODEL = "aya-expanse:8b"
 
 # ─── Target locations ────────────────────────────────────────────────────────────
 # Facebook groups to scan — placeholder examples, replace with groups you're a member of
