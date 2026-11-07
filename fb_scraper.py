@@ -2,7 +2,7 @@
 === Facebook group scraper ===
 
 run_scraper() is the public entry point: logs in (manual on first run,
-persisted via chrome_profile/), scans TARGET_URLS (parallel or sequential
+persisted via chrome_profile/), scans the Groups tab's active groups (parallel or sequential
 per MAX_CONCURRENT_GROUPS), and feeds every candidate post through
 core.evaluate.process_candidate_listing. Checkpoint/CAPTCHA handling, dead-
 link pruning, article selectors, and the "See more" expansion logic are all
@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 import storage
 import telegram_notifier
 from config import (
-    TARGET_URLS, SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
+    SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
     MIN_SCROLLS_BEFORE_EARLY_STOP, GROUP_YIELD_SCALING, GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_POOR_RATE,
     GROUP_YIELD_RICH_RATE, GROUP_YIELD_MIN_SCROLLS,
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
@@ -41,6 +41,7 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
+from groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
 from graphql_capture import GraphqlPostCapture, compare_with_dom
 import run_log
 from sheets import (
@@ -714,7 +715,7 @@ def _print_gmaps_quota_status():
         print(f"WARNING: Google Maps usage is at {usage}/{GMAPS_MONTHLY_CAP} ({usage / GMAPS_MONTHLY_CAP:.0%}) of the monthly cap.")
 
 def _make_group_label(index: int, total: int, url: str) -> str:
-    # Order is shuffled every run, so "Group 5/33" alone can't be traced back to TARGET_URLS.
+    # Order is shuffled every run, so "Group 5/33" alone can't be traced back to the Groups tab.
     group_id = url.rstrip("/").rsplit("/", 1)[-1]
     return f"Group {index}/{total} {group_id}"
 
@@ -759,7 +760,10 @@ def run_scraper(headless: bool = False, live: bool = False):
     profile_dir = os.path.join(os.getcwd(), "chrome_profile")
     storage_state_path = os.path.join(profile_dir, "_session_state.json")
 
-    shuffled_urls = random.sample(TARGET_URLS, len(TARGET_URLS))
+    # The sheet's Groups tab decides which groups to scan (groups_sync.py); a dry run only reads it.
+    group_urls = sync_groups(sheet.spreadsheet, write=live)
+    print(f"Groups to scan: {len(group_urls)} active in the '{GROUPS_TAB_NAME}' tab.")
+    shuffled_urls = random.sample(group_urls, len(group_urls))
     total = len(shuffled_urls)
     if live and TELEGRAM_ENABLED:
         try:
@@ -920,6 +924,9 @@ def run_scraper(headless: bool = False, live: bool = False):
         pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
         if pruned:
             print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+
+        # Refresh the Groups tab: names/cities just learned from page titles, and this run's stats.
+        sync_groups(sheet.spreadsheet, write=True)
 
         try:
             backup_if_stale()

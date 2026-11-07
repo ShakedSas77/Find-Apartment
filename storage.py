@@ -125,6 +125,17 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                url TEXT PRIMARY KEY,
+                name TEXT,
+                cities TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                notes TEXT,
+                position INTEGER,
+                synced_at TEXT
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS runs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT,
@@ -748,3 +759,47 @@ def get_recent_prefiltered(days: int) -> list[dict]:
             (VERDICT_PREFILTERED, cutoff),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def replace_groups(groups: list[dict]):
+    """Mirrors the sheet's Groups tab: the table becomes exactly `groups` (url, name, cities, active,
+    notes), in sheet order. A group removed from the tab is removed here too; its posts and stats stay."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM groups")
+        conn.executemany(
+            "INSERT INTO groups (url, name, cities, active, notes, position, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(g["url"], g.get("name", ""), g.get("cities", ""), 1 if g.get("active", True) else 0,
+              g.get("notes", ""), i, now) for i, g in enumerate(groups)],
+        )
+
+
+def get_groups() -> list[dict]:
+    """The local mirror of the Groups tab, in sheet order — the fallback when the sheet can't be read."""
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT url, name, cities, active, notes FROM groups ORDER BY position").fetchall()
+    return [dict(row, active=bool(row["active"])) for row in rows]
+
+
+def get_group_overview() -> dict[str, dict]:
+    """group_url -> {name, cities, posts, added, last_added, last_scanned} from what scans have recorded:
+    the FB page title and inferred cities (group_city_hints), post/match counts, and scan baselines."""
+    with _lock, _connect() as conn:
+        hints = conn.execute("SELECT group_url, group_name, cities_json FROM group_city_hints").fetchall()
+        counts = conn.execute(
+            "SELECT group_url, COUNT(*) AS posts, SUM(verdict = ?) AS added, "
+            "MAX(CASE WHEN verdict = ? THEN last_processed END) AS last_added "
+            "FROM posts WHERE group_url IS NOT NULL AND group_url != '' GROUP BY group_url",
+            (VERDICT_ADDED, VERDICT_ADDED),
+        ).fetchall()
+        scans = conn.execute("SELECT group_url, last_scanned_at FROM group_scan_state").fetchall()
+    overview: dict[str, dict] = {}
+    for row in hints:
+        overview.setdefault(row["group_url"], {}).update(
+            name=row["group_name"] or "", cities=json.loads(row["cities_json"]) if row["cities_json"] else [])
+    for row in counts:
+        overview.setdefault(row["group_url"], {}).update(
+            posts=row["posts"], added=row["added"] or 0, last_added=row["last_added"])
+    for row in scans:
+        overview.setdefault(row["group_url"], {})["last_scanned"] = row["last_scanned_at"]
+    return overview

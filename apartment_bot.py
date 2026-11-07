@@ -6,7 +6,6 @@ import time
 import traceback
 
 from config import (
-    TARGET_URLS,
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS, ROOMS_PRE_FILTER_REGEX,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
@@ -23,6 +22,7 @@ from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet
 from fb_scraper import run_scraper
 from mail_source import dump_alert_emails
 from run_log import start_run_log
+from groups_sync import sync_groups
 from llm_eval import run_eval
 import env
 import scoring
@@ -176,7 +176,7 @@ def print_stats():
         for group_url, verdict_counts in sorted(group_stats.items()):
             added = verdict_counts.get(storage.VERDICT_ADDED, 0)
             total = sum(verdict_counts.values())
-            flag = "   <- 0 matches, candidate to drop from TARGET_URLS" if added == 0 else ""
+            flag = "   <- 0 matches, candidate to pause in the Groups tab" if added == 0 else ""
             print(f"  {group_url}   {added:>3} | {total:>4}{flag}")
 
     top_locations = storage.top_excluded_locations()
@@ -338,6 +338,8 @@ if __name__ == "__main__":
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
     parser.add_argument("--backfill-ratings", action="store_true",
                          help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
+    parser.add_argument("--sync-groups", action="store_true",
+                         help="Sync the sheet's Groups tab with the local DB (fill names/cities, refresh stats), then exit")
     parser.add_argument("--eval", action="store_true",
                          help="Score the LLM's extraction of test_posts/*.txt against test_posts/expected.json (one LLM call per fixture), then exit")
     parser.add_argument("--ollama-model", metavar="NAME",
@@ -373,6 +375,12 @@ if __name__ == "__main__":
         backfill_ratings()
         sys.exit(0)
 
+    if args.sync_groups:
+        sheet, _ = setup_google_sheet()
+        active = sync_groups(sheet.spreadsheet, write=True)
+        print(f"Groups tab synced: {len(active)} active group(s) of {len(storage.get_groups())}.")
+        sys.exit(0)
+
     if args.eval:
         run_eval(ollama_model=args.ollama_model)
         sys.exit(0)
@@ -386,7 +394,7 @@ if __name__ == "__main__":
     print("\n=======================================================")
     print("  Apartment Search Bot - Real-time updates")
     print("=======================================================")
-    print(f"  Groups:      {len(TARGET_URLS)}")
+    print("  Groups:      from the sheet's Groups tab")
     print(f"  Areas (info): {', '.join(LOCATIONS)}")
     print(f"  Price range: ₪{MIN_PRICE:,} – ₪{MAX_PRICE:,}")
     print(f"  Distance to: {DESTINATION_ADDRESS}")

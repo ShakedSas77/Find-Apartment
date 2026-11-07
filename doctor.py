@@ -66,9 +66,19 @@ def _check_config_local():
         "https://www.facebook.com/groups/000000000000002",
         "https://www.facebook.com/groups/000000000000003",
     ]
+    # The sheet's Groups tab (mirrored in the DB's groups table) is the group list; TARGET_URLS only seeds it.
+    try:
+        storage.init_db()
+        groups = storage.get_groups()
+    except Exception:
+        groups = []
+    if groups:
+        active = sum(g["active"] for g in groups)
+        return ("groups", PASS, f"{active} active of {len(groups)} in the Groups tab (last sync)", "")
     if config.TARGET_URLS == placeholder:
-        return ("config_local.py", FAIL, "TARGET_URLS still the placeholder", "add your real FB group URLs to config_local.py")
-    return ("config_local.py", PASS, f"{len(config.TARGET_URLS)} group URL(s) configured", "")
+        return ("groups", FAIL, "no groups: Groups tab never synced and TARGET_URLS is the placeholder",
+                "add group links to the sheet's Groups tab, then run `python apartment_bot.py --sync-groups`")
+    return ("groups", PASS, f"{len(config.TARGET_URLS)} group URL(s) in config_local.py (seed the Groups tab with --sync-groups)", "")
 
 
 def _check_db():
