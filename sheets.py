@@ -57,7 +57,11 @@ def setup_google_sheet():
 def _append_rows_batch(sheet, rows: list[list]):
     if not rows:
         return
-    _with_retries(lambda: sheet.append_rows(rows, value_input_option="USER_ENTERED"))
+    # Anchored at A1: without table_range, Sheets guesses the "table" itself, and a manual
+    # note past the last header column (e.g. column S) made it append every row starting at
+    # that column — column A (URL) came out empty, and dedupe_and_sort_sheet then merged all
+    # those URL-less rows into one, silently deleting them.
+    _with_retries(lambda: sheet.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1"))
 
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
@@ -78,14 +82,18 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         return 0, 0, len(data) - 1 if data else 0
     rows = data[1:]
 
+    # URL-less rows (a manual entry, or a row misaligned by a bad append) are kept untouched:
+    # without a URL there's nothing reliable to dedupe them on, and _listing_key's weak-address
+    # fallback ("url", "") would give every one of them the same key and merge them all into one.
+    url_less_rows = [row for row in rows if not (row and row[0])]
+
     best_by_url = {}
     for row in rows:
         url = row[0] if row else ""
-        existing = best_by_url.get(url)
         if not url:
-            key = f"empty-url-{len(best_by_url)}"
-            best_by_url[key] = row
-        elif existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
+            continue
+        existing = best_by_url.get(url)
+        if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_url[url] = row
 
     db_data = storage.get_added_listing_data()
@@ -96,7 +104,7 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_key[key] = row
 
-    deduped_rows = list(best_by_key.values())
+    deduped_rows = list(best_by_key.values()) + url_less_rows
     duplicates_removed = len(rows) - len(deduped_rows)
 
     # A later crosspost's more specific address (e.g. a corner qualifier) may

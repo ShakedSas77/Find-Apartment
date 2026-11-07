@@ -296,7 +296,7 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
                 stats["added"] += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
             prefix = "SUCCESS" if live else "DRY RUN"
-            verb = "queued" if live else "would queue (pass --live to commit)"
+            verb = "queued" if live else "would queue (rerun without --dry-run to commit)"
             _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
         else:
             _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")

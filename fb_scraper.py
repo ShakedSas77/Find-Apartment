@@ -106,7 +106,7 @@ def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
         return 0
 
     if not live:
-        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Pass --live to commit.")
+        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Rerun without --dry-run to commit.")
         return len(dead_indices)
 
     keep_rows = [row for i, row in enumerate(rows) if i not in dead_indices]
@@ -313,7 +313,7 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
             if not already_flagged:
                 _safe_print(f"\n[{group_label}] Facebook is asking for a password, 2FA, or CAPTCHA security check. "
                             f"Cannot solve this in --headless mode. Screenshot saved to {screenshot_path}. "
-                            f"Rerun without --headless to resolve it manually.")
+                            f"Rerun with --headful to resolve it manually.")
             raise HeadlessCheckpointAbort()
 
         is_leader = False
@@ -584,7 +584,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                     _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
                     stats["added"] -= len(pending_rows)
         elif pending_rows:
-            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
+            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — rerun without --dry-run to commit).")
 
         # A dry run commits nothing, so it must not move the baseline either: a would-be match it
         # printed but never recorded would then read as older than last_scan_time on the next live run.
@@ -612,7 +612,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
         with _checkpoint_lock:
             already_hit = _headless_checkpoint_hit
         if already_hit:
-            _safe_print(f"    [{group_label}] Skipping: a security checkpoint was already hit in another group (headless mode). Rerun without --headless.")
+            _safe_print(f"    [{group_label}] Skipping: a security checkpoint was already hit in another group (headless mode). Rerun with --headful.")
             return {"added": 0, "checkpoint_hit": True, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
 
     with sync_playwright() as p:
@@ -658,7 +658,7 @@ def _make_group_label(index: int, total: int, url: str) -> str:
 
 def run_scraper(headless: bool = False, live: bool = False):
     if not live:
-        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
+        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
     run_started = time.perf_counter()
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
@@ -715,7 +715,7 @@ def run_scraper(headless: bool = False, live: bool = False):
 
         if headless:
             if _is_visible(page.locator('input[name="email"]')):
-                print("ERROR: Cannot login manually in headless mode. Please run without --headless first.")
+                print("ERROR: Cannot login manually in headless mode. Please run with --headful first.")
                 context.close()
                 sys.exit(1)
         else:
@@ -832,7 +832,7 @@ def run_scraper(headless: bool = False, live: bool = False):
         except Exception as e:
             print(f"WARNING: DB backup failed: {e}")
     else:
-        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
+        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (rerun without --dry-run to commit).")
 
     if live and TELEGRAM_ENABLED:
         try:

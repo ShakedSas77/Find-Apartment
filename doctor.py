@@ -55,7 +55,7 @@ def _check_credentials_file():
 def _check_chrome_profile():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
     if not os.path.isdir(path):
-        return ("chrome_profile/", WARN, "not created yet", "created automatically on the first `--live` run (manual FB login)")
+        return ("chrome_profile/", WARN, "not created yet", "created automatically on the first `--headful` run (manual FB login)")
     return ("chrome_profile/", PASS, "present", "")
 
 

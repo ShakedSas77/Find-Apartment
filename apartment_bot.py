@@ -70,7 +70,7 @@ def reparse_rejected_posts():
             print(f"    Still rejected_distance: {url}")
             continue
         try:
-            _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED"))
+            _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED", table_range="A1"))
             seen_urls.add(url)
             storage.record_post(url, group_url, text, storage.VERDICT_ADDED, data, analysis=_analysis_from_fields(fields, post_date))
             added += 1
@@ -139,7 +139,7 @@ def replay_all_posts():
 
     print(f"\nDone. {len(changed)} verdict(s) changed out of {len(posts)} stored posts "
           f"({skipped_no_text} skipped: raw_text pruned). Nothing was written — "
-          f"re-run the real scraper (--live) to actually commit any newly-matching posts.")
+          f"re-run the real scraper (live is the default) to actually commit any newly-matching posts.")
     return changed
 
 def print_stats():
@@ -303,10 +303,16 @@ def prune_data():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
-    parser.add_argument("--headless", action="store_true", help="Run without UI")
-    parser.add_argument("--live", action="store_true",
-                         help="Commit results: write matches to Google Sheets, record verdicts, dedupe/prune. "
-                              "Default is dry-run (classify + print only, nothing written).")
+    parser.add_argument("--headful", dest="headless", action="store_false",
+                         help="Show the browser window (needed for the first FB login or solving a checkpoint). "
+                              "Default is headless.")
+    parser.add_argument("--dry-run", dest="live", action="store_false",
+                         help="Classify + print only: no sheet writes, no added verdicts, no dedupe/prune. "
+                              "Default is live (commit results).")
+    # Former opt-in flags, now the defaults — still accepted so existing scripts/tasks keep working.
+    parser.add_argument("--headless", dest="headless", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--live", dest="live", action="store_true", help=argparse.SUPPRESS)
+    parser.set_defaults(headless=True, live=True)
     parser.add_argument("--reparse-rejected", action="store_true",
                          help="Re-run LLM + filters on stored rejected/failed posts, no browser")
     parser.add_argument("--replay", action="store_true",
