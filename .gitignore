@@ -16,6 +16,7 @@ yad2_*.png
 yad2_*.html
 /test_*.py
 logs/
+alert_dumps/
 
 .idea/
 # Local Claude Code state stays private; the project's domain-notes skills are shared docs.

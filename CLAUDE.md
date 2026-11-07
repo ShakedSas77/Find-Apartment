@@ -14,6 +14,9 @@ python apartment_bot.py
 # or
 run_bot.bat
 
+# Save recent saved-search alert emails as text (read-only IMAP, no browser, no writes)
+python apartment_bot.py --mail-dump
+
 # Dry run (--dry-run): classifies and prints only — no sheet writes,
 # no verdict recorded for matches, no dedupe/prune. Safe way to try a
 # prompt/filter/config change against real Facebook before committing.
@@ -59,6 +62,7 @@ python bot_listener.py
 | `prompts.py` | `get_apartment_prompt_improved(text)` — dispatches to `get_apartment_prompt_english()` or `get_apartment_prompt_hebrew()` per `config.PROMPT_LANGUAGE` |
 | `storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
 | `scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
+| `mail_source.py` | Second listing source, in progress: sites' own saved-search alert emails (Yad2, ...) from a Gmail label over **read-only** IMAP (`select(readonly=True)` + `BODY.PEEK`, never marks/moves/deletes mail). Step 1 only: `--mail-dump` saves each email's text to `ALERTS_DUMP_DIR` (gitignored) so the per-listing split can be written against real emails; not yet wired into `run_scraper()`. The legitimate replacement for the removed Madlan API source (bot-protection 403) |
 | `distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used only when `GMAPS_MONTHLY_CAP` is hit |
 | `telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
 | `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps, records them, updates the tally shown on the message |
@@ -66,7 +70,7 @@ python bot_listener.py
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
 | `credentials.json` | Google Service Account key (gitignored) |
-| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) — all gitignored |
+| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) ; `ALERTS_IMAP_USER`/`ALERTS_IMAP_PASSWORD` (a Gmail **app password**)/`ALERTS_IMAP_FOLDER` (optional, for `mail_source.py`) — all gitignored |
 | `chrome_profile/` | Playwright persistent context — holds FB login session cookie |
 
 ## Data Flow

@@ -8,7 +8,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
-    TELEGRAM_ENABLED, SHEET_HEADERS,
+    TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR,
 )
 from core.util import _with_retries
 from core.normalize import BIDI_RE, _strip_comment_section
@@ -19,6 +19,7 @@ from core.evaluate import (
 )
 from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from fb_scraper import run_scraper
+from mail_source import dump_alert_emails
 import env
 import scoring
 import storage
@@ -280,6 +281,8 @@ if __name__ == "__main__":
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
     parser.add_argument("--backfill-ratings", action="store_true",
                          help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
+    parser.add_argument("--mail-dump", action="store_true",
+                         help="Save recent saved-search alert emails (read-only IMAP) as text files in ALERTS_DUMP_DIR, then exit")
     args = parser.parse_args()
 
     env.require_env()
@@ -307,6 +310,11 @@ if __name__ == "__main__":
 
     if args.backfill_ratings:
         backfill_ratings()
+        sys.exit(0)
+
+    if args.mail_dump:
+        written = dump_alert_emails()
+        print(f"Saved {written} alert email(s) from the last {ALERTS_LOOKBACK_DAYS} day(s) to {ALERTS_DUMP_DIR}/.")
         sys.exit(0)
 
     print("\n=======================================================")

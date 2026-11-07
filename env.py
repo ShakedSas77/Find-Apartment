@@ -26,7 +26,12 @@ def get_sheet_id() -> str | None:
     return os.getenv("SHEET_ID")
 
 
-_REQUIRED =("GEMINI_API_KEY", "GMAPS_API_KEY", "SHEET_ID")
+def get_alerts_imap_credentials() -> tuple[str | None, str | None, str]:
+    """(user, app password, folder) for the read-only alert-email mailbox; folder defaults to INBOX."""
+    return os.getenv("ALERTS_IMAP_USER"), os.getenv("ALERTS_IMAP_PASSWORD"), os.getenv("ALERTS_IMAP_FOLDER") or "INBOX"
+
+
+_REQUIRED = ("GEMINI_API_KEY", "GMAPS_API_KEY", "SHEET_ID")
 
 
 def require_env() -> None:

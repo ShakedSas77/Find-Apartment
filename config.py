@@ -204,6 +204,15 @@ WEBGL_RENDERER = None
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
 
+# ─── Alert emails (second listing source) ──────────────────────────────────────
+# Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP
+# by mail_source.py. Credentials live in .env (ALERTS_IMAP_USER/PASSWORD/FOLDER).
+ALERTS_IMAP_HOST = "imap.gmail.com"
+# How far back each run looks for alert emails.
+ALERTS_LOOKBACK_DAYS = 2
+# Where `--mail-dump` writes each email's extracted text (gitignored — it holds listing contact details).
+ALERTS_DUMP_DIR = "alert_dumps"
+
 # ─── Concurrency ────────────────────────────────────────────────────────────────
 # How many groups scan simultaneously. Higher = faster, but also higher risk of a
 # block/CAPTCHA: parallel mode (>1) opens a separate browser+context per group with
