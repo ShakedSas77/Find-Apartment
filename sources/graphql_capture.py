@@ -71,7 +71,6 @@ def parse_graphql_body(body: str) -> dict[str, dict]:
 
 
 def _post_nodes(obj):
-    """Every dict carrying a numeric post_id, outermost first."""
     if isinstance(obj, dict):
         post_id = obj.get("post_id")
         if isinstance(post_id, (str, int)) and str(post_id).isdigit():
@@ -84,8 +83,8 @@ def _post_nodes(obj):
 
 
 def _children(node: dict, root: dict):
-    """Values to descend into from `node` while searching `root`'s own fields: skips comment/feedback
-    subtrees and any nested post (a shared original is its own post_id)."""
+    # A shared original is its own post_id, so nested posts are skipped along with comment/feedback
+    # subtrees.
     for key, value in node.items():
         if any(part in key.lower() for part in _SKIP_KEY_PARTS):
             continue

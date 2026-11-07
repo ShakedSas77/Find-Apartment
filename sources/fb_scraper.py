@@ -11,7 +11,6 @@ FB-DOM-specific and live here rather than in a shared module.
 import os
 import random
 import re
-import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -33,7 +32,7 @@ from config import (
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
 from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
-from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
+from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort, LoginRequired
 from core.normalize import (
     BIDI_RE, _strip_comment_section, relative_to_date, _infer_post_date,
     _extract_candidate_cities, _is_recognized_fb_date_text,
@@ -177,7 +176,6 @@ _POST_BODY_SELECTORS = (
 _MIN_POST_BODY_CHARS = 20
 
 def _read_post_text(article) -> str:
-    """The post body's text when FB marks it, else the whole article's text (the pre-2026-11-07 behaviour)."""
     for selector in _POST_BODY_SELECTORS:
         try:
             parts = [el.inner_text().strip() for el in article.locator(selector).all()]
@@ -189,10 +187,8 @@ def _read_post_text(article) -> str:
     return article.inner_text().strip()
 
 def _wait_for_text_growth(article, before_len: int) -> str:
-    """Bounded poll after a "See more" click: re-reads the post text at short
-    intervals up to a ceiling, returning as soon as text visibly grows, instead of
-    always sleeping the full fixed duration. Local DOM re-checks only — no extra
-    requests to Facebook. Best-effort: returns the last successfully read text."""
+    # Polls instead of always sleeping a fixed time after a "See more" click; local DOM re-reads
+    # only, no extra requests to Facebook.
     text = ""
     elapsed = 0
     while elapsed < SEE_MORE_SETTLE_MAX_MS:
@@ -372,13 +368,10 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
             pass
 
 def _is_before_cutoff(post_dt: datetime, cutoff: datetime) -> bool:
-    """
-    Post dates are day-only (DD/MM -> midnight), while the cutoff is usually the exact time of the
-    group's last scan — comparing them as datetimes made every post from the cutoff's own day look
-    older than it (posted 11:00, last scan 09:00 -> "00:00 < 09:00"). Found 2026-11-07: 1,648 of
-    2,322 "older than the scan cutoff" rejects were posted the same day they were seen. So compare
-    calendar days only: a same-day post is never treated as already covered.
-    """
+    # Post dates are day-only (DD/MM -> midnight) while the cutoff is usually the exact time of the
+    # group's last scan, so a datetime compare made every post from the cutoff's own day look older
+    # (posted 11:00, last scan 09:00 -> "00:00 < 09:00"). Found 2026-11-07: 1,648 of 2,322 "older
+    # than the scan cutoff" rejects were posted the same day they were seen.
     return post_dt.date() < cutoff.date()
 
 def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, cutoff: datetime) -> int:
@@ -396,9 +389,6 @@ def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, c
     return current
 
 def _yield_scaled_scroll_cap(added: int, total: int, full_cap: int) -> int:
-    """Scroll cap for a group from its measured match rate: GROUP_YIELD_MIN_SCROLLS at or below
-    GROUP_YIELD_POOR_RATE, full_cap at or above GROUP_YIELD_RICH_RATE, linear between. A group
-    with less than GROUP_YIELD_MIN_HISTORY posts of history keeps full_cap."""
     if total < GROUP_YIELD_MIN_HISTORY:
         return full_cap
     rate = added / total
@@ -662,8 +652,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
     return stats
 
 def _report_graphql_capture(graphql: GraphqlPostCapture, harvested: dict, group_label: str):
-    """Observational only: how well the passive GraphQL capture lines up with the DOM scan, so it can
-    be trusted (or not) before any post data is taken from it. Never affects the scan."""
+    # Observational only: the evidence for trusting the capture before any post data is taken
+    # from it. Never affects the scan.
     try:
         s = compare_with_dom(harvested, graphql.collect(), _infer_post_date)
     except Exception as e:
@@ -733,14 +723,9 @@ def _make_group_label(index: int, total: int, url: str) -> str:
     return f"Group {index}/{total} {group_id}"
 
 def _resend_owed_alerts(sheet) -> int:
-    """
-    Re-sends Telegram alerts for recently added listings whose send failed. The
-    batch flush appends to the sheet and records VERDICT_ADDED before sending, so
-    a Telegram/network failure there used to lose the alert for good — the post
-    is never rescanned. The message is rebuilt from the listing's sheet row (same
-    as --backfill-ratings); a listing no longer in the sheet (merged as a
-    cross-post, pruned, voted out) is skipped, not alerted.
-    """
+    # The batch flush records VERDICT_ADDED before sending, so a failed send used to lose the alert
+    # for good (the post is never rescanned). A listing no longer in the sheet (merged cross-post,
+    # pruned, voted out) is skipped, not alerted.
     owed = storage.get_owed_alert_urls(ALERT_RETRY_MAX_AGE_HOURS)
     if not owed:
         return 0
@@ -767,7 +752,8 @@ def run_scraper(headless: bool = False, live: bool = False):
     """
     One full scrape: pick the active groups from the sheet's Groups tab, log in, scan every group
     (sequentially in the real profile, or in parallel worker browsers), then do the end-of-run
-    upkeep. Returns the run's totals; apartment_bot.py turns them into the exit code.
+    upkeep. Returns the run's totals; apartment_bot.py turns them into the exit code. Raises
+    LoginRequired when Facebook's session is gone and can't be restored.
     """
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
@@ -782,8 +768,7 @@ def run_scraper(headless: bool = False, live: bool = False):
     group_urls = sync_groups(sheet.spreadsheet, write=live)
     print(f"Groups to scan: {len(group_urls)} active in the '{GROUPS_TAB_NAME}' tab.")
     shuffled_urls = random.sample(group_urls, len(group_urls))
-    totals = {"groups_scanned": 0, "total": len(shuffled_urls), "checkpoint_skipped": 0,
-              "total_added": 0, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
+    totals = _new_totals(len(shuffled_urls))
     if live and TELEGRAM_ENABLED:
         try:
             telegram_notifier.send_run_started(totals["total"])
@@ -795,18 +780,22 @@ def run_scraper(headless: bool = False, live: bool = False):
     # --- Login phase: single persistent-context tab, sequential ---
     with sync_playwright() as p:
         context = _launch_login_context(p, profile_dir, headless)
-        page = context.pages[0] if context.pages else context.new_page()
-        _apply_stealth(page)
-        _ensure_logged_in(page, context, headless)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            _apply_stealth(page)
+            _ensure_logged_in(page, headless)
 
-        if PRUNE_DEAD_LINKS_ENABLED:
-            _prune_dead_links(page, sheet, headless, live)
+            if PRUNE_DEAD_LINKS_ENABLED:
+                _prune_dead_links(page, sheet, headless, live)
 
-        if sequential_mode:
-            _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals)
+            if sequential_mode:
+                _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals)
+            else:
+                real_user_agent, real_locale = _export_session_for_workers(page, context, storage_state_path)
+        finally:
+            # Closed on every path — a failed storage_state() export, a lost login, or Ctrl+C mid-scan
+            # used to leave the login context to the sync_playwright teardown.
             _close_context(context)
-        else:
-            real_user_agent, real_locale = _export_session_for_workers(page, context, storage_state_path)
 
     if not sequential_mode:
         _scan_groups_in_parallel(shuffled_urls, sheet, seen_urls, storage_state_path, headless,
@@ -825,8 +814,13 @@ def run_scraper(headless: bool = False, live: bool = False):
     print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
     return totals
 
+def _new_totals(total_groups: int) -> dict:
+    # The one definition of the run-totals shape: run_scraper's return value, which
+    # apartment_bot.py records via storage.finish_run and turns into the exit code.
+    return {"groups_scanned": 0, "total": total_groups, "checkpoint_skipped": 0,
+            "total_added": 0, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
+
 def _launch_login_context(p, profile_dir: str, headless: bool):
-    """The persistent context on the real chrome_profile/ (holds the FB login)."""
     persistent_kwargs = {"locale": BROWSER_LOCALE}
     if headless:
         # Headless Chromium's UA says "HeadlessChrome" in both the HTTP header and
@@ -835,9 +829,10 @@ def _launch_login_context(p, profile_dir: str, headless: bool):
         # strip the "Headless" marker.
         try:
             probe = p.chromium.launch(headless=True)
-            probe_page = probe.new_page()
-            probe_ua = probe_page.evaluate("navigator.userAgent") or ""
-            probe.close()
+            try:
+                probe_ua = probe.new_page().evaluate("navigator.userAgent") or ""
+            finally:
+                probe.close()
             if "HeadlessChrome" in probe_ua:
                 persistent_kwargs["user_agent"] = _normalize_user_agent(probe_ua)
         except Exception:
@@ -851,8 +846,7 @@ def _launch_login_context(p, profile_dir: str, headless: bool):
         **persistent_kwargs
     )
 
-def _ensure_logged_in(page, context, headless: bool):
-    """Opens Facebook; headful waits for a manual login, headless exits if the session is gone."""
+def _ensure_logged_in(page, headless: bool):
     print("Opening Facebook...")
     page.goto("https://www.facebook.com", wait_until="domcontentloaded")
     page.wait_for_timeout(3000)
@@ -862,9 +856,7 @@ def _ensure_logged_in(page, context, headless: bool):
             print("Already logged into Facebook. Skipping manual login.")
         return
     if headless:
-        print("ERROR: Cannot login manually in headless mode. Please run with --headful first.")
-        context.close()
-        sys.exit(1)
+        raise LoginRequired("Cannot login manually in headless mode. Please run with --headful first.")
 
     print("\nPlease log in to Facebook manually in the browser window that just opened.\n")
     for _ in range(LOGIN_MAX_ATTEMPTS):
@@ -873,16 +865,14 @@ def _ensure_logged_in(page, context, headless: bool):
         if not _is_visible(page.locator('input[name="email"]')):
             return
         print("ERROR: Facebook login form is still visible. Please complete login first.")
-    print("ERROR: Login not completed after several attempts. Exiting.")
-    context.close()
-    sys.exit(1)
+    raise LoginRequired("Login not completed after several attempts.")
 
-def _scan_groups_sequentially(page, urls: list[str], sheet, seen_urls, headless: bool, live: bool, totals: dict):
-    """
-    Sequential mode: no storage_state at all — scans every group in sequence on the same page
-    inside the original context, to preserve the profile's real fingerprint. A headless checkpoint
-    stops the loop and counts the remaining groups as skipped too.
-    """
+def _scan_groups_sequentially(page, urls: list[str], sheet, seen_urls, headless: bool, live: bool, totals: dict,
+                              scan_group=None):
+    # No storage_state at all: every group is scanned on the same page inside the original
+    # context, to preserve the profile's real fingerprint. scan_group defaults to
+    # _scan_group_page (the browser-driving step); tests pass a stand-in.
+    scan_group = scan_group or _scan_group_page
     print("Sequential mode (MAX_CONCURRENT_GROUPS=1): scanning all groups one at a time in the original "
           "browser profile — safest against checkpoints, slowest. No session-state file is written.")
     total = len(urls)
@@ -891,24 +881,24 @@ def _scan_groups_sequentially(page, urls: list[str], sheet, seen_urls, headless:
             time.sleep(random.uniform(5, 15))
         label = _make_group_label(i, total, url)
         try:
-            stats = _scan_group_page(page, url, label, sheet, seen_urls, headless, live)
+            stats = scan_group(page, url, label, sheet, seen_urls, headless, live)
         except Exception as e:
             _safe_print(f"\nERROR: [{label}] crashed: {e}")
             continue
         _tally(totals, stats)
         if stats["checkpoint_hit"]:
+            # _tally already counted the group that hit the checkpoint; a headless checkpoint ends
+            # the whole sequential scan, so the groups never reached are skipped too.
             remaining = total - i
             totals["checkpoint_skipped"] += remaining
             _safe_print(f"Stopping sequential scan: {remaining} remaining group(s) also skipped due to the checkpoint.")
             break
 
 def _export_session_for_workers(page, context, storage_state_path: str) -> tuple[str, str]:
-    """
-    Parallel mode: captures the logged-in profile's fingerprint so worker browsers can present the
-    same one (see _scan_group) — "HeadlessChrome" is stripped so a headless run's workers still
-    claim the normal Chrome UA — and exports cookies/session to a file, since one context can't be
-    shared between threads (Playwright's sync API isn't thread-safe). Closes the login context.
-    """
+    # Parallel workers must present the logged-in profile's own fingerprint (see _scan_group);
+    # "HeadlessChrome" is stripped so a headless run's workers still claim the normal Chrome UA.
+    # Cookies/session go to a file because one context can't be shared between threads
+    # (Playwright's sync API isn't thread-safe).
     real_user_agent = ""
     real_locale = ""
     try:
@@ -917,29 +907,26 @@ def _export_session_for_workers(page, context, storage_state_path: str) -> tuple
     except Exception:
         pass
     context.storage_state(path=storage_state_path)
-    _close_context(context)
     return real_user_agent, real_locale
 
 def _scan_groups_in_parallel(urls: list[str], sheet, seen_urls, storage_state_path: str, headless: bool,
                              real_user_agent: str, real_locale: str, live: bool, totals: dict):
     print(f"Continuing to scan groups ({MAX_CONCURRENT_GROUPS} in parallel — this raises checkpoint/ban risk "
           f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
-    total = len(urls)
+    labels = {url: _make_group_label(idx, len(urls), url) for idx, url in enumerate(urls, 1)}
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS) as executor:
         futures = {
-            executor.submit(_scan_group, url, _make_group_label(idx, total, url), sheet, seen_urls, storage_state_path, headless,
-                            real_user_agent, real_locale, live): idx
-            for idx, url in enumerate(urls, 1)
+            executor.submit(_scan_group, url, label, sheet, seen_urls, storage_state_path, headless,
+                            real_user_agent, real_locale, live): label
+            for url, label in labels.items()
         }
         for future in as_completed(futures):
-            idx = futures[future]
             try:
                 _tally(totals, future.result())
             except Exception as e:
-                _safe_print(f"\nERROR: [{_make_group_label(idx, total, urls[idx - 1])}] crashed: {e}")
+                _safe_print(f"\nERROR: [{futures[future]}] crashed: {e}")
 
 def _tally(totals: dict, stats: dict):
-    """Adds one scanned group's stats (_scan_group_page's dict) into the run totals."""
     totals["groups_scanned"] += 1
     totals["total_added"] += stats["added"]
     totals["posts_seen"] += stats["posts_seen"]
@@ -963,7 +950,6 @@ def _print_run_summary(totals: dict, gmaps_calls_this_month: int):
         print(f"{totals['checkpoint_skipped']} group(s) skipped due to a security checkpoint — rerun headful.")
 
 def _end_of_run_upkeep(sheet):
-    """Live runs only: dedupe/sort the sheet, lighten old DB rows, refresh the Groups tab, back up the DB."""
     print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
     with timed("sheets"):
         duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)

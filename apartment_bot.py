@@ -12,6 +12,7 @@ from config import (
     TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
+from core.errors import LoginRequired
 from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
@@ -403,6 +404,11 @@ if __name__ == "__main__":
     run_id = storage.start_run("live" if args.live else "dry_run", str(run_log.path))
     try:
         result = run_scraper(headless=args.headless, live=args.live)
+    except LoginRequired as e:
+        print(f"ERROR: {e}")
+        storage.finish_run(run_id, "login_required", {}, run_log.warnings, run_log.errors)
+        print(run_log.summary())
+        sys.exit(1)
     except BaseException:
         traceback.print_exc()
         storage.finish_run(run_id, "crashed", {}, run_log.warnings, run_log.errors)

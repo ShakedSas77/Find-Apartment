@@ -170,9 +170,8 @@ def _maps_url(fields: dict) -> str | None:
 
 
 def _whatsapp_url(fields: dict) -> str | None:
-    """wa.me chat link to the poster's mobile number with a pre-filled Hebrew opener, or None when the
-    post had no mobile number. One tap from the alert to the landlord — the bot itself stays read-only
-    on Facebook and never messages anyone."""
+    # The bot stays read-only on Facebook and never messages anyone; this link hands the first
+    # message to the user, one tap from the alert.
     phone = fields.get("contact_phone")
     if not phone:
         return None

@@ -200,8 +200,8 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     return [_sheet_safe_cell(v) for v in row]
 
 def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str | None = None) -> dict:
-    """model_used defaults to the model behind this thread's last LLM call — every caller records a
-    post on the same thread right after analyzing it (was a fixed "gemini_or_ollama" placeholder)."""
+    # model_used defaults to this thread's last LLM call: every caller records a post on the same
+    # thread right after analyzing it.
     return {
         "price_val": fields.get("price_val"),
         "rooms_val": fields.get("rooms_val"),
@@ -406,8 +406,8 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
     return None
 
 def _names_only_other_target_city(text: str) -> bool:
-    """True when the post names גבעתיים or תל אביב but not רמת גן — so a Ramat Gan street name from
-    EXCLUDED_STREETS_RAMAT_GAN_ONLY in it is a same-named street elsewhere ("רחוב הנגבה בגבעתיים")."""
+    # A Ramat Gan-only street name (EXCLUDED_STREETS_RAMAT_GAN_ONLY) in a post that names only
+    # Givataim or Tel Aviv is a same-named street elsewhere ("רחוב הנגבה בגבעתיים").
     cities = {name for pattern, name in _CITY_DISPLAY_RES if pattern.search(text)}
     return "רמת גן" not in cities and bool(cities & {"גבעתיים", "תל אביב"})
 

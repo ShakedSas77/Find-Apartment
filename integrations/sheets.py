@@ -224,13 +224,8 @@ def _number_cell(s: str) -> float | None:
         return None
 
 def _fields_from_sheet_row(row: list) -> dict:
-    """
-    Reconstructs a fields dict from an already-written sheet row — enough for
-    both compute_fit_score() and telegram_notifier's message formatting.
-    lat/lon were never persisted anywhere (not the sheet, not the DB), so the
-    location score's directional adjustment comes out neutral (0) here —
-    everything else recomputes/displays for real.
-    """
+    # lat/lon were never persisted (not the sheet, not the DB), so the location score's
+    # directional adjustment comes out neutral for rows rebuilt here.
     def cell(i):
         return row[i] if len(row) > i else ""
 
