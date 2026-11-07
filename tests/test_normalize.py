@@ -11,6 +11,7 @@ from core.normalize import (
     _normalize_entry_date,
     _parse_floor,
     _strip_comment_section,
+    _first_mobile_phone,
     resolve_entry_date,
 )
 from core.dedupe import (
@@ -219,3 +220,11 @@ def test_age_line_without_a_following_reply_is_kept():
     text = _POST_BODY + "\nDana\n·\n3h\nעוד פרטים בפרטי"
 
     assert _strip_comment_section(text) == text
+
+
+def test_first_mobile_phone_skips_a_landline_and_strips_separators():
+    assert _first_mobile_phone("משרד 03-5551234, נייד 054-1234567") == "0541234567"
+
+
+def test_first_mobile_phone_is_none_without_a_mobile():
+    assert _first_mobile_phone("להשכרה, טלפון 03-5551234") is None

@@ -2,6 +2,8 @@
 Regression test for the bot-token leak: requests/urllib3 exceptions embed the full
 request URL, and Telegram carries the token in the URL path.
 """
+from urllib.parse import unquote_plus
+
 import requests
 
 import config
@@ -182,3 +184,31 @@ def test_send_listing_alert_includes_the_maps_button_for_a_known_street(monkeypa
 
     assert "🗺 פתח במפות" in [button["text"] for button in sent["reply_markup"]["inline_keyboard"][0]]
 
+
+
+def test_whatsapp_link_targets_the_international_form_of_the_mobile_number():
+    url = telegram_notifier._whatsapp_url({"contact_phone": "0541234567", "address": "ביאליק 14"})
+
+    assert url.startswith("https://wa.me/972541234567?text=")
+
+
+def test_whatsapp_link_prefills_an_encoded_hebrew_opener_naming_the_address():
+    url = telegram_notifier._whatsapp_url({"contact_phone": "0541234567", "address": "ביאליק 14"})
+
+    assert unquote_plus(url.split("text=", 1)[1]) == "היי, ראיתי את המודעה על הדירה בביאליק 14. היא עדיין רלוונטית?"
+
+
+def test_whatsapp_link_is_absent_without_a_phone():
+    assert telegram_notifier._whatsapp_url({"address": "ביאליק 14"}) is None
+
+
+def test_send_listing_alert_includes_the_whatsapp_button_when_the_post_had_a_mobile(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(telegram_notifier, "_configured", lambda: True)
+    monkeypatch.setattr(telegram_notifier, "_call", lambda method, payload: sent.update(payload) or {"message_id": 1})
+    monkeypatch.setattr(telegram_notifier.storage, "set_telegram_message", lambda *args: None)
+
+    telegram_notifier.send_listing_alert("https://www.facebook.com/groups/123/posts/456/",
+                                         dict(_FULL_FIELDS, contact_phone="0541234567"), 70)
+
+    assert "💬 וואטסאפ" in [button["text"] for button in sent["reply_markup"]["inline_keyboard"][0]]

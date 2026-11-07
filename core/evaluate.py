@@ -26,7 +26,7 @@ from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
-    _ROOMMATE_COUPLE_EXCEPTION_RE,
+    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
@@ -291,7 +291,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             pending_seen_urls.add(post_url)
             pending_records.append((post_url, group_url, text, data, _analysis_from_fields(fields, post_date)))
             if pending_telegram is not None:
-                pending_telegram.append((post_url, dict(fields), new_row[_SCORE_COL_INDEX]))
+                pending_telegram.append((post_url, dict(fields, contact_phone=_first_mobile_phone(text)),
+                                         new_row[_SCORE_COL_INDEX]))
             with local_lock:
                 stats["added"] += 1
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"

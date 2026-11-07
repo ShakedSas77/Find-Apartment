@@ -169,17 +169,34 @@ def _maps_url(fields: dict) -> str | None:
     return "https://www.google.com/maps/search/?" + urlencode({"api": 1, "query": query})
 
 
-def _link_row(post_url: str, maps_url: str | None = None) -> list:
+def _whatsapp_url(fields: dict) -> str | None:
+    """wa.me chat link to the poster's mobile number with a pre-filled Hebrew opener, or None when the
+    post had no mobile number. One tap from the alert to the landlord — the bot itself stays read-only
+    on Facebook and never messages anyone."""
+    phone = fields.get("contact_phone")
+    if not phone:
+        return None
+    address = (fields.get("address") or "").strip()
+    about = f"על הדירה ב{address}" if address else "על הדירה"
+    text = f"היי, ראיתי את המודעה {about}. היא עדיין רלוונטית?"
+    return f"https://wa.me/972{phone[1:]}?" + urlencode({"text": text})
+
+
+def _link_row(post_url: str, maps_url: str | None = None, whatsapp_url: str | None = None) -> list:
     row = [{"text": "🔗 פתח פוסט", "url": post_url}]
     if maps_url:
         row.append({"text": "🗺 פתח במפות", "url": maps_url})
+    if whatsapp_url:
+        row.append({"text": "💬 וואטסאפ", "url": whatsapp_url})
     return row
 
 
-def build_link_keyboard(group_id: str, post_id: str, maps_url: str | None = None) -> dict:
+def build_link_keyboard(group_id: str, post_id: str, maps_url: str | None = None,
+                        whatsapp_url: str | None = None) -> dict:
     """reply_markup for every new listing message: "open post", plus "open in Maps" when the street is
-    known. The ⭐/🗑 vote buttons and the 0-10 rating rows were dropped from new messages."""
-    return {"inline_keyboard": [_link_row(_post_url(group_id, post_id), maps_url)]}
+    known and "WhatsApp" when the post had a mobile number. The ⭐/🗑 vote buttons and the 0-10 rating
+    rows were dropped from new messages."""
+    return {"inline_keyboard": [_link_row(_post_url(group_id, post_id), maps_url, whatsapp_url)]}
 
 
 def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> dict:
@@ -211,7 +228,7 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
         "text": _format_listing_message(fields, score),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": build_link_keyboard(group_id, post_id, _maps_url(fields)),
+        "reply_markup": build_link_keyboard(group_id, post_id, _maps_url(fields), _whatsapp_url(fields)),
     }
     result = _call("sendMessage", payload)
     if not result:
