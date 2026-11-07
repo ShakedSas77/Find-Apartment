@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 import time
 import traceback
@@ -91,22 +92,29 @@ def reparse_rejected_posts():
     print(f"\nDone. {added} new apartment(s) added from reparse.")
 
 
-def replay_all_posts():
+def replay_all_posts(use_llm: bool = False):
     """
     Read-only, no browser, no sheet, no DB writes: re-runs every post stored
-    in SQLite (raw_text) through the current filters/LLM/normalization and
-    reports which posts' verdict would change vs. what's stored. The tuning
-    workflow after editing a prompt/filter/threshold — see exactly what flips
+    in SQLite (raw_text) through the current filters/normalization and reports
+    which posts' verdict would change vs. what's stored. The tuning workflow
+    after editing a filter/threshold/scoring rule — see exactly what flips
     without rebuilding the sheet (which would wipe hand-edited rows) or
     mutating the DB's cached verdicts.
+    By default it reuses each post's stored LLM parse (parsed_json) — no LLM
+    calls, so it's fast and free; a post that never reached the LLM but would
+    now pass the content pre-filters can't be judged that way and is counted,
+    not guessed. use_llm=True (--replay --llm) re-parses every post instead —
+    for prompt/LLM changes, at one LLM call per post.
     Note: the relative date stored at original scan time ("3 days ago") doesn't
     update with time — replay doesn't re-apply the MAX_POST_AGE_DAYS filter, only filters/LLM/normalization.
     """
     posts = storage.get_all_posts()
-    print(f"\nReplaying {len(posts)} stored post(s) through the current code (read-only — no sheet/DB writes)...")
+    mode = "re-parsing with the LLM" if use_llm else "reusing stored LLM parses"
+    print(f"\nReplaying {len(posts)} stored post(s) through the current code, {mode} (read-only — no sheet/DB writes)...")
 
     changed = []
     skipped_no_text = 0
+    needs_llm = 0
     for post in posts:
         url = post["url"]
         old_verdict = post.get("verdict") or "(none)"
@@ -121,11 +129,17 @@ def replay_all_posts():
         if prefiltered is not None:
             new_verdict, _, _ = prefiltered
         else:
-            data = analyze_post_with_llm(text)
+            if use_llm:
+                data = analyze_post_with_llm(text)
+            elif post.get("parsed_json"):
+                data = json.loads(post["parsed_json"])
+            else:
+                needs_llm += 1
+                continue
             if not data:
                 new_verdict = storage.VERDICT_PARSE_FAILED
             else:
-                new_verdict, fields = _evaluate_post_data(data, text, group_url)
+                new_verdict, fields = _evaluate_post_data(data, text, group_url, post_url=url)
                 if new_verdict == storage.VERDICT_ADDED:
                     if fields.get("distance_source") == "excluded_south":
                         new_verdict = storage.VERDICT_REJECTED_LOCATION
@@ -141,6 +155,9 @@ def replay_all_posts():
     print(f"\nDone. {len(changed)} verdict(s) changed out of {len(posts)} stored posts "
           f"({skipped_no_text} skipped: raw_text pruned). Nothing was written — "
           f"re-run the real scraper (live is the default) to actually commit any newly-matching posts.")
+    if needs_llm:
+        print(f"{needs_llm} post(s) now pass the content pre-filters but were never parsed by the LLM — "
+              f"run --replay --llm to judge them too.")
     return changed
 
 def print_stats():
@@ -272,7 +289,9 @@ if __name__ == "__main__":
     parser.add_argument("--reparse-rejected", action="store_true",
                          help="Re-run LLM + filters on stored rejected/failed posts, no browser")
     parser.add_argument("--replay", action="store_true",
-                         help="Re-run ALL stored posts through the current code and report which verdicts would change, no browser, no sheet/DB writes")
+                         help="Re-run ALL stored posts through the current filters (reusing stored LLM parses) and report which verdicts would change, no browser, no sheet/DB writes")
+    parser.add_argument("--llm", action="store_true",
+                         help="With --replay: re-parse every post with the LLM instead of reusing stored parses (for prompt changes; one LLM call per post)")
     parser.add_argument("--stats", action="store_true",
                          help="Print verdict counts and Maps usage from the local DB, then exit")
     parser.add_argument("--prune", action="store_true",
@@ -297,7 +316,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.replay:
-        replay_all_posts()
+        replay_all_posts(use_llm=args.llm)
         sys.exit(0)
 
     if args.prune:

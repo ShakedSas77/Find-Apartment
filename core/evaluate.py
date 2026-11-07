@@ -63,12 +63,13 @@ def _price_prefilter_reject(text: str) -> int | None:
         return None
     return candidates[0]
 
-def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str, dict]:
+def _evaluate_post_data(data: dict, text: str, group_url: str = "", post_url: str | None = None) -> tuple[str, dict]:
     """
     Runs the threshold checks (rooms/price, including the regex "second chance")
     and all field normalization. Shared between _scan_group and --reparse-rejected
     so the logic stays identical. Returns (verdict, fields) — fields holds what's
-    needed to build a sheet row when verdict is storage.VERDICT_ADDED.
+    needed to build a sheet row when verdict is storage.VERDICT_ADDED. post_url
+    keeps an already-added post from matching its own record as a duplicate.
     """
     rooms = data.get("rooms")
     price = data.get("price")
@@ -138,7 +139,7 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "") -> tuple[str
     address = _format_address_display(address, group_url)
 
     dup_key = _listing_dedupe_key(address, rooms_val, price_val)
-    if dup_key and dup_key in _known_added_listing_keys():
+    if dup_key and dup_key in _known_added_listing_keys(exclude_url=post_url):
         _maybe_enrich_duplicate_address(dup_key, address)
         return storage.VERDICT_DUPLICATE_LISTING, {"rooms_val": rooms_val, "price_val": price_val, "address": address}
 
