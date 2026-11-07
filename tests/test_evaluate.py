@@ -243,3 +243,19 @@ def test_a_studio_apartment_is_still_rejected():
     _, analysis, _ = evaluate._content_prefilter("להשכרה דירת סטודיו מקסימה ברמת גן, 3 חדרים בבניין, 4,500 ש\"ח")
 
     assert analysis["reject_reason"] == "negative_keyword:סטודיו"
+
+
+def test_a_same_named_street_in_givatayim_is_not_excluded():
+    assert evaluate._content_prefilter("מתפנה דירת 3 חדרים ברחוב הנגבה בגבעתיים, 6,000 ש\"ח") is None
+
+
+def test_the_excluded_ramat_gan_street_is_still_excluded():
+    _, analysis, _ = evaluate._content_prefilter("דירת 3 חדרים ברחוב עוזיאל ברמת גן, 6,000 ש\"ח")
+
+    assert analysis["reject_reason"] == "excluded_location:עוזיאל"
+
+
+def test_an_excluded_area_is_excluded_whatever_city_is_named():
+    _, analysis, _ = evaluate._content_prefilter("דירת 3 חדרים בבני ברק על גבול גבעתיים, 6,000 ש\"ח")
+
+    assert analysis["reject_reason"] == "excluded_location:בני ברק"

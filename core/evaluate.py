@@ -17,7 +17,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
 )
 from core.util import _safe_print, _sheet_lock, timed
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
@@ -26,7 +26,7 @@ from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
-    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE,
+    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE, _CITY_DISPLAY_RES,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
@@ -349,7 +349,8 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
     check that rejects the post, or None to continue to the LLM. `message` is the
     scan's console reason; `post_url` only enriches the room-count message.
     """
-    excluded_found = [loc for loc in EXCLUDED_LOCATIONS if loc in text]
+    excluded_found = [loc for loc in EXCLUDED_LOCATIONS if loc in text
+                      and not (loc in EXCLUDED_STREETS_RAMAT_GAN_ONLY and _names_only_other_target_city(text))]
     if excluded_found:
         return (storage.VERDICT_PREFILTERED, {"reject_reason": f"excluded_location:{excluded_found[0]}"},
                 f"Contains excluded location '{excluded_found[0]}'.")
@@ -399,6 +400,12 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
                 "No price-like amount in the post (skipping the LLM).")
 
     return None
+
+def _names_only_other_target_city(text: str) -> bool:
+    """True when the post names גבעתיים or תל אביב but not רמת גן — so a Ramat Gan street name from
+    EXCLUDED_STREETS_RAMAT_GAN_ONLY in it is a same-named street elsewhere ("רחוב הנגבה בגבעתיים")."""
+    cities = {name for pattern, name in _CITY_DISPLAY_RES if pattern.search(text)}
+    return "רמת גן" not in cities and bool(cities & {"גבעתיים", "תל אביב"})
 
 # A rent-sized amount: 4-5 digits, optionally with a thousands separator ("5,900", "שכ״ד-5900"), or a
 # price in words ("6 אלף", "6.2 אלף", "ששת אלפים", "6K"). Measured 2026-11-07 on 378 LLM-parsed posts:

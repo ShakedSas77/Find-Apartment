@@ -94,6 +94,9 @@ ROOMMATE_KEYWORDS = r'שות[פף]'
 
 # Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
 EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה", "התקווה", "מרום נווה", "עוזיאל", "נגבה", "נווה שאנן"]
+# Entries above that are Ramat Gan *street* names, not areas: they only exclude a post that doesn't name
+# another target city — "רחוב הנגבה בגבעתיים" is a different street (decided 2026-11-07).
+EXCLUDED_STREETS_RAMAT_GAN_ONLY = ("עוזיאל", "נגבה")
 
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
