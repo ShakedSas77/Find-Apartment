@@ -28,9 +28,25 @@ _COMMENT_SECTION_RE = re.compile(
     r'View more comments|View \d+ repl|Write a (?:public )?comment|Submit your first comment|Most relevant'
 )
 
+# A rendered comment: "<name>" / "·" / "<age>" (15m, 3h, 2d) / text / "Reply". FB often shows a
+# post's first comments inline with none of _COMMENT_SECTION_RE's markers present — 435 of 7,845
+# stored posts (2026-11-07) still carried a comment thread past that cut. The post's own header
+# never matches: its age line follows "8 hours ago", not "·", and no "Reply" follows it.
+_COMMENT_AGE_RE = re.compile(r'^\d{1,2}\s*[smhdw]$')
+_COMMENT_REPLY_LOOKAHEAD = 8
+
 def _strip_comment_section(text: str) -> str:
     match = _COMMENT_SECTION_RE.search(text)
-    return text[:match.start()].strip() if match else text
+    text = text[:match.start()].strip() if match else text
+    lines = text.split("\n")
+    for i in range(2, len(lines)):
+        if (_COMMENT_AGE_RE.match(lines[i].strip()) and lines[i - 1].strip() == "·"
+                and any(line.strip() == "Reply" for line in lines[i + 1:i + 1 + _COMMENT_REPLY_LOOKAHEAD])):
+            name_idx = i - 2
+            while name_idx > 0 and not lines[name_idx].strip():
+                name_idx -= 1
+            return "\n".join(lines[:name_idx]).strip()
+    return text
 
 # Israeli mobile (05X) and landline/VoIP (0[23489]/07[2-9]) numbers, with or
 # without a separator — a poster's own contact number doesn't change between

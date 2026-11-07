@@ -10,6 +10,7 @@ from core.normalize import (
     _normalize_bimonthly_fee,
     _normalize_entry_date,
     _parse_floor,
+    _strip_comment_section,
     resolve_entry_date,
 )
 from core.dedupe import (
@@ -199,3 +200,22 @@ def test_extract_price_candidates_returns_old_and_new_price():
 
 def test_extract_price_candidates_ignores_phone_number():
     assert _extract_price_candidates("לפרטים 050-1234567") == []
+
+
+_POST_BODY = "Orly Schick\n7 hours ago\n7h\n·\nלהשכרה ברמת גן\nדירת 3 חדרים, 6,200 ש\"ח"
+
+
+def test_inline_comment_without_section_marker_is_cut():
+    text = _POST_BODY + "\nShared post\n2\n\nNoy Azulay\n\n·\n1h\nמחיר 9000?\nReply\nShare"
+
+    assert _strip_comment_section(text) == _POST_BODY + "\nShared post\n2"
+
+
+def test_post_own_header_is_not_mistaken_for_a_comment():
+    assert _strip_comment_section(_POST_BODY) == _POST_BODY
+
+
+def test_age_line_without_a_following_reply_is_kept():
+    text = _POST_BODY + "\nDana\n·\n3h\nעוד פרטים בפרטי"
+
+    assert _strip_comment_section(text) == text
