@@ -21,12 +21,12 @@ from config import (
 )
 from core.util import _safe_print, _sheet_lock, timed
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
-from core.llm import analyze_post_with_llm
+from core.llm import analyze_post_with_llm, last_model_used
 from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
-    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone,
+    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
@@ -198,7 +198,9 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     ]
     return [_sheet_safe_cell(v) for v in row]
 
-def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str = "gemini_or_ollama") -> dict:
+def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str | None = None) -> dict:
+    """model_used defaults to the model behind this thread's last LLM call — every caller records a
+    post on the same thread right after analyzing it (was a fixed "gemini_or_ollama" placeholder)."""
     return {
         "price_val": fields.get("price_val"),
         "rooms_val": fields.get("rooms_val"),
@@ -208,7 +210,7 @@ def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "",
         "distance_meters": fields.get("distance_meters"),
         "post_date": post_date,
         "reject_reason": reject_reason,
-        "model_used": model_used,
+        "model_used": model_used or last_model_used(),
     }
 
 def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
@@ -388,4 +390,19 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
         return (storage.VERDICT_REJECTED_PRICE, {"price_val": rejected_price, "reject_reason": f"price_prefilter:{rejected_price}"},
                 f"price {rejected_price:,} out of range.")
 
+    # Recorded as price_unknown (what the LLM would conclude anyway), so --reparse-rejected picks it up
+    # if INCLUDE_PRICE_UNKNOWN is turned on.
+    if not INCLUDE_PRICE_UNKNOWN and not _has_price_amount(text):
+        return (storage.VERDICT_PRICE_UNKNOWN, {"reject_reason": "no_price_amount"},
+                "No price-like amount in the post (skipping the LLM).")
+
     return None
+
+# A rent-sized amount: 4-5 digits, optionally with a thousands separator ("5,900", "שכ״ד-5900"), or a
+# price in words ("6 אלף", "6.2 אלף", "ששת אלפים", "6K"). Measured 2026-11-07 on 378 LLM-parsed posts:
+# a post with none of these (after removing phone numbers) never produced a price — skipping it saves
+# ~19% of LLM calls and would have changed no added/duplicate/price-rejected verdict.
+_PRICE_AMOUNT_RE = re.compile(r"(?<!\d)\d{1,2}[,.]?\d{3}(?!\d)|\d+(?:[.,]\d+)?\s*אלף|אלפים|\d\s*K\b", re.IGNORECASE)
+
+def _has_price_amount(text: str) -> bool:
+    return bool(_PRICE_AMOUNT_RE.search(_PHONE_RE.sub(" ", text)))

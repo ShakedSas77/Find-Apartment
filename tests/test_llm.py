@@ -22,10 +22,12 @@ class _FakeClient:
     def __init__(self, outcomes: list):
         self._outcomes = list(outcomes)
         self.models_called = []
+        self.configs = []
         self.models = self
 
     def generate_content(self, model, contents, config):
         self.models_called.append(model)
+        self.configs.append(config)
         outcome = self._outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -104,3 +106,29 @@ def test_retry_delay_follows_googles_own_hint():
 
 def test_retry_delay_is_capped():
     assert llm._retry_delay_s("Please retry in 300.5s.", attempt=0) == llm.GEMINI_RETRY_MAX_SLEEP_S
+
+
+def test_gemini_extraction_runs_at_temperature_zero(monkeypatch):
+    client = _use_client(monkeypatch, [{"rooms": 3.0}])
+
+    llm._get_llm_raw_result("prompt")
+
+    assert client.configs[0].temperature == 0
+
+
+def test_the_model_that_answered_is_recorded(monkeypatch):
+    _use_client(monkeypatch, [Exception("404 NOT_FOUND"), {"rooms": 3.0, "price": 6000}])
+
+    llm.analyze_post_with_llm("להשכרה 3 חדרים")
+
+    assert llm.last_model_used() == llm.GEMINI_MODELS[1]
+
+
+def test_an_ollama_answer_is_recorded_as_ollama(monkeypatch):
+    monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", True)
+    monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: {"message": {"content": '{"rooms": 3.0}'}})
+
+    llm.analyze_post_with_llm("להשכרה 3 חדרים")
+
+    assert llm.last_model_used() == f"ollama:{llm.OLLAMA_MODEL}"

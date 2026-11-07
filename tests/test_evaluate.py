@@ -191,3 +191,21 @@ def test_content_prefilter_rejects_the_hatikva_neighborhood():
     _, analysis, _ = evaluate._content_prefilter("להשכרה 3 חדרים בשכונת התקווה, תל אביב, 6,000 ₪")
 
     assert analysis["reject_reason"] == "excluded_location:התקווה"
+
+
+def test_post_with_no_price_amount_skips_the_llm_as_price_unknown():
+    verdict, _, _ = evaluate._content_prefilter("להשכרה דירת 3 חדרים ברמת גן, מחיר בפרטי 050-5265642")
+
+    assert verdict == storage.VERDICT_PRICE_UNKNOWN
+
+
+def test_price_after_a_hyphen_counts_as_an_amount():
+    assert evaluate._has_price_amount("שכ״ד-5900 ש״ח חודש בחודשו")
+
+
+def test_price_in_words_counts_as_an_amount():
+    assert evaluate._has_price_amount("דירת 3 חדרים, 6.2 אלף לחודש")
+
+
+def test_a_phone_number_alone_is_not_an_amount():
+    assert not evaluate._has_price_amount("פרטים אצל דני 054-1234567")

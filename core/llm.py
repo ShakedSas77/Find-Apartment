@@ -82,6 +82,11 @@ _ollama_lock = threading.Lock()
 
 _gemini_rate_lock = threading.Lock()
 
+# Which model produced the current thread's last result — group threads x post workers run
+# concurrently, so a plain module variable would mix up which post used which model.
+_last_model = threading.local()
+OLLAMA_MODEL = "qwen2.5:7b"
+
 _last_gemini_call = 0.0
 
 _OLLAMA_BASE = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
@@ -195,6 +200,9 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
                             config=types.GenerateContentConfig(
                                 response_mime_type="application/json",
                                 response_schema=ApartmentData,
+                                # Extraction, not generation: the same post must parse the same way
+                                # every time (Ollama already runs at 0).
+                                temperature=0,
                             ),
                         )
                         break
@@ -219,6 +227,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
                 result = response.parsed.model_dump() if response.parsed else json.loads(response.text)
                 with _gemini_lock:
                     GEMINI_ERROR_COUNT = 0
+                _last_model.name = model
                 return result
             except Exception as gemini_err:
                 error_msg = str(gemini_err)
@@ -250,7 +259,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
         with _ollama_lock:
             ollama_response = _with_retries(
                 lambda: ollama.chat(
-                    model='qwen2.5:7b',
+                    model=OLLAMA_MODEL,
                     messages=[{'role': 'user', 'content': prompt}],
                     format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore
                     options={'temperature': 0, 'num_ctx': 4096},
@@ -259,6 +268,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
                 attempts=3,
                 base_delay=2.0,
             )
+        _last_model.name = f"ollama:{OLLAMA_MODEL}"
         return json.loads(ollama_response['message']['content'])
     except Exception as ollama_err:
         _safe_print(f"\n    ERROR: local Ollama analysis failed: {ollama_err}")
@@ -271,6 +281,7 @@ def analyze_post_with_llm(text: str) -> dict | None:
     validation failure both count as one attempt; failure on both -> None
     (verdict parse_failed for the caller).
     """
+    _last_model.name = None
     prompt = get_apartment_prompt_improved(_clean_post_for_llm(text))
     for attempt in range(2):
         raw = _get_llm_raw_result(prompt)
@@ -282,3 +293,8 @@ def analyze_post_with_llm(text: str) -> dict | None:
         except Exception as validation_err:
             _safe_print(f"    WARNING: LLM output failed schema validation (attempt {attempt + 1}/2): {validation_err}")
     return None
+
+
+def last_model_used() -> str:
+    """The model behind this thread's last analyze_post_with_llm() result, for the posts table."""
+    return getattr(_last_model, "name", None) or "none"
