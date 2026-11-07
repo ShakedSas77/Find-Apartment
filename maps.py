@@ -159,6 +159,8 @@ def _format_address_display(address: str, group_url: str | None = None) -> str:
 
     return address
 
+_RETRYABLE_CACHE_SOURCES = {"quota", "google_maps_error"}
+
 _gmaps_cap_lock = threading.Lock()
 
 _gmaps_cap_notice_printed = False
@@ -284,7 +286,10 @@ def get_walking_distance(address: str):
         return "", 999999, "missing", "כתובת חסרה", "skipped", None, None
 
     cached = storage.get_address_cache(address)
-    if cached:
+    # A cached *failure* (Google off/over cap and the free fallback missed, or a Distance Matrix error)
+    # is not an answer — serving it made the address blank forever, even once Google was back on or the
+    # fallback improved (seen 2026-11-07: "שינקין 32, גבעתיים", "רמבם 3, גבעתיים"). Retry those.
+    if cached and cached.get("distance_source") not in _RETRYABLE_CACHE_SOURCES:
         # Must return the ORIGINAL source ("google_maps"/"skipped"/"quota"),
         # not a hardcoded "cache" — callers gate the > MAX_WALKING_DISTANCE_KM
         # rejection on distance_source == "google_maps", so a hardcoded value
