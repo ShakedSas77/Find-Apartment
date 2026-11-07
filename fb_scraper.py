@@ -27,7 +27,6 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
-    MADLAN_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -40,7 +39,6 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
-from madlan_source import run_madlan
 from sheets import (
     setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
@@ -826,15 +824,6 @@ def run_scraper(headless: bool = False, live: bool = False):
                         checkpoint_skipped += 1
                 except Exception as e:
                     _safe_print(f"\nERROR: [{_make_group_label(idx, total, shuffled_urls[idx - 1])}] crashed: {e}")
-
-    if MADLAN_ENABLED:
-        print("\nFetching Madlan listings...")
-        madlan_stats = run_madlan(sheet, seen_urls, live)
-        total_added += madlan_stats["added"]
-        total_posts_seen += madlan_stats["posts_seen"]
-        total_prefiltered += madlan_stats["prefiltered"]
-        print(f"Madlan: {madlan_stats['posts_seen']} listings seen, {madlan_stats['prefiltered']} skipped as known/old, "
-              f"{madlan_stats['added']} added.")
 
     gmaps_calls_this_month = storage.get_gmaps_usage()
     print(f"\nScraping finished successfully. {total_added} apartments added.")

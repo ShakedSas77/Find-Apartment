@@ -204,16 +204,6 @@ WEBGL_RENDERER = None
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
 
-# ─── Madlan (second listing source) ─────────────────────────────────────────────
-# Madlan's internal GraphQL API (madlan_source.py) — structured listings, no browser, no LLM.
-# Off until a `--madlan-only --dry-run` trial confirms the API answers for this machine.
-MADLAN_ENABLED = False
-# Madlan location doc ids: the city name with spaces as hyphens, plus "-ישראל" — the same
-# slug as in a madlan.co.il/for-rent/<slug> URL.
-MADLAN_LOCATION_DOC_IDS = ["רמת-גן-ישראל", "גבעתיים-ישראל"]
-# Listings requested per location per run (one API call each).
-MADLAN_PAGE_LIMIT = 100
-
 # ─── Concurrency ────────────────────────────────────────────────────────────────
 # How many groups scan simultaneously. Higher = faster, but also higher risk of a
 # block/CAPTCHA: parallel mode (>1) opens a separate browser+context per group with

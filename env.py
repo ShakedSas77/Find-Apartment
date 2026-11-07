@@ -26,11 +26,6 @@ def get_sheet_id() -> str | None:
     return os.getenv("SHEET_ID")
 
 
-def get_madlan_token() -> str | None:
-    """Optional Madlan visitor JWT (a browser's `authorization: Bearer …` header on POST /api2)."""
-    return os.getenv("MADLAN_TOKEN")
-
-
 _REQUIRED =("GEMINI_API_KEY", "GMAPS_API_KEY", "SHEET_ID")
 
 
