@@ -11,6 +11,7 @@ from core.normalize import (
     _normalize_entry_date,
     _parse_floor,
     _strip_comment_section,
+    _normalize_address_key,
     _first_mobile_phone,
     resolve_entry_date,
 )
@@ -228,3 +229,15 @@ def test_first_mobile_phone_skips_a_landline_and_strips_separators():
 
 def test_first_mobile_phone_is_none_without_a_mobile():
     assert _first_mobile_phone("להשכרה, טלפון 03-5551234") is None
+
+
+def test_address_key_ignores_neighborhood_words_after_the_house_number():
+    assert _normalize_address_key("צבי 2, שכונת הראשונים פינת גבעתיים, רמת גן") == _normalize_address_key("צבי 2, רמת גן")
+
+
+def test_address_key_without_a_house_number_keeps_its_words():
+    assert _normalize_address_key("שכונת נווה יהושע רחוב האם") == "שכונת נווה יהושע האם"
+
+
+def test_room_count_in_the_address_field_is_not_taken_as_a_house_number():
+    assert _normalize_address_key("דירת 3.5 חדרים, רמת גן") != _normalize_address_key("דירת 3 חדרים, רמת גן")

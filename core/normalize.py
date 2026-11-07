@@ -471,6 +471,10 @@ _STREET_TYPE_RE = _STREET_HINT_RE
 # cross-street half discarded, not restructured.
 _CORNER_HINT_RE = re.compile(r'\s+(?:על\s+)?פינת\s+.+$')
 
+_STREET_AND_NUMBER_RE = re.compile(r'^([^\d]+?\s\d{1,4}[א-ת]?)(?=\s|$)')
+# "דירת 3.5 חדרים" (a description the LLM put in the address field) is a room count, not a house number.
+_ROOM_COUNT_TAIL_RE = re.compile(r'\s*(?:\d|חד)')
+
 def _normalize_address_key(address: str) -> str:
     if not address or address == "לא צוין":
         return ""
@@ -478,7 +482,15 @@ def _normalize_address_key(address: str) -> str:
     norm = _CORNER_HINT_RE.sub('', norm)
     norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
-    return re.sub(r'\s+', ' ', norm).strip()
+    norm = re.sub(r'\s+', ' ', norm).strip()
+    # A street + house number identifies the building on its own; any neighborhood/landmark words after
+    # it are wording, not identity. Without this, "צבי 2, רמת גן" and "צבי 2, שכונת הראשונים פינת
+    # גבעתיים, רמת גן" keyed differently and the same flat was added and alerted twice (2026-11-07).
+    # No number -> unchanged, so a weak address still never merges on its leftover words alone.
+    street_and_number = _STREET_AND_NUMBER_RE.match(norm)
+    if street_and_number and not _ROOM_COUNT_TAIL_RE.match(norm[street_and_number.end():]):
+        return street_and_number.group(1)
+    return norm
 
 # ─── Address display formatting ─────────────────────────────────────────────
 # Reshapes the LLM's raw (verbatim-from-post) address into the sheet's
