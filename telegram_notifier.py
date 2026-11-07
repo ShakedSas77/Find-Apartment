@@ -314,4 +314,6 @@ def send_run_finished(stats: dict):
     )
     if stats.get("checkpoint_skipped"):
         text += f"\n⚠️ {stats['checkpoint_skipped']} קבוצה/ות דולגו עקב checkpoint"
+    if stats.get("errors") or stats.get("warnings"):
+        text += f"\n⚠️ {stats.get('errors', 0)} שגיאות, {stats.get('warnings', 0)} אזהרות — ראו את קובץ הלוג"
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})

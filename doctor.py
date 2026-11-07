@@ -14,6 +14,7 @@ therefore a presence-only check (key set), not a live call.
 """
 
 import json
+from datetime import datetime
 import os
 import sqlite3
 import sys
@@ -79,6 +80,25 @@ def _check_db():
         return ("bot_data.db", PASS, f"{n} posts", "")
     except Exception as exc:
         return ("bot_data.db", FAIL, f"unreadable: {exc}", "restore from a backup_db.py snapshot")
+
+
+def _check_last_run():
+    """A scheduled run that silently stopped happening (seen: no run log from July 24 to November)
+    shows up here, and `--alert` DMs it, instead of only as a quiet Telegram chat."""
+    if not storage.DB_PATH.exists():
+        return ("last run", WARN, "no database yet", "")
+    try:
+        storage.init_db()
+        last = storage.get_last_successful_live_run()
+    except Exception as exc:
+        return ("last run", FAIL, f"unreadable: {exc}", "")
+    if last is None:
+        return ("last run", WARN, "no successful live run recorded yet", "run `python apartment_bot.py` once")
+    age_hours = (datetime.now() - datetime.fromisoformat(last["started_at"])).total_seconds() / 3600
+    detail = f"last successful live run {last['started_at'][:16]} ({age_hours:.0f}h ago), added {last['added'] or 0}"
+    if age_hours > config.RUN_STALE_HOURS:
+        return ("last run", FAIL, detail, "check Task Scheduler's 'Last Run Result' for the scheduled task, and the newest logs/bot_*.log")
+    return ("last run", PASS, detail, "")
 
 
 def _check_gemini():
@@ -158,7 +178,7 @@ def _check_telegram():
 
 _CHECKS = [
     _check_env, _check_credentials_file, _check_chrome_profile, _check_config_local,
-    _check_db, _check_gemini, _check_ollama, _check_sheets, _check_gmaps, _check_telegram,
+    _check_db, _check_last_run, _check_gemini, _check_ollama, _check_sheets, _check_gmaps, _check_telegram,
 ]
 
 

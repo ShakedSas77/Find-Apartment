@@ -9,7 +9,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
-    TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR,
+    TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
 from core.normalize import BIDI_RE, _strip_comment_section
@@ -21,6 +21,7 @@ from core.evaluate import (
 from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from fb_scraper import run_scraper
 from mail_source import dump_alert_emails
+from run_log import start_run_log
 import env
 import scoring
 import storage
@@ -188,6 +189,14 @@ def print_stats():
         for address, cnt in top_addresses:
             print(f"  {cnt:4}  {address}")
 
+    runs = storage.get_recent_runs(10)
+    if runs:
+        print("\n--- last runs (newest first) ---")
+        for run in runs:
+            print(f"  {run['started_at'][:16]}  {run['mode']:<7} {run['status']:<17} "
+                  f"groups {run['groups_scanned'] or 0}/{run['groups_total'] or 0}, added {run['added'] or 0}, "
+                  f"{run['errors'] or 0} error(s), {run['warnings'] or 0} warning(s)  {run['log_path'] or ''}")
+
 _TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
 
 def recompute_sheet_scores():
@@ -336,6 +345,7 @@ if __name__ == "__main__":
         print(f"Saved {written} alert email(s) from the last {ALERTS_LOOKBACK_DAYS} day(s) to {ALERTS_DUMP_DIR}/.")
         sys.exit(0)
 
+    run_log = start_run_log("logs", LOG_RETENTION_DAYS)
     print("\n=======================================================")
     print("  Apartment Search Bot - Real-time updates")
     print("=======================================================")
@@ -345,14 +355,21 @@ if __name__ == "__main__":
     print(f"  Distance to: {DESTINATION_ADDRESS}")
     print("=======================================================")
 
+    run_id = storage.start_run("live" if args.live else "dry_run", str(run_log.path))
     try:
         result = run_scraper(headless=args.headless, live=args.live)
-    except Exception:
+    except BaseException:
         traceback.print_exc()
+        storage.finish_run(run_id, "crashed", {}, run_log.warnings, run_log.errors)
+        print(run_log.summary())
         sys.exit(1)
 
     if result["checkpoint_skipped"] > 0:
-        sys.exit(2)
-    if result["groups_scanned"] == 0:
-        sys.exit(1)
-    sys.exit(0)
+        status, exit_code = "checkpoint", 2
+    elif result["groups_scanned"] == 0:
+        status, exit_code = "no_groups_scanned", 1
+    else:
+        status, exit_code = "ok", 0
+    storage.finish_run(run_id, status, result, run_log.warnings, run_log.errors)
+    print(run_log.summary())
+    sys.exit(exit_code)

@@ -42,6 +42,7 @@ from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
 from graphql_capture import GraphqlPostCapture, compare_with_dom
+import run_log
 from sheets import (
     setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
@@ -456,19 +457,22 @@ def _collect_valid_posts(harvested: dict, target_url: str, group_label: str, see
     for each one it rejects. Returns the posts worth an LLM call.
     """
     valid_posts = []
+    # The three "already handled" gates fire for most harvested posts on every run; one count line
+    # per group instead of a line per post keeps the log readable (they used to bury the real errors).
+    skipped = {"already processed": 0, "already in sheet": 0, "older than cutoff": 0}
     for post_url, item in harvested.items():
         fb_post_date = item["date"]
         text = BIDI_RE.sub('', item["text"])
         text = _strip_comment_section(text)
 
         if item["is_known"]:
-            _safe_print(f"    [{group_label}] Pre-filtered: Already processed (cached verdict in local DB).")
+            skipped["already processed"] += 1
             continue
 
         with _sheet_lock:
             already_seen = post_url in seen_urls
         if already_seen:
-            _safe_print(f"    [{group_label}] Pre-filtered: Post already exists in Google Sheets (Duplicate).")
+            skipped["already in sheet"] += 1
             continue
 
         # Same effective_cutoff the scroll loop used to decide when to stop — a post
@@ -476,7 +480,7 @@ def _collect_valid_posts(harvested: dict, target_url: str, group_label: str, see
         # (already handled last run), so there's no point sending it to the LLM here.
         post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
         if post_dt is not None and _is_before_cutoff(post_dt, effective_cutoff):
-            _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than the scan cutoff ({effective_cutoff:%d/%m %H:%M}).")
+            skipped["older than cutoff"] += 1
             storage.record_post(
                 post_url,
                 target_url,
@@ -523,6 +527,9 @@ def _collect_valid_posts(harvested: dict, target_url: str, group_label: str, see
             continue
 
         valid_posts.append({"url": post_url, "text": text, "post_date": fb_post_date})
+    if any(skipped.values()):
+        _safe_print(f"    [{group_label}] Skipped without analysis: " + ", ".join(f"{n} {why}" for why, n in skipped.items() if n)
+                    + f" (cutoff {effective_cutoff:%d/%m %H:%M}).")
     return valid_posts
 
 def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool, live: bool = False) -> dict:
@@ -932,6 +939,8 @@ def run_scraper(headless: bool = False, live: bool = False):
                 "added": total_added,
                 "gmaps_calls": gmaps_calls_this_month,
                 "checkpoint_skipped": checkpoint_skipped,
+                "errors": run_log.current.errors if run_log.current else 0,
+                "warnings": run_log.current.warnings if run_log.current else 0,
             })
         except Exception as e:
             print(f"WARNING: Telegram run-finished alert failed: {e}")
@@ -944,4 +953,7 @@ def run_scraper(headless: bool = False, live: bool = False):
         "total": total,
         "checkpoint_skipped": checkpoint_skipped,
         "total_added": total_added,
+        "posts_seen": total_posts_seen,
+        "prefiltered": total_prefiltered,
+        "llm_parsed": total_llm_parsed,
     }

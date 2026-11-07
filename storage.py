@@ -124,6 +124,25 @@ def init_db():
                 PRIMARY KEY (url, voter_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                mode TEXT,
+                status TEXT,
+                groups_scanned INTEGER,
+                groups_total INTEGER,
+                posts_seen INTEGER,
+                prefiltered INTEGER,
+                llm_parsed INTEGER,
+                added INTEGER,
+                checkpoints INTEGER,
+                warnings INTEGER,
+                errors INTEGER,
+                log_path TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -679,3 +698,40 @@ def prune_old_posts(max_age_days: int) -> int:
         with _lock, _connect() as conn:
             conn.execute("VACUUM")
     return pruned
+
+
+def start_run(mode: str, log_path: str = "") -> int:
+    """Records a scrape starting (status "running" until finish_run) and returns its id —
+    so a run that crashes or is killed still leaves a row behind."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO runs (started_at, mode, status, log_path) VALUES (?, ?, 'running', ?)",
+            (datetime.now().isoformat(timespec="seconds"), mode, log_path),
+        )
+        return cur.lastrowid
+
+
+def finish_run(run_id: int, status: str, counts: dict, warnings: int, errors: int):
+    """Closes a run's row with its outcome. counts uses run_scraper()'s summary keys."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE runs SET finished_at = ?, status = ?, groups_scanned = ?, groups_total = ?, posts_seen = ?, "
+            "prefiltered = ?, llm_parsed = ?, added = ?, checkpoints = ?, warnings = ?, errors = ? WHERE id = ?",
+            (datetime.now().isoformat(timespec="seconds"), status, counts.get("groups_scanned"), counts.get("total"),
+             counts.get("posts_seen"), counts.get("prefiltered"), counts.get("llm_parsed"), counts.get("total_added"),
+             counts.get("checkpoint_skipped"), warnings, errors, run_id),
+        )
+
+
+def get_recent_runs(limit: int = 10) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_last_successful_live_run() -> dict | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE mode = 'live' AND status = 'ok' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None

@@ -74,6 +74,9 @@ MAX_POST_AGE_DAYS = 14
 
 # Scheduled-run log files (logs/run_*.log) older than this get deleted by run_scheduled.bat.
 LOG_RETENTION_DAYS = 14
+# doctor.py FAILs the "last run" check when no live run has completed OK for this long — catches a
+# scheduled task that silently stopped running. A bit over a day, so one late run doesn't trip it.
+RUN_STALE_HOURS = 26
 
 # ─── Pre-filters (before the AI) ──────────────────────────────────────────────────
 # The post must contain at least one of these phrases to pass the check (saves a lot of time)
