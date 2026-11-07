@@ -14,6 +14,10 @@ python apartment_bot.py
 # or
 run_bot.bat
 
+# Madlan only (no browser, no Facebook) — trial it with --dry-run before setting
+# MADLAN_ENABLED = True in config.py
+python apartment_bot.py --madlan-only --dry-run
+
 # Dry run (--dry-run): classifies and prints only — no sheet writes,
 # no verdict recorded for matches, no dedupe/prune. Safe way to try a
 # prompt/filter/config change against real Facebook before committing.
@@ -59,6 +63,7 @@ python bot_listener.py
 | `prompts.py` | `get_apartment_prompt_improved(text)` — dispatches to `get_apartment_prompt_english()` or `get_apartment_prompt_hebrew()` per `config.PROMPT_LANGUAGE` |
 | `storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
 | `scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
+| `madlan_source.py` | Second listing source (off by default, `MADLAN_ENABLED`): Madlan's internal GraphQL API (`POST madlan.co.il/api2`) — Madlan's pages are behind PerimeterX but the API isn't. Structured listings skip the LLM via `process_candidate_listing(data=...)` and share `flush_pending_listings()` (`core/evaluate.py`) with the FB path; runs after the FB groups in `run_scraper()`, or alone via `--madlan-only`. Optional visitor token `MADLAN_TOKEN` in `.env`. Never raises into the run |
 | `distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used only when `GMAPS_MONTHLY_CAP` is hit |
 | `telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
 | `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps, records them, updates the tally shown on the message |
@@ -66,7 +71,7 @@ python bot_listener.py
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
 | `credentials.json` | Google Service Account key (gitignored) |
-| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) — all gitignored |
+| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`); `MADLAN_TOKEN` (optional Madlan visitor JWT) — all gitignored |
 | `chrome_profile/` | Playwright persistent context — holds FB login session cookie |
 
 ## Data Flow

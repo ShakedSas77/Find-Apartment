@@ -17,7 +17,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED,
 )
 from core.util import _safe_print, _sheet_lock, timed
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
@@ -30,6 +30,8 @@ from core.normalize import (
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
+from sheets import _append_rows_batch
+import telegram_notifier
 
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
@@ -211,24 +213,27 @@ def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "",
 def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
                                seen_urls: set, pending_rows: list, pending_seen_urls: set,
                                pending_records: list, stats: dict, local_lock: threading.Lock,
-                               pending_telegram: list | None = None) -> None:
+                               pending_telegram: list | None = None, data: dict | None = None) -> None:
     """
-    Runs one scraped listing (any source — FB post, Yad2 ad) through LLM parse
+    Runs one scraped listing (any source — FB post, Madlan ad) through LLM parse
     -> _evaluate_post_data -> _build_row -> queue-for-sheet-write. Pulled out of
-    _scan_group_page's process_post closure so a second source (Yad2) can feed
-    the same pipeline without a second hand-copied version of this logic —
-    see CLAUDE.md on keeping _evaluate_post_data/_build_row call sites in sync.
+    _scan_group_page's process_post closure so another source can feed the same
+    pipeline without a second hand-copied version of this logic — see CLAUDE.md
+    on keeping _evaluate_post_data/_build_row call sites in sync. A source that
+    already has structured fields (Madlan's API) passes them as `data`, in the
+    LLM's ApartmentData shape, and the LLM step is skipped.
     """
     _safe_print(f"[{label}] Analyzing post (URL: {post_url})...")
 
-    try:
-        with timed("llm"):
-            data = analyze_post_with_llm(text)
-    except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-        raise
+    if data is None:
+        try:
+            with timed("llm"):
+                data = analyze_post_with_llm(text)
+        except (GmapsQuotaHalted, HeadlessCheckpointAbort):
+            raise
 
-    with local_lock:
-        stats["llm_parsed"] += 1
+        with local_lock:
+            stats["llm_parsed"] += 1
     if not data:
         _safe_print(f"    [{label}] Skipped: LLM failed to parse or returned no data.")
         storage.record_post(post_url, group_url, text, storage.VERDICT_PARSE_FAILED,
@@ -305,6 +310,37 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
         _safe_print(f"    [{label}] Skipped: repost of a listing queued earlier this run ({fields['address']}, {fields['rooms_val']} rooms, {int(fields['price_val']):,} ₪).")
         storage.record_post(post_url, group_url, text, storage.VERDICT_DUPLICATE_LISTING, data,
                              analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_DUPLICATE_LISTING))
+
+def flush_pending_listings(sheet, seen_urls: set, pending_rows: list, pending_seen_urls: set, pending_records: list,
+                           pending_telegram: list, stats: dict, live: bool, label: str) -> None:
+    """
+    Commits one source batch queued by process_candidate_listing: appends the rows to the sheet,
+    records each as added, then sends its Telegram alert. Shared by every listing source (FB groups,
+    Madlan) so the commit order — sheet first, alerts last — can't drift between them. A dry run
+    only reports what it would write.
+    """
+    if not pending_rows:
+        return
+    if not live:
+        _safe_print(f"    [{label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — rerun without --dry-run to commit).")
+        return
+    with _sheet_lock:
+        try:
+            with timed("sheets"):
+                _append_rows_batch(sheet, pending_rows)
+            seen_urls.update(pending_seen_urls)
+            for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
+                storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
+            _safe_print(f"    [{label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
+            if TELEGRAM_ENABLED:
+                for tg_url, tg_fields, tg_score in pending_telegram:
+                    try:
+                        telegram_notifier.send_listing_alert(tg_url, tg_fields, tg_score)
+                    except Exception as e:
+                        _safe_print(f"    WARNING: [{label}] Telegram alert failed for {tg_url}: {e}")
+        except Exception as e:
+            _safe_print(f"    ERROR: [{label}] batch writing to sheet: {e}")
+            stats["added"] -= len(pending_rows)
 
 def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] | None:
     """

@@ -19,6 +19,7 @@ from core.evaluate import (
 )
 from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from fb_scraper import run_scraper
+from madlan_source import run_madlan
 import env
 import scoring
 import storage
@@ -256,6 +257,20 @@ def prune_data():
     pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
     print(f"Lightened {pruned} local DB row(s) (verdict kept, so they won't be rescanned).")
 
+def run_madlan_only(live: bool):
+    """
+    Runs only the Madlan source — no browser, no Facebook — for trying it out
+    (with --dry-run) before turning on MADLAN_ENABLED, or for a quick Madlan-only
+    refresh. Ignores MADLAN_ENABLED: asking for it is the opt-in.
+    """
+    sheet, seen_urls = setup_google_sheet()
+    stats = run_madlan(sheet, seen_urls, live)
+    print(f"\nMadlan: {stats['posts_seen']} listings seen, {stats['prefiltered']} skipped as known/old, "
+          f"{stats['added']} {'added' if live else 'would be added'}.")
+    if live and stats["added"]:
+        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings.")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Facebook Apartment Scraper Bot - Realtime")
     parser.add_argument("--headful", dest="headless", action="store_false",
@@ -280,6 +295,8 @@ if __name__ == "__main__":
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
     parser.add_argument("--backfill-ratings", action="store_true",
                          help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
+    parser.add_argument("--madlan-only", action="store_true",
+                         help="Fetch only Madlan listings (no browser, no Facebook), then exit. Combine with --dry-run to trial it")
     args = parser.parse_args()
 
     env.require_env()
@@ -307,6 +324,10 @@ if __name__ == "__main__":
 
     if args.backfill_ratings:
         backfill_ratings()
+        sys.exit(0)
+
+    if args.madlan_only:
+        run_madlan_only(args.live)
         sys.exit(0)
 
     print("\n=======================================================")

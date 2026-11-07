@@ -27,6 +27,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
+    MADLAN_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -37,10 +38,11 @@ from core.normalize import (
     _extract_candidate_cities, _is_recognized_fb_date_text,
 )
 from core.dedupe import _text_dedup_hash
-from core.evaluate import process_candidate_listing, _content_prefilter
+from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
+from madlan_source import run_madlan
 from sheets import (
-    setup_google_sheet, dedupe_and_sort_sheet, _append_rows_batch, _rewrite_sheet_data_rows,
+    setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
 )
 
@@ -568,26 +570,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             for future in as_completed(futures):
                 future.result()
 
-        if pending_rows and live:
-            with _sheet_lock:
-                try:
-                    with timed("sheets"):
-                        _append_rows_batch(sheet, pending_rows)
-                    seen_urls.update(pending_seen_urls)
-                    for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
-                        storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
-                    _safe_print(f"    [{group_label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
-                    if TELEGRAM_ENABLED:
-                        for tg_url, tg_fields, tg_score in pending_telegram:
-                            try:
-                                telegram_notifier.send_listing_alert(tg_url, tg_fields, tg_score)
-                            except Exception as e:
-                                _safe_print(f"    WARNING: [{group_label}] Telegram alert failed for {tg_url}: {e}")
-                except Exception as e:
-                    _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
-                    stats["added"] -= len(pending_rows)
-        elif pending_rows:
-            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — rerun without --dry-run to commit).")
+        flush_pending_listings(sheet, seen_urls, pending_rows, pending_seen_urls, pending_records,
+                               pending_telegram, stats, live, group_label)
 
         # A dry run commits nothing, so it must not move the baseline either: a would-be match it
         # printed but never recorded would then read as older than last_scan_time on the next live run.
@@ -842,6 +826,15 @@ def run_scraper(headless: bool = False, live: bool = False):
                         checkpoint_skipped += 1
                 except Exception as e:
                     _safe_print(f"\nERROR: [{_make_group_label(idx, total, shuffled_urls[idx - 1])}] crashed: {e}")
+
+    if MADLAN_ENABLED:
+        print("\nFetching Madlan listings...")
+        madlan_stats = run_madlan(sheet, seen_urls, live)
+        total_added += madlan_stats["added"]
+        total_posts_seen += madlan_stats["posts_seen"]
+        total_prefiltered += madlan_stats["prefiltered"]
+        print(f"Madlan: {madlan_stats['posts_seen']} listings seen, {madlan_stats['prefiltered']} skipped as known/old, "
+              f"{madlan_stats['added']} added.")
 
     gmaps_calls_this_month = storage.get_gmaps_usage()
     print(f"\nScraping finished successfully. {total_added} apartments added.")
