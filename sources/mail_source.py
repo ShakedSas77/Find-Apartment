@@ -88,8 +88,8 @@ def message_text(msg: Message) -> str:
 
 
 def _html_to_text(markup: str) -> str:
-    """Crude on purpose: block tags become newlines (the seams a per-listing split needs), the rest is
-    dropped. html.unescape matters — Hebrew in mail templates often arrives as numeric entities."""
+    # Crude on purpose: block tags become newlines (the seams a per-listing split needs), the rest is
+    # dropped. html.unescape matters: Hebrew in mail templates often arrives as numeric entities.
     text = _STYLE_RE.sub(" ", markup)
     text = _BLOCK_END_RE.sub("\n", text)
     text = html.unescape(_TAG_RE.sub(" ", text))
@@ -102,5 +102,5 @@ def _header(msg: Message, name: str) -> str:
 
 
 def _quote_folder(folder: str) -> str:
-    """IMAP needs a folder name with spaces or slashes quoted (Gmail labels can have both)."""
+    # Gmail labels can contain spaces and slashes, which IMAP needs quoted.
     return f'"{folder}"' if not folder.startswith('"') else folder

@@ -43,23 +43,33 @@ def test_comment_text_under_feedback_is_never_taken_as_the_post_message():
     assert parse_graphql_body(_body(story))["111"]["text"] is None
 
 
-def test_shared_original_post_keeps_its_own_text():
+def _shared_post_parse():
     shared = _story(post_id="111", text="שימו לב", extra={"attached_story": _story(post_id="222", text="הדירה המקורית")})
+    return parse_graphql_body(_body(shared))
 
-    posts = parse_graphql_body(_body(shared))
 
-    assert (posts["111"]["text"], posts["222"]["text"]) == ("שימו לב", "הדירה המקורית")
+def test_sharers_note_is_the_sharing_posts_text():
+    assert _shared_post_parse()["111"]["text"] == "שימו לב"
+
+
+def test_shared_original_post_keeps_its_own_text():
+    assert _shared_post_parse()["222"]["text"] == "הדירה המקורית"
 
 
 def test_non_json_lines_are_skipped():
     assert parse_graphql_body("for (;;);\n" + _body(_story()))["111"]["text"] == "להשכרה 3 חדרים"
 
 
-def test_dom_comparison_matches_by_post_id_and_checks_the_day():
+def _dom_comparison():
     captured = parse_graphql_body(_body(_story()))
     day = datetime.fromtimestamp(_CREATED)
     harvested = {"https://www.facebook.com/groups/1/posts/111/": {"date": "dom"}}
+    return compare_with_dom(harvested, captured, lambda _: day)
 
-    stats = compare_with_dom(harvested, captured, lambda _: day)
 
-    assert (stats["matched"], stats["dates_agree"]) == (1, 1)
+def test_dom_comparison_matches_by_post_id():
+    assert _dom_comparison()["matched"] == 1
+
+
+def test_dom_comparison_checks_the_day():
+    assert _dom_comparison()["dates_agree"] == 1

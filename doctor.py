@@ -93,8 +93,8 @@ def _check_db():
 
 
 def _check_last_run():
-    """A scheduled run that silently stopped happening (seen: no run log from July 24 to November)
-    shows up here, and `--alert` DMs it, instead of only as a quiet Telegram chat."""
+    # A scheduled run that silently stopped happening (seen: no run log from July 24 to November)
+    # shows up here, and --alert DMs it, instead of only as a quiet Telegram chat.
     if not storage.DB_PATH.exists():
         return ("last run", WARN, "no database yet", "")
     try:

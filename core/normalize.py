@@ -55,7 +55,6 @@ def _strip_comment_section(text: str) -> str:
 _PHONE_RE = re.compile(r'0(?:5\d|7[2-9])[-\s]?\d{7}|0[23489][-\s]?\d{7}')
 
 def _first_mobile_phone(text: str) -> str | None:
-    """First Israeli mobile number (05X, digits only) in the text — the contact a WhatsApp link can reach."""
     for match in _PHONE_RE.findall(text or ""):
         digits = re.sub(r'\D', '', match)
         if digits.startswith("05"):

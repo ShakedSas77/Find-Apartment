@@ -99,7 +99,7 @@ def parse_group_rows(values: list[list[str]]) -> list[dict]:
 
 
 def _fill_from_scans(group: dict, seen: dict):
-    """Blank name/cities get what the scans learned from the group's FB page; filled ones are the user's."""
+    # Filled name/cities are the user's own edits; only blanks take what the scans learned.
     if not group.get("name") and seen.get("name"):
         group["name"] = _TITLE_SUFFIX_RE.sub("", seen["name"])
     if not group.get("cities") and seen.get("cities"):

@@ -53,8 +53,6 @@ class RunLog:
 
 
 class _Tee:
-    """Writes through to the original stream; the log file gets whole lines with a time prefix."""
-
     def __init__(self, original, log_file, run_log: RunLog, lock: threading.Lock):
         self._original = original
         self._file = log_file

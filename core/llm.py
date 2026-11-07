@@ -148,8 +148,8 @@ def _is_rate_limit(error_msg: str) -> bool:
     return "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg
 
 def _quota_kind(error_msg: str) -> str:
-    """'day' | 'minute' | 'unknown' — which quota a 429 names. Google doesn't always say,
-    so 'unknown' is retried like a per-minute limit; a real daily cap just fails the retries."""
+    # Google doesn't always name the quota, so 'unknown' is retried like a per-minute limit;
+    # a real daily cap just fails the retries.
     s = error_msg.lower().replace("_", "").replace(" ", "")
     if "perday" in s:
         return "day"
@@ -160,7 +160,6 @@ def _quota_kind(error_msg: str) -> str:
 _RETRY_DELAY_RE = re.compile(r"retry(?:delay|\sin)[\"':\s]*([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
 
 def _retry_delay_s(error_msg: str, attempt: int) -> float:
-    """Google's own retryDelay from the 429 body when present, else exponential backoff — capped."""
     match = _RETRY_DELAY_RE.search(error_msg)
     delay = float(match.group(1)) if match else 5.0 * (3 ** attempt)
     return min(delay, GEMINI_RETRY_MAX_SLEEP_S)

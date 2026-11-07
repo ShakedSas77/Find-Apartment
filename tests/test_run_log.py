@@ -19,7 +19,7 @@ from core import storage
 
 @pytest.fixture
 def tee(tmp_path):
-    """A _Tee over an in-memory console, without touching the real sys.stdout."""
+    # In-memory console, so the real sys.stdout is never touched.
     console = io.StringIO()
     log_path = tmp_path / "bot_test.log"
     log_file = open(log_path, "a", encoding="utf-8")
@@ -60,12 +60,23 @@ def test_partial_writes_are_joined_into_one_log_line(tee):
     assert log_path.read_text(encoding="utf-8").split("] ", 1)[1] == "Found 12 real posts.\n"
 
 
-def test_error_and_warning_lines_are_counted_including_group_prefixed_ones(tee):
+_PROBLEM_LINES = "    ERROR: local Ollama analysis failed\nWARNING: [Group 3/33] Telegram alert failed\n[Group 2/33] fine\n"
+
+
+def test_error_lines_are_counted(tee):
     stream, _, _, recorder = tee
 
-    stream.write("    ERROR: local Ollama analysis failed\nWARNING: [Group 3/33] Telegram alert failed\n[Group 2/33] fine\n")
+    stream.write(_PROBLEM_LINES)
 
-    assert (recorder.errors, recorder.warnings) == (1, 1)
+    assert recorder.errors == 1
+
+
+def test_group_prefixed_warning_lines_are_counted(tee):
+    stream, _, _, recorder = tee
+
+    stream.write(_PROBLEM_LINES)
+
+    assert recorder.warnings == 1
 
 
 def test_old_bot_logs_are_pruned(tmp_path):
