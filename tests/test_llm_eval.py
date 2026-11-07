@@ -3,7 +3,7 @@ Tests for llm_eval's field scoring — the comparison every prompt/model change 
 """
 import json
 
-from llm_eval import FIXTURES_DIR, score_extraction
+from core.llm_eval import FIXTURES_DIR, score_extraction
 
 
 def test_matching_extraction_scores_every_field_right():
@@ -37,7 +37,7 @@ def test_every_fixture_has_an_expected_answer():
 
 def test_eval_with_an_ollama_model_scores_that_local_model(monkeypatch):
     import core.llm as llm
-    import llm_eval
+    from core import llm_eval
 
     used = []
     monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", False)

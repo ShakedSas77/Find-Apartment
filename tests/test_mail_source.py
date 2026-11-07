@@ -6,7 +6,7 @@ from email.message import EmailMessage
 
 import pytest
 
-import mail_source
+from sources import mail_source
 
 
 def _email(plain: str | None = None, html_body: str | None = None) -> EmailMessage:

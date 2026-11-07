@@ -17,7 +17,7 @@ run_bot.bat
 # Sync the sheet's Groups tab (group list) with the local DB: fill names/cities, refresh stats
 python apartment_bot.py --sync-groups
 
-# Score the LLM's extraction of test_posts/*.txt against test_posts/expected.json
+# Score the LLM's extraction of tests/fixtures/test_posts/*.txt against tests/fixtures/test_posts/expected.json
 # (one real LLM call per fixture) — run before/after any prompt or model change
 python apartment_bot.py --eval
 
@@ -52,35 +52,48 @@ python bot_listener.py
 
 ## Architecture
 
+Layout (reorganized 2026-11-07 — keep new modules in the matching folder):
+
+```
+apartment_bot.py bot_listener.py doctor.py backup_db.py clean_data.py   entry points (run these)
+config.py config_local.py env.py prompts.py                            settings, secrets access, LLM prompt
+core/          pipeline + shared logic: evaluate, llm, normalize, dedupe, scoring, storage, run_log, llm_eval, util, errors
+sources/       where listings come from: fb_scraper, browser, graphql_capture, mail_source
+integrations/  external services: sheets, groups_sync, maps, distance_fallback, telegram_notifier
+tests/         pytest suite; tests/fixtures/test_posts/ = labelled LLM fixtures
+docs/archive/  past plans, kept for history
+run_*.bat run_hidden.vbs                                               launchers (Task Scheduler points here — keep at root)
+```
+
 | File | Purpose |
 |---|---|
 | `apartment_bot.py` | CLI entrypoint only: `--stats`/`--reparse-rejected`/`--replay`/`--prune`/`--recompute-scores`/`--backfill-ratings`/`__main__` dispatch to `run_scraper()`. As of the Phase 0-9 extraction (2026-07-26), the scraping/LLM/Sheets logic that used to all live here has moved to the modules below — see each for what it owns. |
-| `fb_scraper.py` | Playwright/FB-DOM-specific: checkpoint/CAPTCHA handling, dead-link pruning, post-URL canonicalization, article selectors, "See more" expansion, `_scan_group_page`/`_scan_group`, `run_scraper()` |
+| `sources/fb_scraper.py` | Playwright/FB-DOM-specific: checkpoint/CAPTCHA handling, dead-link pruning, post-URL canonicalization, article selectors, "See more" expansion, `_scan_group_page`/`_scan_group`, `run_scraper()` |
 | `core/evaluate.py` | Source-agnostic listing pipeline: `process_candidate_listing()` (LLM parse → `_evaluate_post_data` → `_build_row` → queue), `_content_prefilter()` |
 | `core/llm.py` | Gemini/Ollama dual-path orchestration: `analyze_post_with_llm()`, `ApartmentData` schema, `get_gemini_client()`, `GEMINI_EXHAUSTED` |
-| `maps.py` | Distance/geocoding: `get_walking_distance()`, `_validate_address_with_geocoding()`, `_format_address_display()`, `get_gmaps_client()` |
-| `sheets.py` | Google Sheets I/O: `setup_google_sheet()`, `dedupe_and_sort_sheet()`, row-rewrite helpers |
+| `integrations/maps.py` | Distance/geocoding: `get_walking_distance()`, `_validate_address_with_geocoding()`, `_format_address_display()`, `get_gmaps_client()` |
+| `integrations/sheets.py` | Google Sheets I/O: `setup_google_sheet()`, `dedupe_and_sort_sheet()`, row-rewrite helpers |
 | `core/normalize.py` | Pure text/domain normalization: dates, floor, fees, parking, address formatting, `BIDI_RE`, `_sheet_safe_cell` |
 | `core/dedupe.py` | Cross-post dedup: `_text_dedup_hash()`, `_listing_dedupe_key()` |
-| `browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — used by `fb_scraper.py` |
+| `sources/browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — used by `sources/fb_scraper.py` |
 | `core/util.py` / `core/errors.py` | Shared low-level helpers (`_safe_print`, `_with_retries`, locks) and signal exceptions (`GmapsQuotaHalted`, `HeadlessCheckpointAbort`) — dependency-free, importable from anywhere without a cycle |
 | `env.py` | `.env` access with no import-time validation (`require_env()` is called explicitly from `apartment_bot.py`'s `__main__`, not at import) — this is what makes every other module importable/testable without credentials |
 | `config.py` | All tunables: URLs, price/room filters, sheet ID, destination, negative keywords |
 | `prompts.py` | `get_apartment_prompt_improved(text)` — dispatches to `get_apartment_prompt_english()` or `get_apartment_prompt_hebrew()` per `config.PROMPT_LANGUAGE` |
-| `storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
-| `scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
-| `mail_source.py` | Second listing source, in progress: sites' own saved-search alert emails (Yad2, ...) from a Gmail label over **read-only** IMAP (`select(readonly=True)` + `BODY.PEEK`, never marks/moves/deletes mail). Step 1 only: `--mail-dump` saves each email's text to `ALERTS_DUMP_DIR` (gitignored) so the per-listing split can be written against real emails; not yet wired into `run_scraper()`. The legitimate replacement for the removed Madlan API source (bot-protection 403) |
-| `graphql_capture.py` | Passive listener on the feed's own `/api/graphql/` responses (post id, message text, exact `creation_time`; no extra requests). **Observational only** (`GRAPHQL_CAPTURE_ENABLED`): `_scan_group_page` prints per group how many DOM posts it matched and whether dates agree — proving the undocumented payload parse before any post data is taken from it. Approach from FaustRen/facebook-graphql-scraper |
-| `run_log.py` | Every scrape (any entry point) tees console output to `logs/bot_<timestamp>.log`, each line `[HH:MM:SS]`-prefixed, pruned after `LOG_RETENTION_DAYS`; counts `ERROR:`/`WARNING:` lines for the end-of-run summary and the Telegram run-finished message. `apartment_bot.py` records each run in the `runs` table (`storage.start_run`/`finish_run`: mode, status ok/checkpoint/no_groups_scanned/crashed, counts, log path) — `--stats` lists the last 10, `doctor.py`'s `last run` check FAILs after `RUN_STALE_HOURS` without a successful live run |
-| `groups_sync.py` | The sheet's **Groups** tab is the source of truth for which FB groups get scanned (replaces `TARGET_URLS`, which now only seeds an empty tab). User columns: קישור לקבוצה (any link shape or bare id, canonicalized), שם הקבוצה / ערים (filled from the scanned page title only when blank), פעיל ("לא" pauses), הערות. Bot columns: posts scanned, added, match %, last added, last scan, סטטוס (תקין / לא חבר/ה בקבוצה — the scan saw FB's Join button and no posts / לא נמצאו פוסטים / ממתינה לסריקה ראשונה; `storage.set_group_status`). Adding a group needs only its link: invisible direction marks are stripped, a blank פעיל means active. Duplicates (same group under any link shape) merge into the first row — its cells win, blanks are filled from the copy — are reported and dropped on the next write. Known limit: a vanity-slug link and the numeric-id link of the same group can't be matched. `sync_groups()` runs at the start of `run_scraper()` (dry runs read-only) and after a live run's dedupe; mirrors the tab into the `groups` DB table, falling back to that mirror (then `TARGET_URLS`) when the sheet is unreachable. Standalone: `--sync-groups` |
-| `distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used only when `GMAPS_MONTHLY_CAP` is hit |
-| `telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
+| `core/storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
+| `core/scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
+| `sources/mail_source.py` | Second listing source, in progress: sites' own saved-search alert emails (Yad2, ...) from a Gmail label over **read-only** IMAP (`select(readonly=True)` + `BODY.PEEK`, never marks/moves/deletes mail). Step 1 only: `--mail-dump` saves each email's text to `ALERTS_DUMP_DIR` (gitignored) so the per-listing split can be written against real emails; not yet wired into `run_scraper()`. The legitimate replacement for the removed Madlan API source (bot-protection 403) |
+| `sources/graphql_capture.py` | Passive listener on the feed's own `/api/graphql/` responses (post id, message text, exact `creation_time`; no extra requests). **Observational only** (`GRAPHQL_CAPTURE_ENABLED`): `_scan_group_page` prints per group how many DOM posts it matched and whether dates agree — proving the undocumented payload parse before any post data is taken from it. Approach from FaustRen/facebook-graphql-scraper |
+| `core/run_log.py` | Every scrape (any entry point) tees console output to `logs/bot_<timestamp>.log`, each line `[HH:MM:SS]`-prefixed, pruned after `LOG_RETENTION_DAYS`; counts `ERROR:`/`WARNING:` lines for the end-of-run summary and the Telegram run-finished message. `apartment_bot.py` records each run in the `runs` table (`storage.start_run`/`finish_run`: mode, status ok/checkpoint/no_groups_scanned/crashed, counts, log path) — `--stats` lists the last 10, `doctor.py`'s `last run` check FAILs after `RUN_STALE_HOURS` without a successful live run |
+| `integrations/groups_sync.py` | The sheet's **Groups** tab is the source of truth for which FB groups get scanned (replaces `TARGET_URLS`, which now only seeds an empty tab). User columns: קישור לקבוצה (any link shape or bare id, canonicalized), שם הקבוצה / ערים (filled from the scanned page title only when blank), פעיל ("לא" pauses), הערות. Bot columns: posts scanned, added, match %, last added, last scan, סטטוס (תקין / לא חבר/ה בקבוצה — the scan saw FB's Join button and no posts / לא נמצאו פוסטים / ממתינה לסריקה ראשונה; `storage.set_group_status`). Adding a group needs only its link: invisible direction marks are stripped, a blank פעיל means active. Duplicates (same group under any link shape) merge into the first row — its cells win, blanks are filled from the copy — are reported and dropped on the next write. Known limit: a vanity-slug link and the numeric-id link of the same group can't be matched. `sync_groups()` runs at the start of `run_scraper()` (dry runs read-only) and after a live run's dedupe; mirrors the tab into the `groups` DB table, falling back to that mirror (then `TARGET_URLS`) when the sheet is unreachable. Standalone: `--sync-groups` |
+| `integrations/distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used only when `GMAPS_MONTHLY_CAP` is hit |
+| `integrations/telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
 | `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps, records them, updates the tally shown on the message |
 | `doctor.py` | Dependency health check (env, credentials.json, Sheets, Gemini, Ollama, Telegram) — run manually or `--alert` to DM on failure. Never calls Geocoding/Distance Matrix (shares `GMAPS_MONTHLY_CAP`'s counter) |
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
 | `credentials.json` | Google Service Account key (gitignored) |
-| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) ; `ALERTS_IMAP_USER`/`ALERTS_IMAP_PASSWORD` (a Gmail **app password**)/`ALERTS_IMAP_FOLDER` (optional, for `mail_source.py`) — all gitignored |
+| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) ; `ALERTS_IMAP_USER`/`ALERTS_IMAP_PASSWORD` (a Gmail **app password**)/`ALERTS_IMAP_FOLDER` (optional, for `sources/mail_source.py`) — all gitignored |
 | `chrome_profile/` | Playwright persistent context — holds FB login session cookie |
 
 ## Data Flow
@@ -105,12 +118,12 @@ python bot_listener.py
 
 | skill | load before touching |
 |---|---|
-| `scraper-notes` | `fb_scraper.py`, `browser.py`, concurrency/scroll/stealth settings |
+| `scraper-notes` | `sources/fb_scraper.py`, `sources/browser.py`, concurrency/scroll/stealth settings |
 | `llm-notes` | `core/llm.py`, `prompts.py`, LLM text prep in `core/normalize.py` |
-| `sheets-notes` | `sheets.py`, `_build_row` in `core/evaluate.py` |
-| `storage-notes` | `storage.py`, `core/evaluate.py`, `core/dedupe.py`, `maps.py`, `apartment_bot.py` CLI flags |
-| `scoring-notes` | `scoring.py`, entry-date normalization, `SCORE_*` settings |
-| `telegram-notes` | `telegram_notifier.py`, `bot_listener.py` |
+| `sheets-notes` | `integrations/sheets.py`, `_build_row` in `core/evaluate.py` |
+| `storage-notes` | `core/storage.py`, `core/evaluate.py`, `core/dedupe.py`, `integrations/maps.py`, `apartment_bot.py` CLI flags |
+| `scoring-notes` | `core/scoring.py`, entry-date normalization, `SCORE_*` settings |
+| `telegram-notes` | `integrations/telegram_notifier.py`, `bot_listener.py` |
 
 ## Known Issues
 

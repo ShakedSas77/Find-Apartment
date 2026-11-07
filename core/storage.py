@@ -16,7 +16,7 @@ import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "bot_data.db"
+DB_PATH = Path(__file__).resolve().parent.parent / "bot_data.db"  # project root, not core/
 
 VERDICT_ADDED = "added"
 VERDICT_REJECTED_PRICE = "rejected_price"

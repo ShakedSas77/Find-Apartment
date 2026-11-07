@@ -9,8 +9,8 @@ from datetime import date
 
 import pytest
 
-import sheets
-import storage
+from integrations import sheets
+from core import storage
 from config import SHEET_HEADERS
 
 

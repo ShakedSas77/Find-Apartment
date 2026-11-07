@@ -1,7 +1,7 @@
 ---
 name: sheets-notes
 description: >
-  Google Sheet layout and writes: headers, append/rewrite, dedupe_and_sort_sheet, field normalization (floor/fees/agent), formula-injection guard. Load before editing sheets.py or _build_row in core/evaluate.py.
+  Google Sheet layout and writes: headers, append/rewrite, dedupe_and_sort_sheet, field normalization (floor/fees/agent), formula-injection guard. Load before editing integrations/sheets.py or _build_row in core/evaluate.py.
 ---
 
 # Sheets Notes

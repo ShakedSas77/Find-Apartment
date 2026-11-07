@@ -15,7 +15,7 @@ from pathlib import Path
 
 from core.normalize import _parse_floor
 
-FIXTURES_DIR = Path(__file__).parent / "test_posts"
+FIXTURES_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "test_posts"
 
 
 def score_extraction(expected: dict, actual: dict | None) -> dict[str, bool]:

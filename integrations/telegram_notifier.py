@@ -19,8 +19,8 @@ import requests
 from dotenv import load_dotenv
 
 import config
-import scoring
-import storage
+from core import scoring
+from core import storage
 from core.normalize import _classify_address_confidence, map_bool
 
 load_dotenv()

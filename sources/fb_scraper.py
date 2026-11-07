@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 
 from playwright.sync_api import sync_playwright
 
-import storage
-import telegram_notifier
+from core import storage
+from integrations import telegram_notifier
 from config import (
     SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
     MIN_SCROLLS_BEFORE_EARLY_STOP, GROUP_YIELD_SCALING, GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_POOR_RATE,
@@ -31,7 +31,7 @@ from config import (
     GRAPHQL_CAPTURE_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
-from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
+from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
 from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
@@ -41,10 +41,10 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
-from groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
-from graphql_capture import GraphqlPostCapture, compare_with_dom
-import run_log
-from sheets import (
+from integrations.groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
+from sources.graphql_capture import GraphqlPostCapture, compare_with_dom
+from core import run_log
+from integrations.sheets import (
     setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
 )

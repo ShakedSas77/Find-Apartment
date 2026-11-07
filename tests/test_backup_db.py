@@ -8,7 +8,7 @@ import time
 import pytest
 
 import backup_db
-import storage
+from core import storage
 
 
 @pytest.fixture

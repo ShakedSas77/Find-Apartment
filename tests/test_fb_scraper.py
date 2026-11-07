@@ -5,7 +5,7 @@ piece whose regressions silently turn a 3-scroll scan into an 80-scroll crawl ev
 from datetime import datetime, timedelta
 
 from config import GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_MIN_SCROLLS, GROUP_YIELD_POOR_RATE, GROUP_YIELD_RICH_RATE
-from fb_scraper import _read_post_text, _update_old_streak, _yield_scaled_scroll_cap
+from sources.fb_scraper import _read_post_text, _update_old_streak, _yield_scaled_scroll_cap
 
 _CUTOFF = datetime(2026, 10, 1, 12, 0)
 _AFTER_CUTOFF = _CUTOFF + timedelta(days=1)

@@ -14,7 +14,7 @@ from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
 from config import CREDENTIALS_FILE
-from storage import DB_PATH
+from core.storage import DB_PATH
 
 load_dotenv()
 

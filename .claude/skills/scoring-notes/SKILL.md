@@ -1,7 +1,7 @@
 ---
 name: scoring-notes
 description: >
-  Fit score factors and weights, rolling entry-date scoring, entry-date normalization and hard reject, agent-fee adjustment. Load before editing scoring.py, _normalize_entry_date, or SCORE_* settings in config.py.
+  Fit score factors and weights, rolling entry-date scoring, entry-date normalization and hard reject, agent-fee adjustment. Load before editing core/scoring.py, _normalize_entry_date, or SCORE_* settings in config.py.
 ---
 
 # Scoring Notes

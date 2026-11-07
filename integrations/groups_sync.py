@@ -15,7 +15,7 @@ tab is seeded from config.TARGET_URLS (the pre-sheet group list).
 import re
 
 import config
-import storage
+from core import storage
 from core.normalize import BIDI_RE, _sheet_safe_cell
 from core.util import _with_retries
 

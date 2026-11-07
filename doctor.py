@@ -29,7 +29,7 @@ except Exception:
     pass
 
 import config
-import storage
+from core import storage
 
 PASS, FAIL, WARN = "PASS", "FAIL", "WARN"
 
@@ -172,7 +172,7 @@ def _check_gmaps():
 def _check_telegram():
     if not config.TELEGRAM_ENABLED:
         return ("telegram", WARN, "TELEGRAM_ENABLED=False", "optional — set True + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env to enable")
-    import telegram_notifier
+    from integrations import telegram_notifier
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -209,7 +209,7 @@ def main(argv=None) -> int:
 
     if alert and any_fail:
         try:
-            import telegram_notifier
+            from integrations import telegram_notifier
             summary = "\n".join(
                 f"[{status}] {name}: {detail}" for name, status, detail, _ in results if status == FAIL
             )

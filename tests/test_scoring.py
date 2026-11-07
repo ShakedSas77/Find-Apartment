@@ -4,7 +4,7 @@ its private helper directly (plain dicts/values in, a number out — no DB/
 network/LLM involved), plus a couple of compute_fit_score integration checks.
 """
 from config import MAX_PRICE, MIN_ROOMS, SCORE_WEIGHT_ENTRY_DATE, SCORE_WEIGHT_PRICE
-import scoring
+from core import scoring
 
 
 # --- _price_score ---

@@ -9,7 +9,7 @@ listing ever added). No gspread/Sheets — only storage.py + core.normalize.
 import hashlib
 import re
 
-import storage
+from core import storage
 from core.normalize import _PHONE_RE, _PRICE_CONTEXT_RE, _ROOMS_EXTRACT_RE, _normalize_address_key, _CORNER_HINT_RE
 
 # Strips the volatile per-repost header (author name, online-status/"Follow"

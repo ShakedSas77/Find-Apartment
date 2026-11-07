@@ -12,7 +12,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 import env
-import storage
+from core import storage
 from config import CREDENTIALS_FILE, SHEET_HEADERS
 from core.util import _with_retries
 from core.normalize import _sheet_safe_cell, _is_recent_post_date, _post_date_sort_key
