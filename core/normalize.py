@@ -276,6 +276,10 @@ _ROOMMATE_COUPLE_EXCEPTION_RE = re.compile(
 # Matched at the keyword's own position, so a genuine "מחפשים דירה" elsewhere still rejects the post.
 _SEEKING_A_TENANT_RE = re.compile(r'מחפש(?:ים|ת|ות)?\s+(?:שוכר|שוכרים|שוכרת|דייר|דיירים|דיירת|מחליפ|מחליף|מישהו|מישהי|זוג)')
 
+# "סטודיו" in NEGATIVE_KEYWORDS means a studio apartment — not a building amenity ("סטודיו פילאטיס",
+# "סטודיו ליוגה") listed among a regular flat's perks (seen 2026-11-07 rejecting a 3-room listing).
+_STUDIO_AMENITY_RE = re.compile(r'סטודיו\s+(?:ל|ה)?(?:פילאטיס|יוגה|כושר|ריקוד|מחול|צילום|הקלטות|אימונים)')
+
 # English-language posts state rooms as "3 room apartment" — ROOMS_PRE_FILTER_REGEX (Hebrew-only, not to
 # be reformatted) rejected all 9 seen. "bedrooms" is deliberately absent: 3 bedrooms is 4 rooms in Israel.
 _ENGLISH_ROOMS_RE = re.compile(r'(?<!\d)(?:2\.5|3|3\.5)\s*-?\s*rooms?\b', re.IGNORECASE)

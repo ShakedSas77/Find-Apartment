@@ -233,3 +233,13 @@ def test_english_bedrooms_do_not_count_as_rooms():
     _, analysis, _ = evaluate._content_prefilter("3 bedrooms apartment for rent in Ramat Gan, 6,200 NIS")
 
     assert analysis["reject_reason"] == "room_count_mismatch"
+
+
+def test_studio_as_a_building_amenity_does_not_reject_the_listing():
+    assert evaluate._content_prefilter("להשכרה 3 חדרים ברמת גן, 6,200 ש\"ח. בבניין: בריכה, חדר כושר, סטודיו פילאטיס") is None
+
+
+def test_a_studio_apartment_is_still_rejected():
+    _, analysis, _ = evaluate._content_prefilter("להשכרה דירת סטודיו מקסימה ברמת גן, 3 חדרים בבניין, 4,500 ש\"ח")
+
+    assert analysis["reject_reason"] == "negative_keyword:סטודיו"
