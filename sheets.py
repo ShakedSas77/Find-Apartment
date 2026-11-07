@@ -174,7 +174,8 @@ def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list
     the row data raises a Sheets API 400, and since the clear below runs
     first, a crash there would wipe the sheet without writing anything back.
     """
-    last_col = chr(ord('A') + total_cols - 1)
+    # chr() arithmetic breaks past column Z (27+ columns yields '[' etc.)
+    last_col = gspread.utils.rowcol_to_a1(1, total_cols).rstrip("0123456789")
     _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
 
     # DD/MM text ("01/09") and the "YYYY-MM-DD HH:MM" scan timestamp both look
