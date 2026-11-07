@@ -17,7 +17,7 @@ from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
     _content_prefilter,
 )
-from sheets import setup_google_sheet, dedupe_and_sort_sheet
+from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from fb_scraper import run_scraper
 import env
 import scoring
@@ -170,52 +170,7 @@ def print_stats():
         for address, cnt in top_addresses:
             print(f"  {cnt:4}  {address}")
 
-def _bool_cell(s: str) -> bool | None:
-    if s == "כן": return True
-    if s == "לא": return False
-    return None
-
-def _number_cell(s: str) -> float | None:
-    cleaned = (s or "").replace(",", "").replace("₪", "").strip()
-    try:
-        return float(cleaned)
-    except ValueError:
-        return None
-
-_COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
-_COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
-_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 _TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
-
-def _fields_from_sheet_row(row: list) -> dict:
-    """
-    Reconstructs a fields dict from an already-written sheet row — enough for
-    both compute_fit_score() and telegram_notifier's message formatting.
-    lat/lon were never persisted anywhere (not the sheet, not the DB), so the
-    location score's directional adjustment comes out neutral (0) here —
-    everything else recomputes/displays for real.
-    """
-    def cell(i):
-        return row[i] if len(row) > i else ""
-
-    dist_km = _number_cell(cell(_COL_DIST_KM))
-    floor_val = _number_cell(cell(_COL_FLOOR))
-    return {
-        "price_val": _number_cell(cell(_COL_PRICE)),
-        "rooms_val": _number_cell(cell(_COL_ROOMS)),
-        "distance_meters": dist_km * 1000 if dist_km is not None else None,
-        "distance_text": cell(_COL_DIST_KM),
-        "entry_date": cell(_COL_ENTRY_DATE) or None,
-        "floor": int(floor_val) if floor_val is not None else None,
-        "elevator": _bool_cell(cell(_COL_ELEVATOR)),
-        "parking": cell(_COL_PARKING),
-        "arnona": cell(_COL_ARNONA),
-        "vaad": cell(_COL_VAAD),
-        "shelter": _bool_cell(cell(_COL_SHELTER)),
-        "is_agent": _bool_cell(cell(_COL_AGENT)),
-        "address": cell(_COL_ADDRESS),
-        "lat": None, "lon": None,
-    }
 
 def recompute_sheet_scores():
     """

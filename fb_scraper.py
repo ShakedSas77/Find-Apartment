@@ -26,7 +26,7 @@ from config import (
     MIN_SCROLLS_BEFORE_EARLY_STOP,
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
-    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE,
+    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -39,7 +39,10 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter
 from backup_db import backup_if_stale
-from sheets import setup_google_sheet, dedupe_and_sort_sheet, _append_rows_batch, _rewrite_sheet_data_rows
+from sheets import (
+    setup_google_sheet, dedupe_and_sort_sheet, _append_rows_batch, _rewrite_sheet_data_rows,
+    _fields_from_sheet_row, _SCORE_COL_INDEX,
+)
 
 _text_dedup_lock = threading.Lock()
 
@@ -656,6 +659,37 @@ def _make_group_label(index: int, total: int, url: str) -> str:
     group_id = url.rstrip("/").rsplit("/", 1)[-1]
     return f"Group {index}/{total} {group_id}"
 
+def _resend_owed_alerts(sheet) -> int:
+    """
+    Re-sends Telegram alerts for recently added listings whose send failed. The
+    batch flush appends to the sheet and records VERDICT_ADDED before sending, so
+    a Telegram/network failure there used to lose the alert for good — the post
+    is never rescanned. The message is rebuilt from the listing's sheet row (same
+    as --backfill-ratings); a listing no longer in the sheet (merged as a
+    cross-post, pruned, voted out) is skipped, not alerted.
+    """
+    owed = storage.get_owed_alert_urls(ALERT_RETRY_MAX_AGE_HOURS)
+    if not owed:
+        return 0
+    rows_by_url = {row[0]: row for row in sheet.get_all_values()[1:] if row and row[0]}
+    sent = 0
+    for url in owed:
+        row = rows_by_url.get(url)
+        if row is None:
+            continue
+        score_cell = row[_SCORE_COL_INDEX].strip() if len(row) > _SCORE_COL_INDEX else ""
+        try:
+            score = int(score_cell)
+        except ValueError:
+            score = 0
+        try:
+            if telegram_notifier.send_listing_alert(url, _fields_from_sheet_row(row), score):
+                sent += 1
+        except Exception as e:
+            print(f"WARNING: re-sending owed Telegram alert failed for {url}: {e}")
+    print(f"Re-sent {sent}/{len(owed)} owed Telegram alert(s) from earlier runs.")
+    return sent
+
 def run_scraper(headless: bool = False, live: bool = False):
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
@@ -673,6 +707,7 @@ def run_scraper(headless: bool = False, live: bool = False):
             telegram_notifier.send_run_started(total)
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
+        _resend_owed_alerts(sheet)
     groups_scanned = 0
     total_added = 0
     total_posts_seen = 0

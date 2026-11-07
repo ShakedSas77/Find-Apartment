@@ -420,6 +420,22 @@ def get_reparse_candidates() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_owed_alert_urls(max_age_hours: int) -> list[str]:
+    """
+    URLs of listings recorded as added within the last max_age_hours whose
+    Telegram alert never went out (no stored message id) — a send that failed
+    on a network/API error, after the row was already safely in the sheet.
+    """
+    cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url FROM posts WHERE verdict = ? AND telegram_message_id IS NULL "
+            "AND last_processed >= ? ORDER BY last_processed",
+            (VERDICT_ADDED, cutoff),
+        ).fetchall()
+    return [row["url"] for row in rows]
+
+
 def get_added_listing_data() -> dict[str, dict]:
     """
     url -> {address, price_val, rooms_val, distance_text} for every added

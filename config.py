@@ -333,6 +333,9 @@ TELEGRAM_ENABLED = True
 # Set from the sheet's score spread on 2026-10-15 (tertiles were 60 / 69).
 TELEGRAM_SCORE_GOOD = 70
 TELEGRAM_SCORE_OK = 55
+# A live run re-sends alerts for listings added within this window whose Telegram send failed
+# (row is in the sheet, no message id stored). Older ones are left alone — a days-late alert is noise.
+ALERT_RETRY_MAX_AGE_HOURS = 48
 VOTES_TO_REMOVE = 2
 # Up-votes at which bot_listener.py sends a highlight alert to the Telegram chat.
 VOTES_TO_HIGHLIGHT = 2
