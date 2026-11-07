@@ -28,6 +28,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
+    GRAPHQL_CAPTURE_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -40,6 +41,7 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
+from graphql_capture import GraphqlPostCapture, compare_with_dom
 from sheets import (
     setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
@@ -539,6 +541,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
     pending_rows = []
     pending_seen_urls = set()
     pending_records = []
+    graphql = GraphqlPostCapture(page) if GRAPHQL_CAPTURE_ENABLED else None
     try:
         _safe_print(f"\n{'='*50}\nScanning {group_label}\n{target_url}\n{'='*50}")
 
@@ -579,6 +582,8 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
 
         _safe_print(f"[{group_label}] Found {len(harvested)} real posts.")
         stats["posts_seen"] = len(harvested)
+        if graphql is not None:
+            _report_graphql_capture(graphql, harvested, group_label)
 
         if len(harvested) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
@@ -620,7 +625,21 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
         stats["checkpoint_hit"] = True
+    finally:
+        if graphql is not None:
+            graphql.detach()
     return stats
+
+def _report_graphql_capture(graphql: GraphqlPostCapture, harvested: dict, group_label: str):
+    """Observational only: how well the passive GraphQL capture lines up with the DOM scan, so it can
+    be trusted (or not) before any post data is taken from it. Never affects the scan."""
+    try:
+        s = compare_with_dom(harvested, graphql.collect(), _infer_post_date)
+    except Exception as e:
+        _safe_print(f"    [{group_label}] GraphQL capture: comparison failed ({e}).")
+        return
+    _safe_print(f"    [{group_label}] GraphQL capture: {s['captured']} post(s) captured, {s['matched']}/{s['dom_posts']} "
+                f"DOM posts matched ({s['with_text']} with text), dates agree on {s['dates_agree']}/{s['dated']}.")
 
 def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool,
                 user_agent: str = "", browser_locale: str = "", live: bool = False) -> dict:

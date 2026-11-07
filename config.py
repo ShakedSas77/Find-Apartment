@@ -215,6 +215,11 @@ WEBGL_RENDERER = None
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
 
+# Passively read the feed's own /api/graphql/ responses (graphql_capture.py) and print, per group,
+# how well their post ids/text/exact dates line up with the DOM scan. Observational only — no extra
+# requests, no effect on what's scanned or added. Turn off if it ever slows a run down.
+GRAPHQL_CAPTURE_ENABLED = True
+
 # ─── Alert emails (second listing source) ──────────────────────────────────────
 # Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP
 # by mail_source.py. Credentials live in .env (ALERTS_IMAP_USER/PASSWORD/FOLDER).
