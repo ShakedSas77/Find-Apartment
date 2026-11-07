@@ -209,3 +209,27 @@ def test_price_in_words_counts_as_an_amount():
 
 def test_a_phone_number_alone_is_not_an_amount():
     assert not evaluate._has_price_amount("פרטים אצל דני 054-1234567")
+
+
+def test_landlord_looking_for_a_tenant_is_not_rejected_as_a_seeker():
+    assert evaluate._content_prefilter("מחפשים דייר לדירת 3 חדרים ברמת גן, 6,000 ש\"ח") is None
+
+
+def test_leaving_tenant_looking_for_a_replacement_is_not_rejected_as_a_seeker():
+    assert evaluate._content_prefilter("עוזבת את הדירה ומחפשת מחליפ/ה, 3 חדרים בגבעתיים, 5,900 ש\"ח") is None
+
+
+def test_someone_looking_for_an_apartment_is_still_rejected():
+    _, analysis, _ = evaluate._content_prefilter("זוג מחפשים דירת 3 חדרים ברמת גן עד 6,000 ש\"ח")
+
+    assert analysis["reject_reason"].startswith("negative_keyword:מחפש")
+
+
+def test_english_room_count_passes_the_room_filter():
+    assert evaluate._content_prefilter("3 room apartment for rent in Ramat Gan, 6,200 NIS") is None
+
+
+def test_english_bedrooms_do_not_count_as_rooms():
+    _, analysis, _ = evaluate._content_prefilter("3 bedrooms apartment for rent in Ramat Gan, 6,200 NIS")
+
+    assert analysis["reject_reason"] == "room_count_mismatch"

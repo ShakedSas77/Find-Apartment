@@ -26,7 +26,7 @@ from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
-    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE,
+    _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
@@ -361,7 +361,8 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
                 f"Contains negative keyword '{roommate_match.group(0)}'.")
 
     # Other obvious non-relevant posts (sublets, studios, commercial, seekers)
-    neg_match = re.search(NEGATIVE_KEYWORDS, text)
+    neg_match = next((m for m in re.finditer(NEGATIVE_KEYWORDS, text)
+                      if not (m.group(0).startswith("מחפש") and _SEEKING_A_TENANT_RE.match(text, m.start()))), None)
     if neg_match:
         return (storage.VERDICT_PREFILTERED, {"reject_reason": f"negative_keyword:{neg_match.group(0)}"},
                 f"Contains negative keyword '{neg_match.group(0)}'.")
@@ -374,7 +375,7 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
         return (storage.VERDICT_PREFILTERED, {"reject_reason": f"for_sale:{sale_price_match.group(0).strip()}"},
                 f"Apartment for sale (price {sale_price_match.group(0).strip()}).")
 
-    if not re.search(ROOMS_PRE_FILTER_REGEX, text):
+    if not re.search(ROOMS_PRE_FILTER_REGEX, text) and not _ENGLISH_ROOMS_RE.search(text):
         clean_snip = text[:100].replace('\n', ' ')
         detail = f"\n      URL: {post_url}\n      Text: {clean_snip}..." if post_url else ""
         actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)

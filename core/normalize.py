@@ -270,6 +270,16 @@ _ROOMMATE_COUPLE_EXCEPTION_RE = re.compile(
     re.DOTALL
 )
 
+# "מחפש" in NEGATIVE_KEYWORDS means someone *seeking* an apartment — but a landlord seeking a tenant
+# ("מחפשים דייר/שוכר") or a leaving tenant seeking a replacement ("מחפש/ת מחליף/ה") is an offer.
+# Measured 2026-11-07: 42 such offers were rejected as seekers, 8 of them in the target rooms + price.
+# Matched at the keyword's own position, so a genuine "מחפשים דירה" elsewhere still rejects the post.
+_SEEKING_A_TENANT_RE = re.compile(r'מחפש(?:ים|ת|ות)?\s+(?:שוכר|שוכרים|שוכרת|דייר|דיירים|דיירת|מחליפ|מחליף|מישהו|מישהי|זוג)')
+
+# English-language posts state rooms as "3 room apartment" — ROOMS_PRE_FILTER_REGEX (Hebrew-only, not to
+# be reformatted) rejected all 9 seen. "bedrooms" is deliberately absent: 3 bedrooms is 4 rooms in Israel.
+_ENGLISH_ROOMS_RE = re.compile(r'(?<!\d)(?:2\.5|3|3\.5)\s*-?\s*rooms?\b', re.IGNORECASE)
+
 _PARKING_NONE_RE = re.compile(r'אין\s*חניה|בלי\s*חניה|ללא\s*חניה|^אין$')
 
 _PARKING_PRIVATE_RE = re.compile(r'פרטי|טאבו|מקור|צמוד|תת\s*קרקעי|חניון')
