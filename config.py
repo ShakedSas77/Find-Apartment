@@ -99,6 +99,11 @@ GEMINI_MAX_CONSECUTIVE_ERRORS = 3
 # base sleep between them (multiplied by the attempt number).
 GEMINI_UNAVAILABLE_RETRIES = 2
 GEMINI_UNAVAILABLE_BACKOFF_S = 5.0
+# A 429 that isn't a per-day quota (a per-minute burst, or one Google doesn't name) is retried on
+# the same model this many times, sleeping Google's own retryDelay when the error carries one,
+# before the model is given up for the run. Only an explicit PerDay 429 advances immediately.
+GEMINI_RATE_LIMIT_RETRIES = 2
+GEMINI_RETRY_MAX_SLEEP_S = 30.0
 # Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 

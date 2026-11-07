@@ -11,6 +11,7 @@ exhausted. One retry on schema validation failure. Everything else here is
 private plumbing.
 """
 import json
+import re
 import os
 import subprocess
 import sys
@@ -27,6 +28,7 @@ from typing import Optional
 import env
 from config import (
     GEMINI_MODELS, GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_UNAVAILABLE_RETRIES, GEMINI_UNAVAILABLE_BACKOFF_S,
+    GEMINI_RATE_LIMIT_RETRIES, GEMINI_RETRY_MAX_SLEEP_S,
 )
 from prompts import get_apartment_prompt_improved
 from core.util import _safe_print, _with_retries
@@ -135,6 +137,27 @@ def _advance_gemini_model(failed_model: str):
     if _gemini_model_idx >= len(GEMINI_MODELS):
         GEMINI_EXHAUSTED = True
 
+def _is_rate_limit(error_msg: str) -> bool:
+    return "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg
+
+def _quota_kind(error_msg: str) -> str:
+    """'day' | 'minute' | 'unknown' — which quota a 429 names. Google doesn't always say,
+    so 'unknown' is retried like a per-minute limit; a real daily cap just fails the retries."""
+    s = error_msg.lower().replace("_", "").replace(" ", "")
+    if "perday" in s:
+        return "day"
+    if "perminute" in s:
+        return "minute"
+    return "unknown"
+
+_RETRY_DELAY_RE = re.compile(r"retry(?:delay|\sin)[\"':\s]*([0-9]+(?:\.[0-9]+)?)\s*s", re.IGNORECASE)
+
+def _retry_delay_s(error_msg: str, attempt: int) -> float:
+    """Google's own retryDelay from the 429 body when present, else exponential backoff — capped."""
+    match = _RETRY_DELAY_RE.search(error_msg)
+    delay = float(match.group(1)) if match else 5.0 * (3 ** attempt)
+    return min(delay, GEMINI_RETRY_MAX_SLEEP_S)
+
 def _get_llm_raw_result(prompt: str) -> dict | None:
     """
     Runs a single LLM parsing attempt: walks the Gemini model chain (up to 2
@@ -156,7 +179,8 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
             models_tried += 1
 
             try:
-                for unavailable_attempt in range(GEMINI_UNAVAILABLE_RETRIES + 1):
+                unavailable_attempt = rate_limit_attempt = 0
+                while True:
                     with _gemini_rate_lock:
                         now = time.time()
                         elapsed = now - _last_gemini_call
@@ -175,19 +199,30 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
                         )
                         break
                     except Exception as call_err:
-                        is_unavailable = "503" in str(call_err) or "UNAVAILABLE" in str(call_err)
-                        if not is_unavailable or unavailable_attempt >= GEMINI_UNAVAILABLE_RETRIES:
+                        call_msg = str(call_err)
+                        if "503" in call_msg or "UNAVAILABLE" in call_msg:
+                            if unavailable_attempt >= GEMINI_UNAVAILABLE_RETRIES:
+                                raise
+                            # A 503 "high demand" is transient and usually clears within seconds — retry the
+                            # same model instead of sending this post to the much weaker Ollama fallback.
+                            unavailable_attempt += 1
+                            time.sleep(GEMINI_UNAVAILABLE_BACKOFF_S * unavailable_attempt)
+                        elif _is_rate_limit(call_msg) and _quota_kind(call_msg) != "day":
+                            if rate_limit_attempt >= GEMINI_RATE_LIMIT_RETRIES:
+                                raise
+                            # Per-minute limits reset within a minute; treating them like a daily
+                            # quota retired a healthy model for the whole run.
+                            time.sleep(_retry_delay_s(call_msg, rate_limit_attempt))
+                            rate_limit_attempt += 1
+                        else:
                             raise
-                        # A 503 "high demand" is transient and usually clears within seconds — retry the
-                        # same model instead of sending this post to the much weaker Ollama fallback.
-                        time.sleep(GEMINI_UNAVAILABLE_BACKOFF_S * (unavailable_attempt + 1))
                 result = response.parsed.model_dump() if response.parsed else json.loads(response.text)
                 with _gemini_lock:
                     GEMINI_ERROR_COUNT = 0
                 return result
             except Exception as gemini_err:
                 error_msg = str(gemini_err)
-                if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                if _is_rate_limit(error_msg):
                     _safe_print(f"\n    Gemini quota exhausted on '{model}' ({error_msg[:300]}). Advancing to next model...")
                     with _gemini_lock:
                         _advance_gemini_model(model)
