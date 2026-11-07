@@ -1,6 +1,8 @@
 # Facebook Apartment Scraper
 
-Scrapes Facebook apartment listing groups, parses each post with an AI model, computes walking distance to a target address via Google Maps, scores each match for fit, and appends matching listings to Google Sheets. Optionally pushes new matches to Telegram with vote buttons.
+Scrapes Facebook apartment listing groups, parses each post with an AI model, computes walking distance to a target address, scores each match for fit, and appends matching listings to Google Sheets. Optionally pushes new matches to Telegram.
+
+Everything runs on free tiers: Gemini's free API quota (with a local Ollama model as fallback), and a free OpenStreetMap distance estimate when Google Maps is off.
 
 ## Current Filters
 
@@ -8,17 +10,22 @@ All configurable in `config.py` — see [Customizing Your Search](#customizing-y
 
 | Criterion | Current value |
 |-----------|---------------|
-| Rooms | 3.0 – 3.5 |
+| Rooms | 2.5 – 3.5 |
 | Price | ₪5,500 – ₪6,700 |
 | Walking distance | up to 5.0 km |
-| Excluded locations | Bnei Brak, etc. |
+| Entry date | no later than 60 days from today |
+| Excluded locations | Bnei Brak, Holon, Petah Tikva, south Tel Aviv neighborhoods, etc. |
 | Disqualifying keywords | roommates, sublet, studio, clinic, seeker posts |
 
-Roommate-related posts are disqualified unless the post also mentions a couple ("זוג") nearby — e.g. "מתאים לזוג או ל-2 שותפים" (suitable for a couple or 2 roommates) still passes, since that's a landlord describing tenant-type flexibility for a whole apartment, not an actual room-share offer.
+Roommate-related posts are disqualified unless the post also mentions a couple ("זוג") nearby — e.g. "מתאים לזוג או ל-2 שותפים" (suitable for a couple or 2 roommates) still passes, since that's a landlord describing tenant-type flexibility for a whole apartment, not an actual room-share offer. Likewise a landlord "looking for a tenant" (מחפשים שוכר) is an offer, not a seeker post.
 
-Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the sheet, **and is a filter**: a listing farther than `MAX_WALKING_DISTANCE_KM` is rejected — but only once a distance has actually been computed, either via Google Maps or the free fallback below. If the address was too vague to geocode confidently, the listing is still added with a placeholder distance rather than being wrongly rejected as "too far". If the monthly Google Maps quota (`GMAPS_MONTHLY_CAP` in `config.py`) was reached, a free straight-line estimate is used instead (see [Free Distance Fallback](#free-distance-fallback)) — or, if `GMAPS_ON_CAP = "halt"`, the run stops entirely.
+Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the sheet, **and is a filter**: a listing farther than `MAX_WALKING_DISTANCE_KM` is rejected — but only once a distance has actually been computed. If the address was too vague to geocode confidently, the listing is still added with a blank distance rather than being wrongly rejected as "too far". See [Distance](#distance) for where the number comes from.
 
-## Google Sheets Columns
+## Google Sheets
+
+### Main tab (listings)
+
+17 Hebrew columns:
 
 - Listing URL
 - Price
@@ -31,17 +38,30 @@ Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the shee
 - Arnona (municipal tax, bi-monthly, numeric only)
 - Vaad bayit (building fee, bi-monthly, numeric only)
 - Shelter / safe room
-- Agent or private (checks for an explicit "תיווך"/agency-name signal in the post text, on top of the LLM's own judgment)
+- Agent or private (an explicit "תיווך"/"בלעדיות"/agency signal in the text, on top of the LLM's own judgment)
 - Post date
 - Address
 - Scan timestamp (when the bot found the post)
 - Fit score (0-100, see [Fit Score](#fit-score) below)
+- Total monthly cost (rent + arnona/2 + vaad/2, plus the agent fee spread over 24 months for agent listings)
 
 Headers are auto-inserted on first run if the sheet is empty. Duplicate URLs are skipped automatically.
 
+### Groups tab (which groups to scan)
+
+A tab named **Groups** decides which Facebook groups get scanned. To add a group, paste its link into the first column — any link shape works (`/groups/<id>`, `m.facebook.com`, a post link inside the group, or a bare id). Everything else is optional:
+
+- **Name / cities** — filled in by the bot from the group's page title when left blank; your own text is never overwritten.
+- **Active** — write "לא" to pause a group; blank means active.
+- **Notes** — free text, ignored by the bot.
+
+The bot fills the remaining columns after every live run: posts scanned, listings added, match rate, last added, last scan, and a status (OK / not a member of the group / no posts found / waiting for first scan). A group listed twice under different link shapes is merged into its first row and the copy is dropped. The tab is mirrored into the local DB, so a run still works if the sheet can't be reached.
+
+`TARGET_URLS` in `config.py` only seeds the tab the first time it's empty.
+
 ## Setup
 
-This is a from-scratch guide — nothing here comes pre-configured. You'll need: Python 3.10+, Google Chrome installed, and a Facebook account that's already a member of the groups you want scraped.
+This is a from-scratch guide — nothing here comes pre-configured. You'll need: Python 3.10+ and a Facebook account that's already a member of the groups you want scraped. Playwright brings its own Chromium, so no separate Chrome install is needed.
 
 ### 1. Install dependencies
 
@@ -58,87 +78,104 @@ Go to [sheets.google.com](https://sheets.google.com), create a new blank spreads
 https://docs.google.com/spreadsheets/d/`SHEET_ID_GOES_HERE`/edit
 ```
 
-Leave it empty — `setup_google_sheet()` writes the headers itself on first run.
+Leave it empty — the bot writes the headers itself on first run, and creates the Groups tab from `TARGET_URLS` if it doesn't exist.
 
-### 3. Google Cloud: service account + API keys
+### 3. Google Cloud: service account (+ optional Maps key)
 
 All of this happens in one place, [console.cloud.google.com](https://console.cloud.google.com/):
 
 1. Create a new project (or reuse one).
-2. **APIs & Services → Library** — enable **Distance Matrix API**.
-3. **APIs & Services → Credentials → Create Credentials → Service Account** — give it any name, no roles needed. After creating it, open it → **Keys → Add Key → Create new key → JSON**. This downloads a file — rename it to `credentials.json` and put it in the project root.
-4. Back in your Google Sheet from step 2, click **Share**, and paste in the service account's email address (looks like `something@your-project.iam.gserviceaccount.com` — found on the service account's page, or inside `credentials.json` as `"client_email"`). Give it **Editor** access.
-5. **APIs & Services → Credentials → Create Credentials → API key** — this is your `GMAPS_API_KEY`. Click into it and restrict it to the Distance Matrix API only.
-6. **Belt and suspenders — set a hard quota cap too**, so a bug can't run up a bill: **APIs & Services → Distance Matrix API → Quotas**, find **Elements per day**, edit it down to roughly **300**.
+2. **APIs & Services → Credentials → Create Credentials → Service Account** — give it any name, no roles needed. After creating it, open it → **Keys → Add Key → Create new key → JSON**. This downloads a file — rename it to `credentials.json` and put it in the project root.
+3. Back in your Google Sheet from step 2, click **Share**, and paste in the service account's email address (looks like `something@your-project.iam.gserviceaccount.com` — found on the service account's page, or inside `credentials.json` as `"client_email"`). Give it **Editor** access.
+
+Google Maps is **optional** (`GMAPS_ENABLED`, off by default — the free fallback is used instead). To turn it on:
+
+4. **APIs & Services → Library** — enable **Distance Matrix API** and **Geocoding API**.
+5. **APIs & Services → Credentials → Create Credentials → API key** — this is your `GMAPS_API_KEY`. Restrict it to those two APIs.
+6. Set a hard quota cap too, so a bug can't run up a bill: **APIs & Services → Distance Matrix API → Quotas → Elements per day**, edit it down to roughly **300**.
+7. Set `GMAPS_ENABLED = True` in `config_local.py`.
 
 ### 4. Gemini API key
 
-Go to [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey), sign in, create a key. This is your `GEMINI_API_KEY` — free tier is generous enough for normal use.
+Go to [aistudio.google.com/app/apikey](https://aistudio.google.com/app/apikey), sign in, create a key. This is your `GEMINI_API_KEY`. The bot walks a chain of Gemini/Gemma models (`GEMINI_MODELS`), each with its own daily free quota.
 
-Optional local fallback (used automatically if the Gemini quota runs out or the API errors repeatedly):
+Recommended local fallback, used once every model in the chain is out of quota:
+
 ```bash
-ollama pull qwen2.5:7b
+ollama pull aya-expanse:8b
 ```
+
+The local model is `OLLAMA_MODEL` in `config.py`. To compare candidates on your own hardware, run `python apartment_bot.py --eval --ollama-model <name>` for each one (see [Running](#running)).
 
 ### 5. Put it all together in `.env`
 
 Create a file named `.env` in the project root:
 
 ```env
-GMAPS_API_KEY=your_google_maps_key_from_step_3
 GEMINI_API_KEY=your_gemini_key_from_step_4
 SHEET_ID=your_sheet_id_from_step_2
+GMAPS_API_KEY=your_google_maps_key_from_step_3   # any placeholder if Maps stays off
+
+# Optional — Telegram (see Telegram below)
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+
+# Optional — saved-search alert emails (see Alert Emails below)
+ALERTS_IMAP_USER=
+ALERTS_IMAP_PASSWORD=     # a Gmail app password, not your account password
+ALERTS_IMAP_FOLDER=
 ```
 
-The bot refuses to start if any of these three are missing. `credentials.json` and `.env` are both gitignored — never commit them.
+The bot refuses to start if `GEMINI_API_KEY`, `SHEET_ID` or `GMAPS_API_KEY` is missing. `credentials.json` and `.env` are both gitignored — never commit them.
 
 ### 6. Configure `config.py`
 
-This file has no real defaults for your use case — at minimum, set `TARGET_URLS` (the Facebook groups to scan — open a group in your browser while logged into the scraping account, and copy the URL straight from the address bar) and `DESTINATION_ADDRESS`. See [Customizing Your Search](#customizing-your-search) below for a full field-by-field guide to every other value worth adjusting.
+At minimum set `DESTINATION_ADDRESS`, and list your groups in the sheet's Groups tab (or in `TARGET_URLS` before the first run, to seed it). See [Customizing Your Search](#customizing-your-search) for every other value worth adjusting.
 
-Since this repo is public, don't put your real `TARGET_URLS` in `config.py` directly — create a `config_local.py` (gitignored) instead, and set `TARGET_URLS = [...]` there. It's loaded last and overrides anything in `config.py`.
+Since this repo is public, put personal values (your groups, your address, machine-specific settings) in `config_local.py` (gitignored) rather than `config.py`. It's loaded last and overrides anything in `config.py`.
 
 ## Customizing Your Search
 
-Everything below lives in `config.py`. After changing anything here, just rerun the bot — no restart-from-scratch needed. If you want a change to also apply to posts you've already scanned (not just new ones), see `--replay` under [Running](#running) further down.
+Everything below lives in `config.py`. After changing anything here, just rerun the bot. To check how a change would affect posts you've already scanned, see `--replay` under [Running](#running).
 
 **Apartment criteria**
 - `MIN_ROOMS` / `MAX_ROOMS` — room-count range (decimals allowed, e.g. `3.5`).
 - `MIN_PRICE` / `MAX_PRICE` — monthly rent range in ₪.
 - `MAX_WALKING_DISTANCE_KM` — listings farther than this from `DESTINATION_ADDRESS` are rejected. Set to `99.0` to effectively disable this filter.
-- `INCLUDE_PRICE_UNKNOWN` — a post can pass every other filter but never state a price ("contact for details"). `True` adds it to the sheet with a blank price cell; `False` (default) rejects it like any other unsuitable price.
+- `SCORE_ENTRY_DATE_MAX_DAYS_AHEAD` — listings whose entry date is confidently more than this many days away are rejected.
+- `INCLUDE_PRICE_UNKNOWN` — a post can pass every other filter but never state a price ("contact for details"). `True` adds it to the sheet with a blank price cell; `False` (default) rejects it.
 - `MAX_POST_AGE_DAYS` — posts older than this are skipped before ever reaching the AI.
 
-**Where and who to scan**
-- `TARGET_URLS` — the list of Facebook group URLs. Add/remove entries freely; you must be a member of each group.
+**Where to look**
+- The **Groups** tab in the sheet — see [Groups tab](#groups-tab-which-groups-to-scan).
 - `DESTINATION_ADDRESS` — where walking distance is measured to.
 - `EXCLUDED_LOCATIONS` — a list of substrings; a post containing any of them is instantly disqualified (e.g. a neighboring city you don't want results from).
-- `GMAPS_TARGET_CITIES` — cities Google's address validation is allowed to resolve an address to. If you're scraping a different area, add your cities here (Hebrew names, matching how Google Maps returns them for that region).
+- `GMAPS_TARGET_CITIES` — cities an address is allowed to resolve to. If you're scraping a different area, add your cities here (Hebrew names).
 - `EXCLUDE_SOUTH_OF_LAT` — listings south of this latitude are rejected (only applied when the address geocodes confidently). Set to `None` to disable.
-- `LOCATIONS` — cosmetic only, shown on the startup banner. Doesn't filter anything.
+- `LOCATIONS` — cosmetic only, shown on the startup banner.
 
-**Distance quota**
-- `GMAPS_MONTHLY_CAP` — monthly Distance Matrix element cap; a safety margin under the free tier.
-- `GMAPS_ON_CAP` — `"skip"` (default) falls back to the free straight-line estimate over the cap; `"halt"` stops the run entirely instead. See [Free Distance Fallback](#free-distance-fallback).
+**Distance**
+- `GMAPS_ENABLED` — `False` (default) never calls Google; distance comes from the free estimate.
+- `GMAPS_MONTHLY_CAP` / `GMAPS_ON_CAP` — with Google on: the monthly call cap, and what happens over it (`"skip"` falls back to the free estimate, `"halt"` stops the run).
 
 **Fit score & Telegram**
-- `SCORE_WEIGHT_PRICE` / `SCORE_WEIGHT_DISTANCE` / `SCORE_WEIGHT_AMENITIES` — fit-score component weights, must sum to 100.
+- `SCORE_WEIGHT_*` — fit-score component weights, must sum to 100. See [Fit Score](#fit-score).
 - `AGENT_FEE_AMORTIZE_MONTHS` — months over which an agent's one-time fee is amortized into the scoring price.
-- `TELEGRAM_ENABLED` — kill switch for Telegram push + voting (default off). See [Telegram](#telegram-optional).
-- `VOTES_TO_REMOVE` / `VOTES_TO_HIGHLIGHT` / `SCORE_VOTE_BOOST` — voting thresholds and score bump per up-vote.
+- `TELEGRAM_ENABLED` — kill switch for Telegram alerts (default off). See [Telegram](#telegram-optional).
 
-**Keyword filters (regex, Hebrew)** — these are the ones to edit carefully, since they're plain-text `re` patterns matched against Hebrew post text:
-- `NEGATIVE_KEYWORDS` — a `|`-separated regex; any match disqualifies the post outright (default catches sublets, studios, clinics, and people *seeking* an apartment rather than offering one).
-- `ROOMMATE_KEYWORDS` — matched separately from the above; disqualifies roommate/room-share posts specifically, with a built-in exception (see the note above) for landlords describing couple-or-roommate flexibility for a whole unit.
+**Keyword filters (regex, Hebrew)** — edit carefully, these are plain `re` patterns matched against Hebrew post text:
+- `NEGATIVE_KEYWORDS` — a `|`-separated regex; any match disqualifies the post outright (sublets, studios, clinics, people *seeking* an apartment).
+- `ROOMMATE_KEYWORDS` — matched separately; disqualifies room-share posts, with the couple exception described above.
 - `ROOMS_PRE_FILTER_REGEX` — the post must match this before it's even sent to the AI (cheap early exit). If you change `MIN_ROOMS`/`MAX_ROOMS` to a range this regex doesn't cover, update it too, or valid posts will get silently pre-filtered.
 
-To add a new disqualifying word, append it to the relevant regex with a `|`, e.g. `NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|...|המילה_החדשה'`. Test a regex change quickly against the fixtures in `tests/fixtures/test_posts/` before running it live.
+To add a new disqualifying word, append it to the relevant regex with a `|`, e.g. `NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|...|המילה_החדשה'`. Check the effect on already-scanned posts with `--replay` before running live.
 
-**LLM and performance**
-- `GEMINI_MODEL` — which Gemini model to call. Use a `-latest` alias (e.g. `gemini-flash-lite-latest`), not a dated snapshot — see the comment in `config.py` for why.
-- `PROMPT_LANGUAGE` — see above.
-- `MAX_CONCURRENT_GROUPS` — how many groups scan in parallel. Higher is faster but more bot-like (separate browser fingerprint per tab); `1` is the safest fallback if you start seeing Facebook checkpoints.
-- `SCROLL_COUNT` / `SCROLL_DELAY_MS` — how much of each group's feed gets loaded per run, and how long between scrolls.
+**LLM and scanning**
+- `GEMINI_MODELS` — the ordered model chain, strongest first. Use rolling aliases (`gemini-flash-latest`) or named tiers, not dated snapshots — those 404 for new keys.
+- `OLLAMA_MODEL` — the local fallback model.
+- `PROMPT_LANGUAGE` — `"en"` or `"he"` instructions in the prompt (the field content is Hebrew either way).
+- `MAX_CONCURRENT_GROUPS` — how many groups scan in parallel. Higher is faster but more bot-like; `1` is the safest fallback if you start seeing Facebook checkpoints.
+- `SCROLL_COUNT` / `FIRST_SCAN_SCROLL_COUNT` — how far each group's feed is scrolled (a group's first scan goes deeper). With `GROUP_YIELD_SCALING`, groups that rarely produce matches get scrolled less.
 
 ## Running
 
@@ -148,107 +185,129 @@ To add a new disqualifying word, append it to the relevant regex with a `|`, e.g
 python apartment_bot.py --headful
 ```
 
-After you see the Facebook feed, press **Enter** in the terminal to start scraping.
+After you see the Facebook feed, press **Enter** in the terminal to start scraping. The login is saved in a persistent browser profile (`chrome_profile/`) for later runs.
 
-> Note: The bot uses a persistent Chrome profile (`chrome_profile/`) so your login session is saved for subsequent runs.
-
-**Subsequent runs** — headless + live is the default once the profile is seeded:
+**Subsequent runs** — headless + live is the default:
 
 ```bash
 python apartment_bot.py
-```
-
-If Facebook throws a login/2FA/CAPTCHA checkpoint mid-run in headless mode, there's no window to solve it in — that group is skipped (a `checkpoint_<group>.png` screenshot is saved, and other groups skip immediately too instead of each hanging on the same wall) and the run finishes normally with a summary line telling you to rerun with `--headful` to resolve it.
-
-Or use the Windows launcher:
-
-```bash
+# or the Windows launcher
 run_bot.bat
 ```
 
-**Dry run (`--dry-run`):** still scrolls, calls the LLM, and computes distance (a real trial run against live Facebook, spending real API quota) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts (rejections, pre-filters, parse failures) are still cached locally either way, so a dry run can't cost you a duplicate LLM call later. Use it to safely try out a prompt/filter/config change before committing with a normal (live) run.
+If the Facebook session is gone in headless mode, the run stops right away and is recorded as `login_required` — rerun with `--headful` to log in again. If Facebook throws a login/2FA/CAPTCHA checkpoint mid-run in headless mode, that group is skipped (a `checkpoint_<group>.png` screenshot is saved, and the other groups skip immediately too) and the run finishes with a summary telling you to rerun with `--headful`.
+
+**Exit codes:** `0` OK, `1` crashed / login required / no group scanned, `2` a checkpoint skipped groups.
+
+**Dry run (`--dry-run`):** still scrolls, calls the LLM, and computes distance (a real trial against live Facebook) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts are still cached locally, so a dry run can't cost a duplicate LLM call later.
 
 **Other flags:**
 
 ```bash
-# Print verdict counts (added/rejected_price/rejected_rooms/rejected_distance/
-# prefiltered/parse_failed/price_unknown) from the local SQLite DB, this
-# month's Google Maps usage, and a per-group yield breakdown, then exit
+# Verdict counts, this month's Maps usage, per-group yield, the last 10 runs,
+# and posts a pre-filter rejected that look like they might be real listings
 python apartment_bot.py --stats
 
-# Re-run the LLM + filters against raw text already stored locally for posts
-# previously rejected (price/rooms/distance/no-price) or that failed to parse —
-# no browser opens. Always live (genuine matches are appended for real).
-# Useful after tweaking config.py's filters or prompts.py.
+# Sync the sheet's Groups tab with the local DB (names, cities, stats) and exit
+python apartment_bot.py --sync-groups
+
+# Score the LLM's extraction of the labelled fixtures in tests/fixtures/test_posts/
+# (one real LLM call each) — run before and after any prompt or model change.
+# --ollama-model NAME scores a local model instead of the Gemini chain.
+python apartment_bot.py --eval
+python apartment_bot.py --eval --ollama-model aya-expanse:8b
+
+# Re-run the LLM + filters on stored text of previously rejected / unparsed posts —
+# no browser. Always live: genuine matches are appended for real.
 python apartment_bot.py --reparse-rejected
 
-# Read-only: re-runs EVERY post ever stored (any verdict) through the current
-# code end to end and prints only the posts whose verdict would now differ —
-# no sheet writes, no DB writes, no browser. Re-calls the LLM for every post,
-# so it costs more than --reparse-rejected; use that instead for a quick check
-# on just the rejected posts. To commit anything it surfaces, do a normal (live) run.
+# Read-only: re-runs every stored post through the current filters and prints only
+# the posts whose verdict would now differ. Reuses the stored LLM parse (free, fast);
+# add --llm to re-parse every post too. No sheet or DB writes, no browser.
 python apartment_bot.py --replay
+python apartment_bot.py --replay --llm
 
-# Drops sheet rows and lightens local DB rows older than MAX_POST_AGE_DAYS,
-# no browser. Runs automatically at the end of every live scan too — this is
-# for an on-demand cleanup.
+# Rewrite every sheet row's fit score and total cost with the current formula
+python apartment_bot.py --recompute-scores
+
+# Drop sheet rows and lighten DB rows older than MAX_POST_AGE_DAYS (runs
+# automatically at the end of every live scan too)
 python apartment_bot.py --prune
+
+# Save recent saved-search alert emails as text (read-only IMAP)
+python apartment_bot.py --mail-dump
 ```
 
 ## How It Works
 
-1. Loads already-seen URLs from the sheet to skip duplicates; on a live run, also visits every URL already in the sheet and drops any Facebook now shows as unavailable (`PRUNE_DEAD_LINKS_ENABLED` in `config.py`)
-2. Opens persistent Chromium; waits for manual FB login on first run
-3. Scans group URLs in parallel tabs (shuffled order, `MAX_CONCURRENT_GROUPS` at a time in `config.py`), scrolls, expands "See more" buttons. **`MAX_CONCURRENT_GROUPS = 1`** switches to a true sequential mode instead: every group is scanned one at a time, on the same page, inside the original logged-in browser profile — no separate `browser`/`context` per group and no session-state file written. Slower, but the lowest checkpoint/ban risk since it never diverges from the real profile's fingerprint. If parallel scanning starts triggering checkpoints, this is the fallback.
-4. Per post:
-   - Pre-filters by excluded locations, negative keywords, sale indicators, room count, and post date (posts older than `MAX_POST_AGE_DAYS` in `config.py` are skipped)
-   - Parses with Gemini (configurable via `GEMINI_MODEL` in `config.py`, default `gemini-flash-lite-latest`) → strict JSON, validated against a schema on both the Gemini and Ollama paths (one retry on validation failure, then treated as a parse failure)
-   - Falls back to local Ollama `qwen2.5:7b` (schema-constrained decoding, no manual JSON repair) if Gemini quota is exhausted (429), the model is misconfigured (404), or after repeated errors
-   - Secondary price fallback: regex scan if LLM price is out of range
-   - Computes walking distance via Google Distance Matrix (stored as a plain km number, e.g. `1.4`); if the monthly Maps quota is hit, falls back to a free straight-line estimate (see [Free Distance Fallback](#free-distance-fallback))
-   - Computes a fit score (see [Fit Score](#fit-score))
-   - Appends row to sheet only if all filters pass; unknown/missing fields are left blank
-   - On a live run, pushes a Telegram alert for the match if `TELEGRAM_ENABLED` (see [Telegram](#telegram-optional))
-5. After scanning, deduplicates cross-posted listings (same street/rooms/price, different URL — keeps the newest post date) and sorts the sheet by post date, newest first
-6. Prints an end-of-run summary: groups scanned, posts seen, pre-filtered, sent to the LLM, matches added, Maps calls used this month, and checkpoints hit
+1. Reads the Groups tab and the URLs already in the sheet; on a live run, re-sends any Telegram alert that failed last time, and drops sheet rows whose Facebook post is gone (`PRUNE_DEAD_LINKS_ENABLED`)
+2. Opens the persistent Chromium profile; waits for manual FB login on first run
+3. Scans the groups in shuffled order, `MAX_CONCURRENT_GROUPS` at a time (each in its own browser that carries the logged-in profile's fingerprint). **`MAX_CONCURRENT_GROUPS = 1`** switches to a true sequential mode: every group on the same page inside the original profile — slower, but the lowest checkpoint risk.
+4. Per group: sorts the feed by new posts, scrolls until it reaches posts it has already seen, expands "See more", and reads each post's body text (not the author header or comments)
+5. Per post:
+   - Pre-filters (no AI call): excluded locations, keywords, sale listings, room count, price, post date
+   - Parses with the Gemini model chain → strict JSON validated against a schema; falls back to the local Ollama model when the whole chain is out of quota
+   - Normalizes floor, fees, entry date and agent/private in Python rather than trusting the AI's free text
+   - Computes walking distance (see [Distance](#distance)) and a fit score
+   - Appends the row to the sheet only if every filter passes; unknown fields are left blank
+   - On a live run, pushes a Telegram alert if `TELEGRAM_ENABLED`
+6. After scanning: deduplicates cross-posted listings (same street/rooms/price — keeps the newest post), sorts the sheet newest first, refreshes the Groups tab stats, and backs up the DB weekly
+7. Prints an end-of-run summary (groups scanned, posts seen, pre-filtered, sent to the LLM, matches added, checkpoints) and a timing line
 
-Post dates are parsed from Facebook's own timestamp text (`relative_to_date` in `core/normalize.py`) and assume an **English-locale Facebook UI** (`"5h"`, `"3 hrs"`, `"1 day"`, `"Yesterday"`, `"July 9 at 5:50 PM"`, etc.) — if your Facebook account's UI language changes, unrecognized formats pass through unchanged and log a one-time warning per run rather than failing silently.
+Post dates are parsed from Facebook's own timestamp text and assume an **English-locale Facebook UI** (`"5h"`, `"3 hrs"`, `"Yesterday"`, `"July 9 at 5:50 PM"`, etc.) — an unrecognized format passes through unchanged and logs a one-time warning per run.
 
 ### Code layout
 
-`apartment_bot.py` is just the CLI entrypoint now — the actual logic lives in focused modules: `sources/fb_scraper.py` (Playwright/FB scanning), `core/evaluate.py` (the LLM-parse → filter → build-row pipeline), `core/llm.py` (Gemini/Ollama), `integrations/maps.py` (distance/geocoding), `integrations/sheets.py` (Google Sheets I/O), `core/normalize.py` (text/domain parsing), `core/dedupe.py` (cross-post dedup), `sources/browser.py` (stealth/launch args), `core/util.py`/`core/errors.py` (shared helpers). See `CLAUDE.md` for the full breakdown. Run commands below are unaffected — `apartment_bot.py` is still the file you run.
+```
+apartment_bot.py bot_listener.py doctor.py backup_db.py clean_data.py   entry points (run these)
+config.py config_local.py env.py prompts.py                            settings, secrets access, LLM prompt
+core/          pipeline + shared logic: evaluate, llm, normalize, dedupe, scoring, storage, run_log, llm_eval
+sources/       where listings come from: fb_scraper, browser, graphql_capture, mail_source
+integrations/  external services: sheets, groups_sync, maps, distance_fallback, telegram_notifier
+tests/         pytest suite; tests/fixtures/test_posts/ = labelled LLM fixtures
+```
+
+See `CLAUDE.md` for the full breakdown.
 
 ## Fit Score
 
-Every match gets a 0-100 fit score in the sheet's last column — informational only, doesn't affect filtering or sort order. Three weighted components (`SCORE_WEIGHT_PRICE`/`SCORE_WEIGHT_DISTANCE`/`SCORE_WEIGHT_AMENITIES` in `config.py`, default 40/40/20): cheaper scores higher, closer scores higher, and elevator/parking/shelter each contribute an equal share of the amenities weight. Agent listings have a one-time broker's fee (`AGENT_FEE_AMORTIZE_MONTHS`, default 12) amortized into the *scoring* price only, so they compete against private listings on effective monthly cost rather than sticker price.
+Every match gets a 0-100 fit score — informational only, doesn't affect filtering or sort order. Six weighted factors (`SCORE_WEIGHT_*` in `config.py`):
 
-If Telegram voting is enabled, each ⭐ up-vote on a listing bumps its score by `SCORE_VOTE_BOOST` (default 10, clamped to 100) directly in the sheet.
+| Factor | Weight | Scores higher when |
+|---|---|---|
+| Price | 25 | cheaper; falls off fast near `MAX_PRICE` |
+| Location | 25 | closer; north of the destination is a bonus, south/east a penalty, Givatayim preferred over Ramat Gan |
+| Entry date | 25 | sooner — immediate is full marks, decays the later it gets |
+| Amenities | 10 | floor/elevator condition, plus a shelter bonus |
+| Rooms | 10 | closer to 3 |
+| Parking | 5 | private parking only |
 
-## Free Distance Fallback
+Agent listings have their one-time broker's fee (`AGENT_FEE_AMORTIZE_MONTHS`, default 12) amortized into the *scoring* price, so they compete with private listings on effective monthly cost rather than sticker price.
 
-If `GMAPS_MONTHLY_CAP` (default 9000 elements/month) is hit, the bot stops calling Google's Distance Matrix / Geocoding APIs. Instead of leaving distance blank, it geocodes the address for free via Nominatim (OpenStreetMap) and estimates walking distance with a calibrated haversine formula (`STRAIGHT_LINE_CALIBRATION_FACTOR` in `config.py`) — a rough estimate, not exact, but still usable for the `MAX_WALKING_DISTANCE_KM` filter. Set `GMAPS_ON_CAP = "halt"` in `config.py` instead if you'd rather the run stop entirely at the cap.
+## Distance
+
+- **Google off (default, `GMAPS_ENABLED = False`)** — the address is geocoded for free via Nominatim (OpenStreetMap), retrying common Hebrew spelling variants (e.g. `רמבם` → `רמב"ם`), and walking distance is estimated with a calibrated straight-line formula (`STRAIGHT_LINE_CALIBRATION_FACTOR`). A rough estimate, still used for the distance filter.
+- **Google on** — the address is validated with the Geocoding API and the real walking distance comes from Distance Matrix, counted against `GMAPS_MONTHLY_CAP`; over the cap the free estimate takes over (or the run halts, with `GMAPS_ON_CAP = "halt"`).
+
+Results are cached per address; a failed lookup is retried on the next run rather than cached forever.
 
 ## Telegram (optional)
 
-Off by default (`TELEGRAM_ENABLED = False` in `config.py`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match gets pushed to your chat with ⭐/🗑 vote buttons. A Telegram outage never breaks a scrape — the match is already safely in the sheet regardless.
+Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match is pushed to your chat with a 🟢/🟡/🔴 score tier, the total monthly cost, and buttons to open the post, open the address in Google Maps (when the street is known), and message the poster on WhatsApp (when the post has a mobile number — the bot itself never messages anyone). A Telegram outage never breaks a scrape: the match is already in the sheet, and the alert is re-sent on the next run (within 48 hours).
 
-Voting requires a separate long-running process to actually record taps and act on them:
+The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts.
 
-```bash
-python bot_listener.py
-```
+Messages sent before the vote buttons were removed still carry ⭐/🗑 buttons; `python bot_listener.py` (a separate long-running process) still handles taps on those: 2 down-votes delete the row, 2 up-votes send a 🔥 highlight, each up-vote bumps the fit score.
 
-- 🗑 down-votes reach `VOTES_TO_REMOVE` (default 2) → the row is deleted from the sheet (the local DB keeps the verdict, so a later crosspost of the same apartment is silently skipped rather than resurfacing)
-- ⭐ up-votes reach `VOTES_TO_HIGHLIGHT` (default 2) → a distinct "🔥" highlight message is sent
-- every ⭐ up-vote bumps the row's fit score by `SCORE_VOTE_BOOST`
+## Alert Emails (in progress)
 
-The bot also sends a run-started / run-finished summary message on every live run (same numbers as the console summary line).
+A second listing source: the saved-search alert emails sites like Yad2 send. Point a Gmail filter at a label, set `ALERTS_IMAP_*` in `.env` (a Gmail **app password**), and run `--mail-dump` to save recent alerts as text under `alert_dumps/`. Access is read-only — mail is never marked, moved or deleted. Not yet wired into the scan.
 
 ## Other Tools
 
 ```bash
-# Health check — verifies every dependency (.env, credentials.json, Sheets,
-# Gemini, Ollama, Telegram if enabled) without spending Google Maps quota.
+# Health check — .env, credentials.json, Sheets, Gemini, Ollama, Telegram, and whether
+# a live run has succeeded in the last RUN_STALE_HOURS. Never spends Google Maps quota.
 # --alert also DMs a Telegram alert if anything fails.
 python doctor.py
 python doctor.py --alert
@@ -261,15 +320,18 @@ python backup_db.py
 python clean_data.py
 ```
 
-## Scheduled Runs (Windows)
+## Logs and Scheduled Runs (Windows)
 
-`run_scheduled.bat` is the entry point for Windows Task Scheduler: uses the venv interpreter, starts Ollama if it isn't already running, logs to a timestamped file under `logs/` (pruned after `LOG_RETENTION_DAYS`), and propagates the exit code so Task Scheduler's "Last Run Result" reflects success/failure. `run_hidden.vbs` wraps it to run with no visible console window. The first run still has to be manual and headful to seed `chrome_profile/` with a logged-in session — headless runs can't complete a login themselves.
+Every run writes its console output to `logs/bot_<timestamp>.log` (each line time-stamped, pruned after `LOG_RETENTION_DAYS`) and is recorded in the local DB's run history — `--stats` lists the last 10 runs, and `doctor.py` fails if no live run has succeeded recently, so a scheduled task that silently stopped shows up.
+
+`run_scheduled.bat` is the entry point for Windows Task Scheduler: uses the venv interpreter, starts Ollama if it isn't already running, and passes the exit code through so Task Scheduler's "Last Run Result" reflects success or failure. `run_hidden.vbs` wraps it to run with no visible console window. The first run still has to be manual and headful to seed `chrome_profile/` with a logged-in session.
 
 ## Local Persistence (`bot_data.db`)
 
-Every post that gets past the URL/date pre-check is recorded in a local SQLite DB (`core/storage.py`, gitignored), not just the matches that land in the sheet:
+Every scanned post is recorded in a local SQLite DB (`core/storage.py`, gitignored), not just the matches that land in the sheet:
 
-- `posts` table — one row per URL, with the raw post text, parsed JSON (when the LLM ran), and a verdict (`added`, `rejected_price`, `rejected_rooms`, `rejected_distance`, `prefiltered`, `parse_failed`, `price_unknown`).
-- On every run, a post already in the DB is skipped without another LLM call — **except** `parse_failed` posts, which retry automatically up to 3 attempts.
-- The Google Sheet stays the source of truth for actual matches; the local DB is the memory of everything else (rejections, pre-filters, parse failures) and the raw-text archive for prompt iteration.
-- **Retention**: so the DB and Sheet don't grow forever, both are pruned automatically at the end of every run using `MAX_POST_AGE_DAYS`. On the sheet, rows older than that (by post date) are dropped. In the DB, the row's raw text/parsed JSON is cleared, but the URL and verdict are kept forever — that's what stops a pruned post from ever being rescanned or re-added, since the skip check only looks at the verdict, not the text. Run `python apartment_bot.py --prune` any time for an on-demand cleanup.
+- `posts` table — one row per URL, with the raw post text, parsed JSON (when the LLM ran), the model that parsed it, and a verdict (`added`, `rejected_price`, `rejected_rooms`, `rejected_distance`, `rejected_location`, `rejected_entry_date`, `prefiltered`, `parse_failed`, `price_unknown`, `duplicate_listing`, `duplicate_text`).
+- A post already in the DB is skipped without another LLM call — **except** `parse_failed` posts, which retry automatically up to 3 attempts.
+- Also stored: the Groups tab mirror and per-group scan state, the address/distance cache, run history, and Telegram message ids.
+- The Google Sheet stays the source of truth for matches; the DB is the memory of everything else and the raw-text archive for prompt iteration.
+- **Retention**: at the end of every live run, sheet rows older than `MAX_POST_AGE_DAYS` (by post date) are dropped, and old DB rows lose their raw text/parsed JSON — but keep their URL and verdict forever, so a pruned post is never rescanned or re-added.
