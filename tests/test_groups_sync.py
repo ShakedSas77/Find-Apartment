@@ -5,8 +5,8 @@ writing stats back. The worksheet is faked (Sheets API is a network boundary); s
 """
 import pytest
 
-import groups_sync
-import storage
+from integrations import groups_sync
+from core import storage
 
 _G1 = "https://www.facebook.com/groups/111"
 _G2 = "https://www.facebook.com/groups/222"

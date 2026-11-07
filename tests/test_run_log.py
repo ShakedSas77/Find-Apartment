@@ -13,8 +13,8 @@ import pytest
 
 import config
 import doctor
-import run_log
-import storage
+from core import run_log
+from core import storage
 
 
 @pytest.fixture

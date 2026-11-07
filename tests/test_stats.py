@@ -5,7 +5,7 @@ count and an in-range price is surfaced, grouped by rule; a reject that doesn't 
 import pytest
 
 import apartment_bot
-import storage
+from core import storage
 
 _FITS = 'מחפשים דייר לדירת 3 חדרים ברמת גן, 6,000 ש"ח לחודש'
 _DOES_NOT_FIT = 'מחפשים דירת 3 חדרים עד 9,000 ש"ח'

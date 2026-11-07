@@ -18,16 +18,16 @@ from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
     _content_prefilter, _extract_price_candidates,
 )
-from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
-from fb_scraper import run_scraper
-from mail_source import dump_alert_emails
-from run_log import start_run_log
-from groups_sync import sync_groups
-from llm_eval import run_eval
+from integrations.sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
+from sources.fb_scraper import run_scraper
+from sources.mail_source import dump_alert_emails
+from core.run_log import start_run_log
+from integrations.groups_sync import sync_groups
+from core.llm_eval import run_eval
 import env
-import scoring
-import storage
-import telegram_notifier
+from core import scoring
+from core import storage
+from integrations import telegram_notifier
 
 
 def reparse_rejected_posts():

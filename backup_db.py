@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
-import storage
+from core import storage
 from config import BACKUP_MAX_AGE_DAYS
 
 BACKUP_DIR = Path(__file__).parent / "backups"

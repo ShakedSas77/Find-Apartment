@@ -16,8 +16,8 @@ import threading
 import googlemaps
 
 import env
-import storage
-import distance_fallback
+from core import storage
+from integrations import distance_fallback
 from config import (
     DESTINATION_ADDRESS, GMAPS_ENABLED, GMAPS_MONTHLY_CAP, GMAPS_ON_CAP, GMAPS_TARGET_CITIES,
     GMAPS_VALIDATE_ADDRESSES, GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS, EXCLUDE_SOUTH_OF_LAT,

@@ -132,7 +132,7 @@ Everything below lives in `config.py`. After changing anything here, just rerun 
 - `ROOMMATE_KEYWORDS` — matched separately from the above; disqualifies roommate/room-share posts specifically, with a built-in exception (see the note above) for landlords describing couple-or-roommate flexibility for a whole unit.
 - `ROOMS_PRE_FILTER_REGEX` — the post must match this before it's even sent to the AI (cheap early exit). If you change `MIN_ROOMS`/`MAX_ROOMS` to a range this regex doesn't cover, update it too, or valid posts will get silently pre-filtered.
 
-To add a new disqualifying word, append it to the relevant regex with a `|`, e.g. `NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|...|המילה_החדשה'`. Test a regex change quickly against the fixtures in `test_posts/` before running it live.
+To add a new disqualifying word, append it to the relevant regex with a `|`, e.g. `NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|...|המילה_החדשה'`. Test a regex change quickly against the fixtures in `tests/fixtures/test_posts/` before running it live.
 
 **LLM and performance**
 - `GEMINI_MODEL` — which Gemini model to call. Use a `-latest` alias (e.g. `gemini-flash-lite-latest`), not a dated snapshot — see the comment in `config.py` for why.
@@ -216,7 +216,7 @@ Post dates are parsed from Facebook's own timestamp text (`relative_to_date` in 
 
 ### Code layout
 
-`apartment_bot.py` is just the CLI entrypoint now — the actual logic lives in focused modules: `fb_scraper.py` (Playwright/FB scanning), `core/evaluate.py` (the LLM-parse → filter → build-row pipeline), `core/llm.py` (Gemini/Ollama), `maps.py` (distance/geocoding), `sheets.py` (Google Sheets I/O), `core/normalize.py` (text/domain parsing), `core/dedupe.py` (cross-post dedup), `browser.py` (stealth/launch args), `core/util.py`/`core/errors.py` (shared helpers). See `CLAUDE.md` for the full breakdown. Run commands below are unaffected — `apartment_bot.py` is still the file you run.
+`apartment_bot.py` is just the CLI entrypoint now — the actual logic lives in focused modules: `sources/fb_scraper.py` (Playwright/FB scanning), `core/evaluate.py` (the LLM-parse → filter → build-row pipeline), `core/llm.py` (Gemini/Ollama), `integrations/maps.py` (distance/geocoding), `integrations/sheets.py` (Google Sheets I/O), `core/normalize.py` (text/domain parsing), `core/dedupe.py` (cross-post dedup), `sources/browser.py` (stealth/launch args), `core/util.py`/`core/errors.py` (shared helpers). See `CLAUDE.md` for the full breakdown. Run commands below are unaffected — `apartment_bot.py` is still the file you run.
 
 ## Fit Score
 
@@ -267,7 +267,7 @@ python clean_data.py
 
 ## Local Persistence (`bot_data.db`)
 
-Every post that gets past the URL/date pre-check is recorded in a local SQLite DB (`storage.py`, gitignored), not just the matches that land in the sheet:
+Every post that gets past the URL/date pre-check is recorded in a local SQLite DB (`core/storage.py`, gitignored), not just the matches that land in the sheet:
 
 - `posts` table — one row per URL, with the raw post text, parsed JSON (when the LLM ran), and a verdict (`added`, `rejected_price`, `rejected_rooms`, `rejected_distance`, `prefiltered`, `parse_failed`, `price_unknown`).
 - On every run, a post already in the DB is skipped without another LLM call — **except** `parse_failed` posts, which retry automatically up to 3 attempts.

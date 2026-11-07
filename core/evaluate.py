@@ -11,8 +11,8 @@ import re
 import threading
 from datetime import date, datetime
 
-import storage
-import scoring
+from core import storage
+from core import scoring
 from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
@@ -30,9 +30,9 @@ from core.normalize import (
     _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
-from maps import _format_address_display, get_walking_distance
-from sheets import _append_rows_batch
-import telegram_notifier
+from integrations.maps import _format_address_display, get_walking_distance
+from integrations.sheets import _append_rows_batch
+from integrations import telegram_notifier
 
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 

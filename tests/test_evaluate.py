@@ -9,7 +9,7 @@ given so _listing_dedupe_key returns None.
 import threading
 from datetime import date, timedelta
 
-import storage
+from core import storage
 import core.evaluate as evaluate
 
 

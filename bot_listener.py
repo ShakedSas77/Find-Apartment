@@ -25,8 +25,8 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
 import config
-import storage
-import telegram_notifier
+from core import storage
+from integrations import telegram_notifier
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

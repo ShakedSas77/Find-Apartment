@@ -8,7 +8,7 @@ what confirms it.
 import json
 from datetime import datetime
 
-from graphql_capture import compare_with_dom, parse_graphql_body
+from sources.graphql_capture import compare_with_dom, parse_graphql_body
 
 _CREATED = 1762500000
 

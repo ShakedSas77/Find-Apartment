@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 import pytest
 
-import fb_scraper
-import storage
+from sources import fb_scraper
+from core import storage
 from config import SHEET_HEADERS
 
 _URL = "https://www.facebook.com/groups/1/posts/1/"

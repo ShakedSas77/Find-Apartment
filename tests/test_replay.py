@@ -8,7 +8,7 @@ import json
 import pytest
 
 import apartment_bot
-import storage
+from core import storage
 from core.dedupe import _known_added_listing_keys, _listing_dedupe_key
 
 _URL = "https://www.facebook.com/groups/1/posts/1/"

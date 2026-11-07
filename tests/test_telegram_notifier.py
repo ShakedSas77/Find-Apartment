@@ -7,8 +7,8 @@ from urllib.parse import unquote_plus
 import requests
 
 import config
-import scoring
-import telegram_notifier
+from core import scoring
+from integrations import telegram_notifier
 
 _FAKE_TOKEN = "123456789:AAFakeTokenForTestsOnly_abc-DEF"
 

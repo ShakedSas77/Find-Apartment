@@ -1,7 +1,7 @@
 """
 Unit tests for browser.py's pure helpers.
 """
-from browser import _normalize_user_agent
+from sources.browser import _normalize_user_agent
 
 _HEADLESS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
                 "HeadlessChrome/149.0.7827.55 Safari/537.36")
