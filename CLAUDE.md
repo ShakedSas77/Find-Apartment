@@ -55,7 +55,7 @@ python bot_listener.py
 | `sheets.py` | Google Sheets I/O: `setup_google_sheet()`, `dedupe_and_sort_sheet()`, row-rewrite helpers |
 | `core/normalize.py` | Pure text/domain normalization: dates, floor, fees, parking, address formatting, `BIDI_RE`, `_sheet_safe_cell` |
 | `core/dedupe.py` | Cross-post dedup: `_text_dedup_hash()`, `_listing_dedupe_key()` |
-| `browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — shared by `fb_scraper.py` and `yad2_scraper.py` |
+| `browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — used by `fb_scraper.py` |
 | `core/util.py` / `core/errors.py` | Shared low-level helpers (`_safe_print`, `_with_retries`, locks) and signal exceptions (`GmapsQuotaHalted`, `HeadlessCheckpointAbort`) — dependency-free, importable from anywhere without a cycle |
 | `env.py` | `.env` access with no import-time validation (`require_env()` is called explicitly from `apartment_bot.py`'s `__main__`, not at import) — this is what makes every other module importable/testable without credentials |
 | `config.py` | All tunables: URLs, price/room filters, sheet ID, destination, negative keywords |

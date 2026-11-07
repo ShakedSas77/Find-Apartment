@@ -3,7 +3,7 @@
 
 Dependency-free sink: imports nothing project-local, ever. That invariant is
 what keeps this module safe to import from anywhere (evaluate, sheets, maps,
-fb_scraper, yad2_scraper) without ever risking a circular import.
+fb_scraper, mail_source) without ever risking a circular import.
 """
 import threading
 import time

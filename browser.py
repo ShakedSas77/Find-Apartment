@@ -2,9 +2,9 @@
 === Browser-generic primitives ===
 
 Chrome launch args, stealth patching, visibility checks, popup dismissal —
-nothing Facebook-specific here. Both fb_scraper.py and yad2_scraper.py use
-these; kept out of apartment_bot.py so a second source doesn't have to reach
-into a script's private namespace for them.
+nothing Facebook-specific here. Used by fb_scraper.py; kept out of
+apartment_bot.py so a browser-based source doesn't have to reach into a
+script's private namespace for them.
 """
 import json
 import re
