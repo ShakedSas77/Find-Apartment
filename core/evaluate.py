@@ -27,6 +27,7 @@ from core.normalize import (
     _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE, _CITY_DISPLAY_RES,
+    _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from maps import _format_address_display, get_walking_distance
@@ -356,14 +357,17 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
                 f"Contains excluded location '{excluded_found[0]}'.")
 
     # Roommate/shared-room posts, unless explicitly also couple-friendly
-    roommate_match = re.search(ROOMMATE_KEYWORDS, text)
+    roommate_match = next((m for m in re.finditer(ROOMMATE_KEYWORDS, text)
+                           if text[m.start() - 1:m.start()] != _SHARED_WORD_PREFIX
+                           and not _ROOMMATE_FRIENDLY_RE.search(text[max(0, m.start() - 40):m.start()])), None)
     if roommate_match and not _ROOMMATE_COUPLE_EXCEPTION_RE.search(text):
         return (storage.VERDICT_PREFILTERED, {"reject_reason": f"roommate_keyword:{roommate_match.group(0)}"},
                 f"Contains negative keyword '{roommate_match.group(0)}'.")
 
     # Other obvious non-relevant posts (sublets, studios, commercial, seekers)
     neg_match = next((m for m in re.finditer(NEGATIVE_KEYWORDS, text)
-                      if not (m.group(0).startswith("מחפש") and _SEEKING_A_TENANT_RE.match(text, m.start()))
+                      if not (m.group(0).startswith("מחפש")
+                              and (_SEEKING_A_TENANT_RE.match(text, m.start()) or _reads_as_an_offer(text)))
                       and not (m.group(0) == "סטודיו" and _STUDIO_AMENITY_RE.match(text, m.start()))), None)
     if neg_match:
         return (storage.VERDICT_PREFILTERED, {"reject_reason": f"negative_keyword:{neg_match.group(0)}"},

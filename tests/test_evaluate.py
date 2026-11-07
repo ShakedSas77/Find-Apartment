@@ -259,3 +259,29 @@ def test_an_excluded_area_is_excluded_whatever_city_is_named():
     _, analysis, _ = evaluate._content_prefilter("דירת 3 חדרים בבני ברק על גבול גבעתיים, 6,000 ש\"ח")
 
     assert analysis["reject_reason"] == "excluded_location:בני ברק"
+
+
+def test_shared_parking_is_not_a_roommate_post():
+    assert evaluate._content_prefilter("להשכרה דירת 3 חדרים ברמת גן, חניה משותפת, 6,000 ש\"ח") is None
+
+
+def test_flat_suitable_for_roommates_is_not_a_room_share():
+    assert evaluate._content_prefilter("להשכרה דירת 3 חדרים, מתאימה למשפחה או שותפים, 6,500 ש\"ח") is None
+
+
+def test_landlords_rhetorical_question_is_an_offer():
+    assert evaluate._content_prefilter("להשכרה ברמת גן! מחפשים דירה שקטה ומוארת? 3 חדרים, 6,200 ש\"ח") is None
+
+
+def test_seeker_stating_a_search_is_still_rejected_despite_the_word_for_rent():
+    assert evaluate._content_prefilter("מחפש דירה להשכרה במרכז ת\"א: 3 חדרים עד 6,500 ש\"ח") is not None
+
+
+def test_roommate_search_to_live_with_us_is_still_rejected():
+    assert evaluate._content_prefilter("מחפשות את האחות הבאה שתכנס לגור איתנו, דירת 3 חדרים ברמת גן, 2,100 ש\"ח") is not None
+
+
+def test_genuine_room_share_is_still_rejected():
+    _, analysis, _ = evaluate._content_prefilter("יש חדר פנוי לשותף בדירת 3 חדרים, 2,000 ש\"ח")
+
+    assert analysis["reject_reason"].startswith("roommate_keyword")

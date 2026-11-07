@@ -270,11 +270,34 @@ _ROOMMATE_COUPLE_EXCEPTION_RE = re.compile(
     re.DOTALL
 )
 
+# ROOMMATE_KEYWORDS' שות[פף] also matches inside "משותף/משותפת" (shared — "חניה משותפת", "מחסן משותף")
+# and a whole flat described as roommate-friendly ("מתאים גם ל-3 שותפים", "מתאימה למשפחה או שותפים",
+# "אפשר שותפים", "אידיאלי לשותפים"). Neither is a room share. Measured 2026-11-07: 26 recent rejects in the
+# target rooms + price, all one of these two shapes. Both are checked at the match's own position.
+_SHARED_WORD_PREFIX = "מ"
+_ROOMMATE_FRIENDLY_RE = re.compile(r'(?:מתאי[םמ]\S*|אפשר|אידיאלי(?:ת)?|מותר|ניתן)\s[^.\n]{0,25}$')
+
 # "מחפש" in NEGATIVE_KEYWORDS means someone *seeking* an apartment — but a landlord seeking a tenant
 # ("מחפשים דייר/שוכר") or a leaving tenant seeking a replacement ("מחפש/ת מחליף/ה") is an offer.
 # Measured 2026-11-07: 42 such offers were rejected as seekers, 8 of them in the target rooms + price.
 # Matched at the keyword's own position, so a genuine "מחפשים דירה" elsewhere still rejects the post.
 _SEEKING_A_TENANT_RE = re.compile(r'מחפש(?:ים|ת|ות)?\s+(?:שוכר|שוכרים|שוכרת|דייר|דיירים|דיירת|מחליפ|מחליף|מישהו|מישהי|זוג)')
+
+# Landlords also open ads with "מחפשים דירה שקטה...?" / "מחפשים את השילוב המושלם" or describe the target
+# tenant ("לזוג שמחפשים דירה גדולה"). A post that carries an offer marker and no first-person seeker
+# marker is an offer whatever its "מחפש" says (32 recent such rejects fit the target rooms + price).
+_OFFER_MARKER_RE = re.compile(r'להשכרה|מתפנה|מפנה|ללא תיווך|תיווך|מתווך|למהירי החלטה')
+# Seeker markers: first person, a budget, or "מחפש/ת דירה/חדר" stated as a fact — a landlord's rhetorical
+# "מחפשים דירה שקטה...?" ends in a question mark, a seeker's "מחפש דירה להשכרה במרכז ת״א" doesn't.
+# Room-share wording ("לגור איתנו", "חדר בדירת") marks a roommate search, not a whole-flat offer.
+_SEEKER_MARKER_RE = re.compile(
+    r'(?<![֐-׿])(?:אנחנו|אני|אנו)(?![֐-׿])|בן זוגי|בת זוגי|תקציב'
+    r'|מחפש(?:ים|ת|ות)?\s+(?:דיר[הת]|חדר)(?![^\n?]{0,60}\?)'
+    r'|לגור איתנו|איתנו בדירה|חדר בדירת|חדר להשכרה|חדר פנוי'
+)
+
+def _reads_as_an_offer(text: str) -> bool:
+    return bool(_OFFER_MARKER_RE.search(text)) and not _SEEKER_MARKER_RE.search(text)
 
 # "סטודיו" in NEGATIVE_KEYWORDS means a studio apartment — not a building amenity ("סטודיו פילאטיס",
 # "סטודיו ליוגה") listed among a regular flat's perks (seen 2026-11-07 rejecting a 3-room listing).
