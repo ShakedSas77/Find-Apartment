@@ -50,3 +50,33 @@ def test_a_cached_real_distance_is_served_without_a_new_lookup(monkeypatch):
                         lambda address, confidence: pytest.fail("a cached answer must not be looked up again"))
 
     assert maps.get_walking_distance("ביאליק 14, רמת גן")[0] == "2.1"
+
+
+def test_spelling_variants_add_gershayim_to_an_acronym_street():
+    from distance_fallback import spelling_variants
+
+    assert 'רמב"ם 3, גבעתיים' in spelling_variants("רמבם 3, גבעתיים")
+
+
+def test_spelling_variants_drop_the_street_prefix_and_normalize_quotes():
+    from distance_fallback import spelling_variants
+
+    assert 'אצ"ל 13, רמת גן' in spelling_variants("רח אצ״ל 13, רמת גן")
+
+
+def test_spelling_variants_end_with_the_street_without_its_house_number():
+    from distance_fallback import spelling_variants
+
+    assert spelling_variants("ביאליק 14, רמת גן") == ["ביאליק 14, רמת גן", "ביאליק, רמת גן"]
+
+
+def test_fallback_tries_variants_only_after_the_plain_query_misses(monkeypatch):
+    import distance_fallback
+
+    queried = []
+    monkeypatch.setattr(distance_fallback, "nominatim_geocode",
+                        lambda q: queried.append(q) or ((32.07, 34.80) if '"' in q else None))
+
+    distance_fallback.estimate_straight_line_distance("רמבם 3, גבעתיים")
+
+    assert queried == ["רמבם 3, גבעתיים", 'רמב"ם 3, גבעתיים']

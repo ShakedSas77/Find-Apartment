@@ -11,6 +11,7 @@ calibration factor and destination coordinates.
 """
 
 import math
+import re
 import threading
 import time
 
@@ -89,7 +90,7 @@ def estimate_straight_line_distance(address: str) -> tuple[str, int, float, floa
     haversine, or None if the address couldn't be geocoded."""
     best = None
     for query in _candidate_queries(address):
-        coords = nominatim_geocode(query)
+        coords = next(filter(None, (nominatim_geocode(v) for v in spelling_variants(query))), None)
         if not coords:
             continue
         km = haversine_km(coords[0], coords[1], DESTINATION_LAT, DESTINATION_LON) * STRAIGHT_LINE_CALIBRATION_FACTOR
@@ -101,3 +102,27 @@ def estimate_straight_line_distance(address: str) -> tuple[str, int, float, floa
         return None
     km, (lat, lon) = best
     return f"{km:.1f}", int(km * 1000), lat, lon
+
+
+_STREET_PREFIX_RE = re.compile(r"^(?:רחוב|רח['׳]?|שד['׳]|שדרות)\s+")
+# A 3-4 letter Hebrew word with no quote mark yet: an acronym written without its gershayim (רמבם, אצל).
+_ACRONYM_CANDIDATE_RE = re.compile(r"(?<![֐-׿\"'])([֐-׿]{2,3})([֐-׿])(?![֐-׿\"'])")
+_HOUSE_NUMBER_RE = re.compile(r"\s*\b\d{1,3}[א-ת]?\b")
+
+
+def spelling_variants(query: str) -> list[str]:
+    """
+    The query, then spellings OSM is likelier to have, tried only if it misses (seen 2026-11-07:
+    "רמבם 3, גבעתיים" misses, OSM has רמב"ם). In order: quote marks normalized + street prefix
+    dropped; gershayim inserted into the first 3-4 letter word; house number dropped — street-level
+    precision only, a last resort.
+    """
+    street, sep, rest = query.partition(",")
+    cleaned = _STREET_PREFIX_RE.sub("", street.replace("״", '"').replace("׳", "'").strip())
+    variants = [query, cleaned + sep + rest]
+    if '"' not in cleaned:
+        variants.append(_ACRONYM_CANDIDATE_RE.sub(r'\1"\2', cleaned, count=1) + sep + rest)
+    without_number = _HOUSE_NUMBER_RE.sub("", cleaned).strip()
+    if without_number and without_number != cleaned:
+        variants.append(without_number + sep + rest)
+    return list(dict.fromkeys(v.strip() for v in variants))
