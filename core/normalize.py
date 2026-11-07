@@ -8,7 +8,7 @@ credentials or a browser.
 """
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from config import MAX_POST_AGE_DAYS
 from core.util import _safe_print
@@ -28,15 +28,39 @@ _COMMENT_SECTION_RE = re.compile(
     r'View more comments|View \d+ repl|Write a (?:public )?comment|Submit your first comment|Most relevant'
 )
 
+# A rendered comment: "<name>" / "·" / "<age>" (15m, 3h, 2d) / text / "Reply". FB often shows a
+# post's first comments inline with none of _COMMENT_SECTION_RE's markers present — 435 of 7,845
+# stored posts (2026-11-07) still carried a comment thread past that cut. The post's own header
+# never matches: its age line follows "8 hours ago", not "·", and no "Reply" follows it.
+_COMMENT_AGE_RE = re.compile(r'^\d{1,2}\s*[smhdw]$')
+_COMMENT_REPLY_LOOKAHEAD = 8
+
 def _strip_comment_section(text: str) -> str:
     match = _COMMENT_SECTION_RE.search(text)
-    return text[:match.start()].strip() if match else text
+    text = text[:match.start()].strip() if match else text
+    lines = text.split("\n")
+    for i in range(2, len(lines)):
+        if (_COMMENT_AGE_RE.match(lines[i].strip()) and lines[i - 1].strip() == "·"
+                and any(line.strip() == "Reply" for line in lines[i + 1:i + 1 + _COMMENT_REPLY_LOOKAHEAD])):
+            name_idx = i - 2
+            while name_idx > 0 and not lines[name_idx].strip():
+                name_idx -= 1
+            return "\n".join(lines[:name_idx]).strip()
+    return text
 
 # Israeli mobile (05X) and landline/VoIP (0[23489]/07[2-9]) numbers, with or
 # without a separator — a poster's own contact number doesn't change between
 # reposts even when they reword the ad text by hand (confirmed against a real
 # crosspost pair in the DB: same phones, genuinely different wording).
 _PHONE_RE = re.compile(r'0(?:5\d|7[2-9])[-\s]?\d{7}|0[23489][-\s]?\d{7}')
+
+def _first_mobile_phone(text: str) -> str | None:
+    """First Israeli mobile number (05X, digits only) in the text — the contact a WhatsApp link can reach."""
+    for match in _PHONE_RE.findall(text or ""):
+        digits = re.sub(r'\D', '', match)
+        if digits.startswith("05"):
+            return digits
+    return None
 
 _ROOMS_EXTRACT_RE = re.compile(r'([1-9](?:\.5)?)\s*חד')
 
@@ -52,6 +76,11 @@ _PRICE_CONTEXT_RE = re.compile(
     rf'{_PRICE_MARKER}\D{{0,25}}(?<![0-9])([0-9]{{4,5}})(?![0-9])'
     rf'|(?<![0-9])([0-9]{{4,5}})(?![0-9])\D{{0,25}}{_PRICE_MARKER}'
 )
+
+def _extract_price_candidates(text: str) -> list[int]:
+    clean_text = BIDI_RE.sub('', text)
+    clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
+    return [int(m.group(1) or m.group(2)) for m in _PRICE_CONTEXT_RE.finditer(clean_text)]
 
 # Converts the relative date Facebook shows ("6h", "1d", "3w", plus the longer
 # forms Facebook sometimes renders: "3 hrs", "1 day", "2 wks") to an absolute date (DD/MM)
@@ -81,6 +110,8 @@ _RELATIVE_DATE_UNITS = {
 }
 
 _YESTERDAY_RE = re.compile(r'^yesterday$', re.IGNORECASE)
+
+_JUST_NOW_RE = re.compile(r'^just now$', re.IGNORECASE)
 
 # Detects absolute English-language dates that Facebook sometimes shows instead of relative text (e.g. "July 9 at 5:50 PM")
 _MONTH_NAMES = {
@@ -112,6 +143,20 @@ _date_warning_lock = threading.Lock()
 
 _unparsed_date_logged = False
 
+def _is_recognized_fb_date_text(text: str) -> bool:
+    """True if text matches one of the date formats relative_to_date() actually
+    converts. Side-effect-free (no warning log) — used to pick the right link out
+    of several href candidates before committing to one, not to convert a date."""
+    text = (text or "").strip()
+    if not text:
+        return False
+    return bool(
+        _YESTERDAY_RE.match(text)
+        or _JUST_NOW_RE.match(text)
+        or _RELATIVE_DATE_RE.match(text)
+        or _parse_absolute_fb_date(text)
+    )
+
 def relative_to_date(rel: str) -> str:
     """
     Converts the relative/absolute date Facebook shows to a DD/MM date. The bot
@@ -126,6 +171,9 @@ def relative_to_date(rel: str) -> str:
 
     if _YESTERDAY_RE.match(text):
         return (datetime.now() - timedelta(days=1)).strftime("%d/%m")
+
+    if _JUST_NOW_RE.match(text):
+        return datetime.now().strftime("%d/%m")
 
     match = _RELATIVE_DATE_RE.match(text)
     if match:
@@ -195,7 +243,10 @@ def _clean_post_for_llm(raw_text: str) -> str:
 
 _NOT_AGENT_RE = re.compile(r'ללא\s+תיווך|לא\s+מתיווך|בלי\s+תיווך|לא\s+תיווך')
 
-_AGENT_SIGNAL_RE = re.compile(r'תיווך|נדל["״]?ן')
+# Beyond the words themselves: agency-only wording and tools. "בלעדיות" (an exclusive listing) appeared in
+# 302 stored posts that never say תיווך/נדל"ן; a go.yaeli.ai booking link marked a realtor post the LLM left
+# as unknown (2026-11-07). "בלעדי/ת" alone is deliberately absent — "חניה בלעדית" is private parking.
+_AGENT_SIGNAL_RE = re.compile(r'תיווך|נדל["״]?ן|בלעדיות|ניהול נכסים|נכסים נוספים|go\.yaeli\.ai')
 
 def _detect_agent(text: str, llm_is_agent):
     """
@@ -221,6 +272,43 @@ _ROOMMATE_COUPLE_EXCEPTION_RE = re.compile(
     r'(?<!מי)זוג(?!י).{0,30}שות[פף]|שות[פף].{0,30}(?<!מי)זוג(?!י)',
     re.DOTALL
 )
+
+# ROOMMATE_KEYWORDS' שות[פף] also matches inside "משותף/משותפת" (shared — "חניה משותפת", "מחסן משותף")
+# and a whole flat described as roommate-friendly ("מתאים גם ל-3 שותפים", "מתאימה למשפחה או שותפים",
+# "אפשר שותפים", "אידיאלי לשותפים"). Neither is a room share. Measured 2026-11-07: 26 recent rejects in the
+# target rooms + price, all one of these two shapes. Both are checked at the match's own position.
+_SHARED_WORD_PREFIX = "מ"
+_ROOMMATE_FRIENDLY_RE = re.compile(r'(?:מתאי[םמ]\S*|אפשר|אידיאלי(?:ת)?|מותר|ניתן)\s[^.\n]{0,25}$')
+
+# "מחפש" in NEGATIVE_KEYWORDS means someone *seeking* an apartment — but a landlord seeking a tenant
+# ("מחפשים דייר/שוכר") or a leaving tenant seeking a replacement ("מחפש/ת מחליף/ה") is an offer.
+# Measured 2026-11-07: 42 such offers were rejected as seekers, 8 of them in the target rooms + price.
+# Matched at the keyword's own position, so a genuine "מחפשים דירה" elsewhere still rejects the post.
+_SEEKING_A_TENANT_RE = re.compile(r'מחפש(?:ים|ת|ות)?\s+(?:שוכר|שוכרים|שוכרת|דייר|דיירים|דיירת|מחליפ|מחליף|מישהו|מישהי|זוג)')
+
+# Landlords also open ads with "מחפשים דירה שקטה...?" / "מחפשים את השילוב המושלם" or describe the target
+# tenant ("לזוג שמחפשים דירה גדולה"). A post that carries an offer marker and no first-person seeker
+# marker is an offer whatever its "מחפש" says (32 recent such rejects fit the target rooms + price).
+_OFFER_MARKER_RE = re.compile(r'להשכרה|מתפנה|מפנה|ללא תיווך|תיווך|מתווך|למהירי החלטה')
+# Seeker markers: first person, a budget, or "מחפש/ת דירה/חדר" stated as a fact — a landlord's rhetorical
+# "מחפשים דירה שקטה...?" ends in a question mark, a seeker's "מחפש דירה להשכרה במרכז ת״א" doesn't.
+# Room-share wording ("לגור איתנו", "חדר בדירת") marks a roommate search, not a whole-flat offer.
+_SEEKER_MARKER_RE = re.compile(
+    r'(?<![֐-׿])(?:אנחנו|אני|אנו)(?![֐-׿])|בן זוגי|בת זוגי|תקציב'
+    r'|מחפש(?:ים|ת|ות)?\s+(?:דיר[הת]|חדר)(?![^\n?]{0,60}\?)'
+    r'|לגור איתנו|איתנו בדירה|חדר בדירת|חדר להשכרה|חדר פנוי'
+)
+
+def _reads_as_an_offer(text: str) -> bool:
+    return bool(_OFFER_MARKER_RE.search(text)) and not _SEEKER_MARKER_RE.search(text)
+
+# "סטודיו" in NEGATIVE_KEYWORDS means a studio apartment — not a building amenity ("סטודיו פילאטיס",
+# "סטודיו ליוגה") listed among a regular flat's perks (seen 2026-11-07 rejecting a 3-room listing).
+_STUDIO_AMENITY_RE = re.compile(r'סטודיו\s+(?:ל|ה)?(?:פילאטיס|יוגה|כושר|ריקוד|מחול|צילום|הקלטות|אימונים)')
+
+# English-language posts state rooms as "3 room apartment" — ROOMS_PRE_FILTER_REGEX (Hebrew-only, not to
+# be reformatted) rejected all 9 seen. "bedrooms" is deliberately absent: 3 bedrooms is 4 rooms in Israel.
+_ENGLISH_ROOMS_RE = re.compile(r'(?<!\d)(?:2\.5|3|3\.5)\s*-?\s*rooms?\b', re.IGNORECASE)
 
 _PARKING_NONE_RE = re.compile(r'אין\s*חניה|בלי\s*חניה|ללא\s*חניה|^אין$')
 
@@ -255,28 +343,101 @@ def _strip_foreign_letters(text: str) -> str:
     cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(' \t-–—,/')
     return cleaned
 
-_IMMEDIATE_RE = re.compile(r'מיידי|מיד|עכשיו|כניסה\s*מיידית|היום')
+# "לא מיידי" (not immediate) must not match — negative lookbehind on "לא ".
+# "גמיש"/"בהקדם"/"מתי שתרצו"/"בתיאום" are flexible/ASAP phrasing: a landlord who
+# can accommodate any timing can accommodate now, which is exactly the ASAP
+# signal we want to reward the same as an explicit "מיידי".
+_IMMEDIATE_RE = re.compile(
+    r'(?<!לא\s)(?:מיידי|מיד|עכשיו|כניסה\s*מיידית|היום|גמיש|בהקדם|מתי\s*שתרצו|בתיאום|פנוי[הת]?\s*עכשיו)'
+)
 
+# Embedded (not full-match), so a date survives extra wording around it, e.g.
+# "החל מ-1.9", "1.9 גמיש". On a range ("1.9-15.9") the leftmost/earliest match
+# wins, which is the ASAP-correct choice.
 _DATE_DDMM_RE = re.compile(r'(\d{1,2})[./](\d{1,2})(?:[./]\d{2,4})?')
+
+# Canonical + common abbreviated Hebrew month names, month number.
+_HEBREW_MONTH_NAMES = {
+    'ינואר': 1, 'פברואר': 2, 'מרץ': 3, 'מרס': 3, 'אפריל': 4, 'מאי': 5, 'יוני': 6,
+    'יולי': 7, 'אוגוסט': 8, 'ספטמבר': 9, "ספט'": 9, 'אוקטובר': 10, "אוק'": 10,
+    'נובמבר': 11, "נוב'": 11, 'דצמבר': 12, "דצמ'": 12,
+}
+
+# Position-in-month qualifiers when only a month is named, no day.
+_MONTH_POSITION_DAY = {'תחילת': 5, 'אמצע': 15, 'סוף': 25}
+
+def _resolve_hebrew_month_mention(text: str) -> str:
+    """
+    Finds a Hebrew month name in free text and returns canonical "DD/MM":
+    a day immediately before it wins (e.g. "1 בספטמבר" -> "01/09"); else a
+    תחילת/אמצע/סוף position qualifier; else the 15th as a mid-month
+    stand-in (e.g. bare "ספטמבר"). "" if no month name is present.
+    """
+    for name, month in sorted(_HEBREW_MONTH_NAMES.items(), key=lambda kv: -len(kv[0])):
+        idx = text.find(name)
+        if idx == -1:
+            continue
+        prefix = text[:idx]
+        day_match = re.search(r'(\d{1,2})\s*(?:ב|ל)?\s*$', prefix)
+        if day_match:
+            day = int(day_match.group(1))
+        else:
+            day = 15
+            for word, qualifier_day in _MONTH_POSITION_DAY.items():
+                if word in prefix:
+                    day = qualifier_day
+                    break
+        return f"{day:02d}/{month:02d}"
+    return ""
 
 def _normalize_entry_date(text: str) -> str:
     """
-    Normalizes the entry date, strips foreign-language text, converts
-    "immediate"-type phrases to the standard "מיידי", and zero-pads a
-    numeric day.month(.year) date (e.g. "1.8" / "1.8.26") to "DD/MM",
-    dropping the year. Non-numeric dates (e.g. "ספטמבר") pass through as-is.
+    Normalizes the entry date, strips foreign-language text, and resolves it
+    to one of: "מיידי" (immediate/flexible), "DD/MM" (an embedded numeric
+    date or a Hebrew month-name mention), or the stripped text unchanged if
+    none of those match — kept for display honesty, scores 0 at fit-scoring
+    time rather than being rejected. A concrete date always wins over a vague
+    phrase (checked first) — e.g. "כניסה מיידית 1.9" resolves to "01/09".
     """
     if not text:
         return ""
     text = _strip_foreign_letters(text)
-    if _IMMEDIATE_RE.search(text):
-        return "מיידי"
-    m = _DATE_DDMM_RE.fullmatch(text.strip().rstrip('./'))
+    m = _DATE_DDMM_RE.search(text)
     if m:
         day, month = int(m.group(1)), int(m.group(2))
         if 1 <= day <= 31 and 1 <= month <= 12:
             return f"{day:02d}/{month:02d}"
+    month_match = _resolve_hebrew_month_mention(text)
+    if month_match:
+        return month_match
+    if _IMMEDIATE_RE.search(text):
+        return "מיידי"
     return text
+
+def resolve_entry_date(entry_date: str, today: date | None = None) -> date | None:
+    """
+    Resolves a normalized entry_date ("מיידי" / "DD/MM") to a concrete
+    calendar date for scoring/filtering. Year is inferred for "DD/MM": if
+    that day/month already passed this year, it's assumed to mean next year
+    — entry dates point forward, unlike a post's own date (see
+    _infer_post_date, which rolls backward instead). Anything else
+    (unparseable free text) resolves to None — unknown, never penalized or
+    rejected on that basis alone.
+    """
+    today = today or date.today()
+    if entry_date == "מיידי":
+        return today
+    match = re.match(r'^(\d{1,2})/(\d{1,2})$', (entry_date or "").strip())
+    if not match:
+        return None
+    day, month = int(match.group(1)), int(match.group(2))
+    try:
+        candidate = date(today.year, month, day)
+    except ValueError:
+        return None
+    if candidate < today:
+        candidate = candidate.replace(year=today.year + 1)
+    return candidate
 
 def _reject_hallucinated_address(address: str, source_text: str) -> str:
     """
@@ -340,6 +501,10 @@ _STREET_TYPE_RE = _STREET_HINT_RE
 # cross-street half discarded, not restructured.
 _CORNER_HINT_RE = re.compile(r'\s+(?:על\s+)?פינת\s+.+$')
 
+_STREET_AND_NUMBER_RE = re.compile(r'^([^\d]+?\s\d{1,4}[א-ת]?)(?=\s|$)')
+# "דירת 3.5 חדרים" (a description the LLM put in the address field) is a room count, not a house number.
+_ROOM_COUNT_TAIL_RE = re.compile(r'\s*(?:\d|חד)')
+
 def _normalize_address_key(address: str) -> str:
     if not address or address == "לא צוין":
         return ""
@@ -347,7 +512,15 @@ def _normalize_address_key(address: str) -> str:
     norm = _CORNER_HINT_RE.sub('', norm)
     norm = _STREET_TYPE_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
-    return re.sub(r'\s+', ' ', norm).strip()
+    norm = re.sub(r'\s+', ' ', norm).strip()
+    # A street + house number identifies the building on its own; any neighborhood/landmark words after
+    # it are wording, not identity. Without this, "צבי 2, רמת גן" and "צבי 2, שכונת הראשונים פינת
+    # גבעתיים, רמת גן" keyed differently and the same flat was added and alerted twice (2026-11-07).
+    # No number -> unchanged, so a weak address still never merges on its leftover words alone.
+    street_and_number = _STREET_AND_NUMBER_RE.match(norm)
+    if street_and_number and not _ROOM_COUNT_TAIL_RE.match(norm[street_and_number.end():]):
+        return street_and_number.group(1)
+    return norm
 
 # ─── Address display formatting ─────────────────────────────────────────────
 # Reshapes the LLM's raw (verbatim-from-post) address into the sheet's

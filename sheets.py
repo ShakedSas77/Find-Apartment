@@ -18,6 +18,10 @@ from core.util import _with_retries
 from core.normalize import _sheet_safe_cell, _is_recent_post_date, _post_date_sort_key
 from core.dedupe import _listing_key
 
+_COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
+_COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
+_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
+
 
 def setup_google_sheet():
     """
@@ -57,7 +61,11 @@ def setup_google_sheet():
 def _append_rows_batch(sheet, rows: list[list]):
     if not rows:
         return
-    _with_retries(lambda: sheet.append_rows(rows, value_input_option="USER_ENTERED"))
+    # Anchored at A1: without table_range, Sheets guesses the "table" itself, and a manual
+    # note past the last header column (e.g. column S) made it append every row starting at
+    # that column — column A (URL) came out empty, and dedupe_and_sort_sheet then merged all
+    # those URL-less rows into one, silently deleting them.
+    _with_retries(lambda: sheet.append_rows(rows, value_input_option="USER_ENTERED", table_range="A1"))
 
 def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     """
@@ -78,14 +86,18 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         return 0, 0, len(data) - 1 if data else 0
     rows = data[1:]
 
+    # URL-less rows (a manual entry, or a row misaligned by a bad append) are kept untouched:
+    # without a URL there's nothing reliable to dedupe them on, and _listing_key's weak-address
+    # fallback ("url", "") would give every one of them the same key and merge them all into one.
+    url_less_rows = [row for row in rows if not (row and row[0])]
+
     best_by_url = {}
     for row in rows:
         url = row[0] if row else ""
-        existing = best_by_url.get(url)
         if not url:
-            key = f"empty-url-{len(best_by_url)}"
-            best_by_url[key] = row
-        elif existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
+            continue
+        existing = best_by_url.get(url)
+        if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_url[url] = row
 
     db_data = storage.get_added_listing_data()
@@ -96,7 +108,7 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
             best_by_key[key] = row
 
-    deduped_rows = list(best_by_key.values())
+    deduped_rows = list(best_by_key.values()) + url_less_rows
     duplicates_removed = len(rows) - len(deduped_rows)
 
     # A later crosspost's more specific address (e.g. a corner qualifier) may
@@ -122,7 +134,14 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
 
     fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
 
-    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows)
+    # A manually-added column past the defined headers (e.g. a note) makes
+    # get_all_values() pad every row to that wider width. Rewriting with a
+    # range narrower than the actual data width raises a 400 from the Sheets
+    # API — and since the clear happens before the write, a crash there wipes
+    # the sheet with nothing written back. Sizing the range off the real data
+    # width (never narrower than SHEET_HEADERS) keeps such columns intact.
+    total_cols = max(len(SHEET_HEADERS), max((len(r) for r in data), default=0))
+    _rewrite_sheet_data_rows(sheet, len(rows), fresh_rows, total_cols)
     return duplicates_removed, stale_removed, len(fresh_rows)
 
 _ENTRY_DATE_COL_INDEX = SHEET_HEADERS.index("תאריך כניסה")
@@ -133,7 +152,7 @@ _SCAN_TIME_COL_INDEX = SHEET_HEADERS.index("זמן סריקה")
 
 _TEXT_FORMAT_COL_INDICES = (_ENTRY_DATE_COL_INDEX, _POST_DATE_COL_INDEX, _SCAN_TIME_COL_INDEX)
 
-def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list]):
+def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list], total_cols: int = len(SHEET_HEADERS)):
     """
     Shared full-rewrite helper: clears the data range (header kept) and writes
     new_rows back. new_rows comes from sheet.get_all_values(), which always
@@ -148,8 +167,14 @@ def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list
        "=SUM(...)" clean, with the apostrophe already gone. Under RAW (the old
        default) that was harmless since RAW never executes formulas either
        way; under USER_ENTERED it would be executed unless re-escaped here.
+
+    total_cols defaults to the defined header count, but callers whose rows
+    may be padded wider (e.g. a manually-added note column past the last
+    header) must pass the real data width — writing a range narrower than
+    the row data raises a Sheets API 400, and since the clear below runs
+    first, a crash there would wipe the sheet without writing anything back.
     """
-    last_col = chr(ord('A') + len(SHEET_HEADERS) - 1)
+    last_col = chr(ord('A') + total_cols - 1)
     _with_retries(lambda: sheet.batch_clear([f"A2:{last_col}{original_row_count + 1}"]))
 
     # DD/MM text ("01/09") and the "YYYY-MM-DD HH:MM" scan timestamp both look
@@ -184,3 +209,45 @@ def _rewrite_sheet_data_rows(sheet, original_row_count: int, new_rows: list[list
             values=safe_rows,
             value_input_option="USER_ENTERED",
         ))
+
+def _bool_cell(s: str) -> bool | None:
+    if s == "כן": return True
+    if s == "לא": return False
+    return None
+
+def _number_cell(s: str) -> float | None:
+    cleaned = (s or "").replace(",", "").replace("₪", "").strip()
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+def _fields_from_sheet_row(row: list) -> dict:
+    """
+    Reconstructs a fields dict from an already-written sheet row — enough for
+    both compute_fit_score() and telegram_notifier's message formatting.
+    lat/lon were never persisted anywhere (not the sheet, not the DB), so the
+    location score's directional adjustment comes out neutral (0) here —
+    everything else recomputes/displays for real.
+    """
+    def cell(i):
+        return row[i] if len(row) > i else ""
+
+    dist_km = _number_cell(cell(_COL_DIST_KM))
+    floor_val = _number_cell(cell(_COL_FLOOR))
+    return {
+        "price_val": _number_cell(cell(_COL_PRICE)),
+        "rooms_val": _number_cell(cell(_COL_ROOMS)),
+        "distance_meters": dist_km * 1000 if dist_km is not None else None,
+        "distance_text": cell(_COL_DIST_KM),
+        "entry_date": cell(_COL_ENTRY_DATE) or None,
+        "floor": int(floor_val) if floor_val is not None else None,
+        "elevator": _bool_cell(cell(_COL_ELEVATOR)),
+        "parking": cell(_COL_PARKING),
+        "arnona": cell(_COL_ARNONA),
+        "vaad": cell(_COL_VAAD),
+        "shelter": _bool_cell(cell(_COL_SHELTER)),
+        "is_agent": _bool_cell(cell(_COL_AGENT)),
+        "address": cell(_COL_ADDRESS),
+        "lat": None, "lon": None,
+    }

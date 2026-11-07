@@ -4,10 +4,16 @@ Unit tests for the pure text-normalization/dedupe helpers.
 from datetime import datetime
 
 from core.normalize import (
+    _extract_price_candidates,
     _detect_agent,
     _infer_post_date,
     _normalize_bimonthly_fee,
+    _normalize_entry_date,
     _parse_floor,
+    _strip_comment_section,
+    _normalize_address_key,
+    _first_mobile_phone,
+    resolve_entry_date,
 )
 from core.dedupe import (
     _listing_dedupe_key,
@@ -132,3 +138,118 @@ def test_detect_agent_explicit_agency_signal_overrides_to_true():
 
 def test_detect_agent_no_signal_defers_to_llm_value():
     assert _detect_agent("דירה יפה", None) is None
+
+
+# --- _normalize_entry_date ---
+
+def test_normalize_entry_date_extracts_embedded_date_with_prefix():
+    assert _normalize_entry_date("החל מ-1.9") == "01/09"
+
+
+def test_normalize_entry_date_prefers_date_over_flexible_phrase():
+    assert _normalize_entry_date("1.9 גמיש") == "01/09"
+
+
+def test_normalize_entry_date_range_uses_earliest_date():
+    assert _normalize_entry_date("1.9-15.9") == "01/09"
+
+
+def test_normalize_entry_date_month_with_position_qualifier():
+    assert _normalize_entry_date("תחילת אוקטובר") == "05/10"
+
+
+def test_normalize_entry_date_day_before_month_name():
+    assert _normalize_entry_date("1 בספטמבר") == "01/09"
+
+
+def test_normalize_entry_date_flexible_phrase_becomes_immediate():
+    assert _normalize_entry_date("בהקדם") == "מיידי"
+
+
+def test_normalize_entry_date_negated_immediate_is_not_immediate():
+    assert _normalize_entry_date("לא מיידי") != "מיידי"
+
+
+def test_normalize_entry_date_unrecognized_text_passes_through():
+    assert _normalize_entry_date("בתאריך שיסוכם בהמשך") == "בתאריך שיסוכם בהמשך"
+
+
+# --- resolve_entry_date ---
+
+def test_resolve_entry_date_immediate_is_today():
+    from datetime import date
+    today = date(2026, 9, 28)
+    assert resolve_entry_date("מיידי", today=today) == today
+
+
+def test_resolve_entry_date_rolls_past_date_to_next_year():
+    from datetime import date
+    today = date(2026, 9, 28)
+    assert resolve_entry_date("01/01", today=today) == date(2027, 1, 1)
+
+
+def test_resolve_entry_date_unparseable_text_is_none():
+    assert resolve_entry_date("ספטמבר") is None
+
+
+def test_extract_price_candidates_reads_price_next_to_marker():
+    assert _extract_price_candidates("דירה להשכרה 9,000 ₪ לחודש") == [9000]
+
+
+def test_extract_price_candidates_returns_old_and_new_price():
+    assert _extract_price_candidates('היה 6,500 עכשיו 7,200 ש"ח') == [7200]
+
+
+def test_extract_price_candidates_ignores_phone_number():
+    assert _extract_price_candidates("לפרטים 050-1234567") == []
+
+
+_POST_BODY = "Orly Schick\n7 hours ago\n7h\n·\nלהשכרה ברמת גן\nדירת 3 חדרים, 6,200 ש\"ח"
+
+
+def test_inline_comment_without_section_marker_is_cut():
+    text = _POST_BODY + "\nShared post\n2\n\nNoy Azulay\n\n·\n1h\nמחיר 9000?\nReply\nShare"
+
+    assert _strip_comment_section(text) == _POST_BODY + "\nShared post\n2"
+
+
+def test_post_own_header_is_not_mistaken_for_a_comment():
+    assert _strip_comment_section(_POST_BODY) == _POST_BODY
+
+
+def test_age_line_without_a_following_reply_is_kept():
+    text = _POST_BODY + "\nDana\n·\n3h\nעוד פרטים בפרטי"
+
+    assert _strip_comment_section(text) == text
+
+
+def test_first_mobile_phone_skips_a_landline_and_strips_separators():
+    assert _first_mobile_phone("משרד 03-5551234, נייד 054-1234567") == "0541234567"
+
+
+def test_first_mobile_phone_is_none_without_a_mobile():
+    assert _first_mobile_phone("להשכרה, טלפון 03-5551234") is None
+
+
+def test_address_key_ignores_neighborhood_words_after_the_house_number():
+    assert _normalize_address_key("צבי 2, שכונת הראשונים פינת גבעתיים, רמת גן") == _normalize_address_key("צבי 2, רמת גן")
+
+
+def test_address_key_without_a_house_number_keeps_its_words():
+    assert _normalize_address_key("שכונת נווה יהושע רחוב האם") == "שכונת נווה יהושע האם"
+
+
+def test_room_count_in_the_address_field_is_not_taken_as_a_house_number():
+    assert _normalize_address_key("דירת 3.5 חדרים, רמת גן") != _normalize_address_key("דירת 3 חדרים, רמת גן")
+
+
+def test_exclusive_listing_wording_marks_an_agent():
+    assert _detect_agent("דירת 3 חדרים להשכרה בבלעדיות, 6,000 ש\"ח", None) is True
+
+
+def test_a_realtor_booking_link_marks_an_agent():
+    assert _detect_agent("לפרטים ותיאום ביקור בדירה https://go.yaeli.ai/i/cqqzNw", None) is True
+
+
+def test_private_parking_is_not_an_agent_signal():
+    assert _detect_agent("דירת 3 חדרים עם חניה בלעדית", None) is None

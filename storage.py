@@ -28,12 +28,13 @@ VERDICT_PRICE_UNKNOWN = "price_unknown"
 VERDICT_DUPLICATE_LISTING = "duplicate_listing"
 VERDICT_DUPLICATE_TEXT = "duplicate_text"
 VERDICT_REJECTED_LOCATION = "rejected_location"
+VERDICT_REJECTED_ENTRY_DATE = "rejected_entry_date"
 
 ALL_VERDICTS = [
     VERDICT_ADDED, VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS,
     VERDICT_REJECTED_DISTANCE, VERDICT_PREFILTERED, VERDICT_PARSE_FAILED,
     VERDICT_PRICE_UNKNOWN, VERDICT_DUPLICATE_LISTING, VERDICT_DUPLICATE_TEXT,
-    VERDICT_REJECTED_LOCATION,
+    VERDICT_REJECTED_LOCATION, VERDICT_REJECTED_ENTRY_DATE,
 ]
 
 # Max LLM attempts for a post that failed to parse, before giving up on it permanently
@@ -113,6 +114,53 @@ def init_db():
                 value TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ratings (
+                url TEXT,
+                voter_id TEXT,
+                voter_name TEXT,
+                score INTEGER,
+                rated_at TEXT,
+                PRIMARY KEY (url, voter_id)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_status (
+                group_url TEXT PRIMARY KEY,
+                status TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS groups (
+                url TEXT PRIMARY KEY,
+                name TEXT,
+                cities TEXT,
+                active INTEGER NOT NULL DEFAULT 1,
+                notes TEXT,
+                position INTEGER,
+                synced_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT,
+                finished_at TEXT,
+                mode TEXT,
+                status TEXT,
+                groups_scanned INTEGER,
+                groups_total INTEGER,
+                posts_seen INTEGER,
+                prefiltered INTEGER,
+                llm_parsed INTEGER,
+                added INTEGER,
+                checkpoints INTEGER,
+                warnings INTEGER,
+                errors INTEGER,
+                log_path TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -134,6 +182,18 @@ def init_db():
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
+                conn.execute(statement)
+
+        existing_address_cache_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(address_cache)").fetchall()
+        }
+        address_cache_migrations = {
+            "lat": "ALTER TABLE address_cache ADD COLUMN lat REAL",
+            "lon": "ALTER TABLE address_cache ADD COLUMN lon REAL",
+        }
+        for column, statement in address_cache_migrations.items():
+            if column not in existing_address_cache_columns:
                 conn.execute(statement)
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_posts_text_hash ON posts(text_hash)")
@@ -280,6 +340,8 @@ def save_address_cache(
     distance_meters,
     distance_source: str,
     geocode_status: str,
+    lat: float | None = None,
+    lon: float | None = None,
 ):
     key = _address_cache_key(original_address)
     if not key:
@@ -294,9 +356,10 @@ def save_address_cache(
         conn.execute(
             """INSERT INTO address_cache (
                    address_key, original_address, canonical_address, city, confidence, warning,
-                   distance_text, distance_meters, distance_source, geocode_status, updated_at
+                   distance_text, distance_meters, distance_source, geocode_status, updated_at,
+                   lat, lon
                )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(address_key) DO UPDATE SET
                    original_address=excluded.original_address,
                    canonical_address=excluded.canonical_address,
@@ -307,7 +370,9 @@ def save_address_cache(
                    distance_meters=excluded.distance_meters,
                    distance_source=excluded.distance_source,
                    geocode_status=excluded.geocode_status,
-                   updated_at=excluded.updated_at""",
+                   updated_at=excluded.updated_at,
+                   lat=excluded.lat,
+                   lon=excluded.lon""",
             (
                 key,
                 original_address,
@@ -320,6 +385,8 @@ def save_address_cache(
                 distance_source,
                 geocode_status,
                 now,
+                lat,
+                lon,
             ),
         )
 
@@ -380,13 +447,30 @@ def set_last_scan_time(group_url: str, when: datetime):
 
 
 def get_reparse_candidates() -> list[dict]:
-    """Posts rejected on price/rooms/distance, that failed to parse, or with no stated price — reparse-rejected candidates."""
+    """Posts rejected on price/rooms/distance/entry date, that failed to parse, or with no stated price — reparse-rejected candidates."""
     with _lock, _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM posts WHERE verdict IN (?, ?, ?, ?, ?)",
-            (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN, VERDICT_REJECTED_DISTANCE),
+            "SELECT * FROM posts WHERE verdict IN (?, ?, ?, ?, ?, ?)",
+            (VERDICT_REJECTED_PRICE, VERDICT_REJECTED_ROOMS, VERDICT_PARSE_FAILED, VERDICT_PRICE_UNKNOWN,
+             VERDICT_REJECTED_DISTANCE, VERDICT_REJECTED_ENTRY_DATE),
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_owed_alert_urls(max_age_hours: int) -> list[str]:
+    """
+    URLs of listings recorded as added within the last max_age_hours whose
+    Telegram alert never went out (no stored message id) — a send that failed
+    on a network/API error, after the row was already safely in the sheet.
+    """
+    cutoff = (datetime.now() - timedelta(hours=max_age_hours)).isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url FROM posts WHERE verdict = ? AND telegram_message_id IS NULL "
+            "AND last_processed >= ? ORDER BY last_processed",
+            (VERDICT_ADDED, cutoff),
+        ).fetchall()
+    return [row["url"] for row in rows]
 
 
 def get_added_listing_data() -> dict[str, dict]:
@@ -551,6 +635,49 @@ def get_votes(url: str) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def record_rating(url: str, voter_id: str, voter_name: str, score: int):
+    """Upsert — a voter's latest 0-10 rating replaces their previous one for
+    that listing, same "latest tap wins" rule as record_vote."""
+    now = datetime.now().isoformat()
+    with _lock, _connect() as conn:
+        conn.execute(
+            """INSERT INTO ratings (url, voter_id, voter_name, score, rated_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(url, voter_id) DO UPDATE SET
+                   voter_name=excluded.voter_name,
+                   score=excluded.score,
+                   rated_at=excluded.rated_at""",
+            (url, voter_id, voter_name, score, now),
+        )
+
+
+def get_ratings(url: str) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT voter_id, voter_name, score, rated_at FROM ratings WHERE url = ?", (url,)
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_ratings_with_listing_data() -> list[dict]:
+    """
+    Every human 0-10 rating joined with that listing's stored fields
+    (price/rooms/distance plus the full LLM parse in parsed_json, which has
+    floor/elevator/parking/arnona/vaad/shelter/entry_date/is_agent) — the
+    training set for eventually regressing compute_fit_score()'s weights
+    against real human judgment instead of guessed weights.
+    """
+    with _lock, _connect() as conn:
+        rows = conn.execute("""
+            SELECT r.url, r.voter_id, r.voter_name, r.score, r.rated_at,
+                   p.price_val, p.rooms_val, p.address, p.distance_meters, p.distance_text,
+                   p.parsed_json
+            FROM ratings r
+            LEFT JOIN posts p ON p.url = r.url
+        """).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_telegram_offset() -> int:
     with _lock, _connect() as conn:
         row = conn.execute("SELECT value FROM telegram_state WHERE key = 'update_offset'").fetchone()
@@ -589,3 +716,110 @@ def prune_old_posts(max_age_days: int) -> int:
         with _lock, _connect() as conn:
             conn.execute("VACUUM")
     return pruned
+
+
+def start_run(mode: str, log_path: str = "") -> int:
+    """Records a scrape starting (status "running" until finish_run) and returns its id —
+    so a run that crashes or is killed still leaves a row behind."""
+    with _lock, _connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO runs (started_at, mode, status, log_path) VALUES (?, ?, 'running', ?)",
+            (datetime.now().isoformat(timespec="seconds"), mode, log_path),
+        )
+        return cur.lastrowid
+
+
+def finish_run(run_id: int, status: str, counts: dict, warnings: int, errors: int):
+    """Closes a run's row with its outcome. counts uses run_scraper()'s summary keys."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "UPDATE runs SET finished_at = ?, status = ?, groups_scanned = ?, groups_total = ?, posts_seen = ?, "
+            "prefiltered = ?, llm_parsed = ?, added = ?, checkpoints = ?, warnings = ?, errors = ? WHERE id = ?",
+            (datetime.now().isoformat(timespec="seconds"), status, counts.get("groups_scanned"), counts.get("total"),
+             counts.get("posts_seen"), counts.get("prefiltered"), counts.get("llm_parsed"), counts.get("total_added"),
+             counts.get("checkpoint_skipped"), warnings, errors, run_id),
+        )
+
+
+def get_recent_runs(limit: int = 10) -> list[dict]:
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_last_successful_live_run() -> dict | None:
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM runs WHERE mode = 'live' AND status = 'ok' ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def get_recent_prefiltered(days: int) -> list[dict]:
+    """Posts rejected by a content pre-filter rule in the last `days` days, with their stored text —
+    the input for --stats' suspicious-rejects audit."""
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, reject_reason, raw_text FROM posts WHERE verdict = ? AND raw_text IS NOT NULL "
+            "AND reject_reason IS NOT NULL AND first_seen >= ?",
+            (VERDICT_PREFILTERED, cutoff),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def replace_groups(groups: list[dict]):
+    """Mirrors the sheet's Groups tab: the table becomes exactly `groups` (url, name, cities, active,
+    notes), in sheet order. A group removed from the tab is removed here too; its posts and stats stay."""
+    now = datetime.now().isoformat(timespec="seconds")
+    with _lock, _connect() as conn:
+        conn.execute("DELETE FROM groups")
+        conn.executemany(
+            "INSERT INTO groups (url, name, cities, active, notes, position, synced_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(g["url"], g.get("name", ""), g.get("cities", ""), 1 if g.get("active", True) else 0,
+              g.get("notes", ""), i, now) for i, g in enumerate(groups)],
+        )
+
+
+def get_groups() -> list[dict]:
+    """The local mirror of the Groups tab, in sheet order — the fallback when the sheet can't be read."""
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT url, name, cities, active, notes FROM groups ORDER BY position").fetchall()
+    return [dict(row, active=bool(row["active"])) for row in rows]
+
+
+def get_group_overview() -> dict[str, dict]:
+    """group_url -> {name, cities, posts, added, last_added, last_scanned, status} from what scans have recorded:
+    the FB page title and inferred cities (group_city_hints), post/match counts, and scan baselines."""
+    with _lock, _connect() as conn:
+        hints = conn.execute("SELECT group_url, group_name, cities_json FROM group_city_hints").fetchall()
+        counts = conn.execute(
+            "SELECT group_url, COUNT(*) AS posts, SUM(verdict = ?) AS added, "
+            "MAX(CASE WHEN verdict = ? THEN last_processed END) AS last_added "
+            "FROM posts WHERE group_url IS NOT NULL AND group_url != '' GROUP BY group_url",
+            (VERDICT_ADDED, VERDICT_ADDED),
+        ).fetchall()
+        scans = conn.execute("SELECT group_url, last_scanned_at FROM group_scan_state").fetchall()
+        statuses = conn.execute("SELECT group_url, status FROM group_status").fetchall()
+    overview: dict[str, dict] = {}
+    for row in hints:
+        overview.setdefault(row["group_url"], {}).update(
+            name=row["group_name"] or "", cities=json.loads(row["cities_json"]) if row["cities_json"] else [])
+    for row in counts:
+        overview.setdefault(row["group_url"], {}).update(
+            posts=row["posts"], added=row["added"] or 0, last_added=row["last_added"])
+    for row in scans:
+        overview.setdefault(row["group_url"], {})["last_scanned"] = row["last_scanned_at"]
+    for row in statuses:
+        overview.setdefault(row["group_url"], {})["status"] = row["status"]
+    return overview
+
+
+def set_group_status(group_url: str, status: str):
+    """The latest scan outcome for a group: "ok", "not_member" (FB shows a Join button and no posts) or "no_posts"."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO group_status (group_url, status, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(group_url) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+            (group_url, status, datetime.now().isoformat(timespec="seconds")),
+        )

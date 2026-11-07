@@ -11,6 +11,7 @@ calibration factor and destination coordinates.
 """
 
 import math
+import re
 import threading
 import time
 
@@ -23,6 +24,8 @@ from config import (
 
 _NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 _MIN_INTERVAL_SECONDS = 1.0  # Nominatim usage policy: max ~1 request/second
+
+_TARGET_CITIES = ("תל אביב", "רמת גן", "גבעתיים")
 
 _rate_lock = threading.Lock()
 _last_call = 0.0
@@ -71,13 +74,55 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def estimate_straight_line_distance(address: str) -> tuple[str, int] | None:
-    """(distance_text, distance_meters) via free geocoding + calibrated
+def _candidate_queries(address: str) -> list[str]:
+    """Without Google's city-anchored canonical address, a bare street ("רחוב שינקין")
+    geocodes to nothing, so try it under each target city unless one is already named."""
+    street = address.strip()
+    if street.startswith("רחוב "):
+        street = street[len("רחוב "):]
+    if any(city in street for city in _TARGET_CITIES):
+        return [street]
+    return [f"{street}, {city}" for city in _TARGET_CITIES]
+
+
+def estimate_straight_line_distance(address: str) -> tuple[str, int, float, float] | None:
+    """(distance_text, distance_meters, lat, lon) via free geocoding + calibrated
     haversine, or None if the address couldn't be geocoded."""
-    coords = nominatim_geocode(address)
-    if not coords:
+    best = None
+    for query in _candidate_queries(address):
+        coords = next(filter(None, (nominatim_geocode(v) for v in spelling_variants(query))), None)
+        if not coords:
+            continue
+        km = haversine_km(coords[0], coords[1], DESTINATION_LAT, DESTINATION_LON) * STRAIGHT_LINE_CALIBRATION_FACTOR
+        # Nearest wins when the same street name exists in several cities: errs toward
+        # keeping the listing, which the sheet reader can then sanity-check.
+        if best is None or km < best[0]:
+            best = (km, coords)
+    if best is None:
         return None
-    lat, lon = coords
-    km = haversine_km(lat, lon, DESTINATION_LAT, DESTINATION_LON) * STRAIGHT_LINE_CALIBRATION_FACTOR
-    meters = int(km * 1000)
-    return f"{km:.1f}", meters
+    km, (lat, lon) = best
+    return f"{km:.1f}", int(km * 1000), lat, lon
+
+
+_STREET_PREFIX_RE = re.compile(r"^(?:רחוב|רח['׳]?|שד['׳]|שדרות)\s+")
+# A 3-4 letter Hebrew word with no quote mark yet: an acronym written without its gershayim (רמבם, אצל).
+_ACRONYM_CANDIDATE_RE = re.compile(r"(?<![֐-׿\"'])([֐-׿]{2,3})([֐-׿])(?![֐-׿\"'])")
+_HOUSE_NUMBER_RE = re.compile(r"\s*\b\d{1,3}[א-ת]?\b")
+
+
+def spelling_variants(query: str) -> list[str]:
+    """
+    The query, then spellings OSM is likelier to have, tried only if it misses (seen 2026-11-07:
+    "רמבם 3, גבעתיים" misses, OSM has רמב"ם). In order: quote marks normalized + street prefix
+    dropped; gershayim inserted into the first 3-4 letter word; house number dropped — street-level
+    precision only, a last resort.
+    """
+    street, sep, rest = query.partition(",")
+    cleaned = _STREET_PREFIX_RE.sub("", street.replace("״", '"').replace("׳", "'").strip())
+    variants = [query, cleaned + sep + rest]
+    if '"' not in cleaned:
+        variants.append(_ACRONYM_CANDIDATE_RE.sub(r'\1"\2', cleaned, count=1) + sep + rest)
+    without_number = _HOUSE_NUMBER_RE.sub("", cleaned).strip()
+    if without_number and without_number != cleaned:
+        variants.append(without_number + sep + rest)
+    return list(dict.fromkeys(v.strip() for v in variants))

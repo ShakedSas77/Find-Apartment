@@ -106,16 +106,20 @@ def _listing_key(row: list, db_data: dict[str, dict] | None = None) -> tuple:
     key = _listing_dedupe_key(raw_address, raw_rooms, raw_price)
     return ("listing",) + key if key else ("url", url)
 
-def _known_added_listing_keys() -> set[tuple]:
+def _known_added_listing_keys(exclude_url: str | None = None) -> set[tuple]:
     """
     Dedupe keys for every listing ever added, across the DB's whole history —
     not just what's still in the (pruned/rewritten) sheet. Used to catch a
     listing reposted under a brand-new URL (common for agents farming
     multiple groups daily) before it burns an LLM call and re-adds a row that
-    dedupe_and_sort_sheet would just merge away anyway.
+    dedupe_and_sort_sheet would just merge away anyway. exclude_url leaves out
+    that post's own record, so re-evaluating an already-added post (replay)
+    doesn't flag it as a duplicate of itself.
     """
     keys = set()
-    for row in storage.get_added_listing_data().values():
+    for url, row in storage.get_added_listing_data().items():
+        if url == exclude_url:
+            continue
         key = _listing_dedupe_key(row.get("address"), row.get("rooms_val"), row.get("price_val"))
         if key:
             keys.add(key)

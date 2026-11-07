@@ -1,13 +1,17 @@
 """
-=== Telegram vote listener ===
+=== Telegram vote + rating listener ===
 
-Long-polls Telegram getUpdates for taps on the vote buttons attached by
-telegram_notifier.send_listing_alert(), records each vote, and acts on the
-sheet based on the running tally:
-  - VOTES_TO_REMOVE down-votes -> the listing's row is deleted from the sheet.
-  - each up-vote -> the sheet's fit-score cell is bumped by SCORE_VOTE_BOOST
-    (clamped to 100).
-  - VOTES_TO_HIGHLIGHT up-votes -> a highlight message is sent to the chat.
+Long-polls Telegram getUpdates for taps on the buttons attached by
+telegram_notifier.build_listing_keyboard(): a ⭐/🗑 vote row and two rows of
+0-10 rating buttons.
+  - Votes act on the sheet based on the running tally: VOTES_TO_REMOVE
+    down-votes deletes the listing's row; each up-vote bumps the sheet's
+    fit-score cell by SCORE_VOTE_BOOST (clamped to 100); VOTES_TO_HIGHLIGHT
+    up-votes sends a highlight message to the chat.
+  - Ratings (storage.record_rating()) have no sheet side effect at all —
+    pure data collection, the training set for eventually regressing
+    compute_fit_score()'s weights against real human judgment
+    (storage.get_ratings_with_listing_data()).
 A separate long-lived process — not part of the scrape.
 
     python bot_listener.py
@@ -32,6 +36,8 @@ _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 _POLL_TIMEOUT_SECONDS = 30
 _SCORE_COL = config.SHEET_HEADERS.index("ציון התאמה") + 1
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ADDRESS = 1, 2, 3, 13  # 0-based row indexes
+_COL_ENTRY_DATE, _COL_FLOOR, _COL_ELEVATOR = 4, 5, 6
+_COL_TOTAL_COST = config.SHEET_HEADERS.index("עלות חודשית כוללת")
 
 
 def _call(method: str, payload: dict) -> dict | list | None:
@@ -44,7 +50,7 @@ def _call(method: str, payload: dict) -> dict | list | None:
             return None
         return data.get("result")
     except Exception as e:
-        print(f"WARNING: Telegram {method} request failed: {e}")
+        print(f"WARNING: Telegram {method} request failed: {telegram_notifier._redact_bot_token(str(e))}")
         return None
 
 
@@ -52,15 +58,6 @@ def _open_sheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(config.CREDENTIALS_FILE, scopes=scopes)
     return gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
-
-
-def _markup(up: int, down: int, group_id: str, post_id: str) -> dict:
-    return {
-        "inline_keyboard": [[
-            {"text": f"⭐ מעניין ({up})", "callback_data": f"up:{group_id}:{post_id}"},
-            {"text": f"🗑 לא רלוונטי ({down})", "callback_data": f"down:{group_id}:{post_id}"},
-        ]]
-    }
 
 
 def _find_row(sheet, url: str) -> tuple[int, list] | None:
@@ -89,8 +86,32 @@ def _boost_score(sheet, row_num: int, row: list):
     sheet.update_cell(row_num, _SCORE_COL, new_score)
 
 
+def _handle_rating(cq: dict, parts: list[str]):
+    """rate:{score}:{group_id}:{post_id} — pure data collection, no sheet
+    side effect, unlike the up/down vote (see _handle_callback_query)."""
+    _, score_str, group_id, post_id = parts
+    try:
+        score = int(score_str)
+    except ValueError:
+        return
+    url = f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
+
+    voter = cq.get("from", {})
+    voter_id = str(voter.get("id", ""))
+    voter_name = voter.get("first_name") or voter.get("username") or voter_id
+    storage.record_rating(url, voter_id, voter_name, score)
+
+    _call("answerCallbackQuery", {
+        "callback_query_id": cq.get("id"),
+        "text": f"ניקוד {score}/10 נשמר, תודה!",
+    })
+
+
 def _handle_callback_query(cq: dict, sheet):
     parts = cq.get("data", "").split(":")
+    if parts and parts[0] == "rate" and len(parts) == 4:
+        _handle_rating(cq, parts)
+        return
     if len(parts) != 3:
         return
     vote, group_id, post_id = parts
@@ -131,13 +152,18 @@ def _handle_callback_query(cq: dict, sheet):
                 rooms=row[_COL_ROOMS] if len(row) > _COL_ROOMS else "",
                 distance_km=row[_COL_DIST_KM] if len(row) > _COL_DIST_KM else "",
                 address=row[_COL_ADDRESS] if len(row) > _COL_ADDRESS else "",
+                entry_date=row[_COL_ENTRY_DATE] if len(row) > _COL_ENTRY_DATE else "",
+                floor=row[_COL_FLOOR] if len(row) > _COL_FLOOR else "",
+                elevator=row[_COL_ELEVATOR] if len(row) > _COL_ELEVATOR else "",
+                score=row[_SCORE_COL - 1] if len(row) >= _SCORE_COL else "",
+                total_cost=row[_COL_TOTAL_COST] if len(row) > _COL_TOTAL_COST else "",
             )
 
     if chat_id and message_id:
         _call("editMessageReplyMarkup", {
             "chat_id": chat_id,
             "message_id": message_id,
-            "reply_markup": _markup(up, down, group_id, post_id),
+            "reply_markup": telegram_notifier.build_listing_keyboard(up, down, group_id, post_id),
         })
     _call("answerCallbackQuery", {"callback_query_id": cq.get("id")})
 

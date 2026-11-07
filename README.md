@@ -145,20 +145,20 @@ To add a new disqualifying word, append it to the relevant regex with a `|`, e.g
 **First run** — must be headful so you can log into Facebook manually:
 
 ```bash
-python apartment_bot.py --live
+python apartment_bot.py --headful
 ```
 
 After you see the Facebook feed, press **Enter** in the terminal to start scraping.
 
 > Note: The bot uses a persistent Chrome profile (`chrome_profile/`) so your login session is saved for subsequent runs.
 
-**Subsequent runs** — headless mode works once the profile is seeded:
+**Subsequent runs** — headless + live is the default once the profile is seeded:
 
 ```bash
-python apartment_bot.py --headless --live
+python apartment_bot.py
 ```
 
-If Facebook throws a login/2FA/CAPTCHA checkpoint mid-run in `--headless` mode, there's no window to solve it in — that group is skipped (a `checkpoint_<group>.png` screenshot is saved, and other groups skip immediately too instead of each hanging on the same wall) and the run finishes normally with a summary line telling you to rerun without `--headless` to resolve it.
+If Facebook throws a login/2FA/CAPTCHA checkpoint mid-run in headless mode, there's no window to solve it in — that group is skipped (a `checkpoint_<group>.png` screenshot is saved, and other groups skip immediately too instead of each hanging on the same wall) and the run finishes normally with a summary line telling you to rerun with `--headful` to resolve it.
 
 Or use the Windows launcher:
 
@@ -166,7 +166,7 @@ Or use the Windows launcher:
 run_bot.bat
 ```
 
-**Dry run by default:** omitting `--live` still scrolls, calls the LLM, and computes distance (a real trial run against live Facebook, spending real API quota) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts (rejections, pre-filters, parse failures) are still cached locally either way, so a dry run can't cost you a duplicate LLM call later. Use it to safely try out a prompt/filter/config change before committing with `--live`.
+**Dry run (`--dry-run`):** still scrolls, calls the LLM, and computes distance (a real trial run against live Facebook, spending real API quota) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts (rejections, pre-filters, parse failures) are still cached locally either way, so a dry run can't cost you a duplicate LLM call later. Use it to safely try out a prompt/filter/config change before committing with a normal (live) run.
 
 **Other flags:**
 
@@ -186,7 +186,7 @@ python apartment_bot.py --reparse-rejected
 # code end to end and prints only the posts whose verdict would now differ —
 # no sheet writes, no DB writes, no browser. Re-calls the LLM for every post,
 # so it costs more than --reparse-rejected; use that instead for a quick check
-# on just the rejected posts. To commit anything it surfaces, rerun with --live.
+# on just the rejected posts. To commit anything it surfaces, do a normal (live) run.
 python apartment_bot.py --replay
 
 # Drops sheet rows and lightens local DB rows older than MAX_POST_AGE_DAYS,

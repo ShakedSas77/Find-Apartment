@@ -2,7 +2,7 @@
 === Facebook group scraper ===
 
 run_scraper() is the public entry point: logs in (manual on first run,
-persisted via chrome_profile/), scans TARGET_URLS (parallel or sequential
+persisted via chrome_profile/), scans the Groups tab's active groups (parallel or sequential
 per MAX_CONCURRENT_GROUPS), and feeds every candidate post through
 core.evaluate.process_candidate_listing. Checkpoint/CAPTCHA handling, dead-
 link pruning, article selectors, and the "See more" expansion logic are all
@@ -22,23 +22,32 @@ from playwright.sync_api import sync_playwright
 import storage
 import telegram_notifier
 from config import (
-    TARGET_URLS, SCROLL_COUNT, SCROLL_DELAY_MS, MIN_SCROLLS_BEFORE_EARLY_STOP,
-    CONSECUTIVE_OLD_POSTS_TO_STOP, MIN_ROOMS, MAX_ROOMS, ROOMS_PRE_FILTER_REGEX,
-    NEGATIVE_KEYWORDS, ROOMMATE_KEYWORDS, EXCLUDED_LOCATIONS, LOGIN_MAX_ATTEMPTS,
+    SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
+    MIN_SCROLLS_BEFORE_EARLY_STOP, GROUP_YIELD_SCALING, GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_POOR_RATE,
+    GROUP_YIELD_RICH_RATE, GROUP_YIELD_MIN_SCROLLS,
+    CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
-    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED,
+    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
+    GRAPHQL_CAPTURE_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
-from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _is_visible, _dismiss_popups
-from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock
+from browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
+from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
 from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.normalize import (
     BIDI_RE, _strip_comment_section, relative_to_date, _infer_post_date,
-    _extract_candidate_cities, _ROOMMATE_COUPLE_EXCEPTION_RE,
+    _extract_candidate_cities, _is_recognized_fb_date_text,
 )
 from core.dedupe import _text_dedup_hash
-from core.evaluate import process_candidate_listing
-from sheets import setup_google_sheet, dedupe_and_sort_sheet, _append_rows_batch, _rewrite_sheet_data_rows
+from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
+from backup_db import backup_if_stale
+from groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
+from graphql_capture import GraphqlPostCapture, compare_with_dom
+import run_log
+from sheets import (
+    setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
+    _fields_from_sheet_row, _SCORE_COL_INDEX,
+)
 
 _text_dedup_lock = threading.Lock()
 
@@ -65,11 +74,13 @@ def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
     if not _is_visible(page.get_by_text(_DEAD_POST_RE)):
         return False
 
+    # A failed reload is inconclusive, not proof the post is gone — treat it as
+    # alive so a transient network error can't delete a real listing's row.
     try:
         page.reload(wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2000)
     except Exception:
-        return True
+        return False
     return _is_visible(page.get_by_text(_DEAD_POST_RE))
 
 def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
@@ -103,11 +114,12 @@ def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
         return 0
 
     if not live:
-        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Pass --live to commit.")
+        print(f"DRY RUN: would remove {len(dead_indices)} dead listing(s) from the sheet. Rerun without --dry-run to commit.")
         return len(dead_indices)
 
     keep_rows = [row for i, row in enumerate(rows) if i not in dead_indices]
-    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows)
+    total_cols = max(len(SHEET_HEADERS), max((len(r) for r in data), default=0))
+    _rewrite_sheet_data_rows(sheet, len(rows), keep_rows, total_cols)
     print(f"Removed {len(dead_indices)} dead listing(s) from the sheet (post no longer available).")
     return len(dead_indices)
 
@@ -153,8 +165,31 @@ _SEE_MORE_CLICK_JS = """el => {
     return false;
 }"""
 
+# The post body's own container(s) — FB marks the author's message, so reading it skips the author
+# header, "Follow"/timestamp chrome, reaction counts and the comment thread that article.inner_text()
+# drags along (and that _strip_comment_section then has to cut back out by pattern). A shared post can
+# carry two (the sharer's note + the original), so all are joined. Selectors from MasuRii/FBScrapeIdeas.
+_POST_BODY_SELECTORS = (
+    'div[data-ad-rendering-role="story_message"]',
+    'div[data-ad-preview="message"]',
+    'div[data-ad-comet-preview="message"]',
+)
+_MIN_POST_BODY_CHARS = 20
+
+def _read_post_text(article) -> str:
+    """The post body's text when FB marks it, else the whole article's text (the pre-2026-11-07 behaviour)."""
+    for selector in _POST_BODY_SELECTORS:
+        try:
+            parts = [el.inner_text().strip() for el in article.locator(selector).all()]
+        except Exception:
+            continue
+        body = "\n".join(part for part in parts if part)
+        if len(body) > _MIN_POST_BODY_CHARS:
+            return body
+    return article.inner_text().strip()
+
 def _wait_for_text_growth(article, before_len: int) -> str:
-    """Bounded poll after a "See more" click: re-reads article.inner_text() at short
+    """Bounded poll after a "See more" click: re-reads the post text at short
     intervals up to a ceiling, returning as soon as text visibly grows, instead of
     always sleeping the full fixed duration. Local DOM re-checks only — no extra
     requests to Facebook. Best-effort: returns the last successfully read text."""
@@ -167,33 +202,26 @@ def _wait_for_text_growth(article, before_len: int) -> str:
             break
         elapsed += SEE_MORE_SETTLE_POLL_MS
         try:
-            text = article.inner_text().strip()
+            text = _read_post_text(article)
         except Exception:
             break
         if len(text) > before_len:
             return text
     return text
 
-def _wait_for_button_settle(button_locator):
-    """Bounded poll after clicking a page-level "See more" button: FB typically
-    removes/hides the button once text expands, so poll for that instead of a fixed
-    sleep. Same no-extra-request reasoning as _wait_for_text_growth."""
-    elapsed = 0
-    while elapsed < SEE_MORE_SETTLE_MAX_MS:
-        try:
-            button_locator.page.wait_for_timeout(SEE_MORE_SETTLE_POLL_MS)
-        except Exception:
-            return
-        elapsed += SEE_MORE_SETTLE_POLL_MS
-        try:
-            if not button_locator.is_visible():
-                return
-        except Exception:
-            return
-
 def extract_post_info(article) -> tuple[str, str]:
+    """
+    Finds the post's own permalink + timestamp among the article's links. On a
+    "shared post" layout, a nested/preview link inside the embedded content can
+    also have an href matching /posts//permalink//marketplace-item — but its
+    visible text is the preview's own content (sometimes a raw URL), not a
+    timestamp. Prefer the first candidate whose text actually looks like a real
+    FB date; only fall back to the first href match if none do (unchanged
+    behavior for the common non-shared-post case, where there's just one).
+    """
     try:
         links = article.locator('a[role="link"]').all()
+        first_candidate = None
         for link in links:
             href = link.get_attribute("href") or ""
             if any(seg in href for seg in ("/posts/", "/permalink/", "/marketplace/item/")):
@@ -204,19 +232,62 @@ def extract_post_info(article) -> tuple[str, str]:
                     clean = "https://www.facebook.com" + clean
                 clean = _canonical_post_url(clean)
 
-                # Extract the post date directly from the Facebook timestamp link
-                post_date = ""
+                link_text = ""
                 try:
                     link_text = link.inner_text().strip()
-                    if link_text:
-                        post_date = relative_to_date(link_text)
                 except Exception:
                     pass
 
-                return clean, post_date
+                if link_text and _is_recognized_fb_date_text(link_text):
+                    return clean, relative_to_date(link_text)
+
+                if first_candidate is None:
+                    first_candidate = (clean, relative_to_date(link_text) if link_text else "")
+
+        if first_candidate:
+            return first_candidate
     except Exception:
         pass
     return "Link not extracted", ""
+
+def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> list:
+    """
+    Facebook unmounts posts that scroll far out of view, so reading the feed once
+    after the scroll loop only sees the last few screens. Called after every scroll
+    instead: records each not-yet-seen post (keyed by URL) while it is still in the
+    DOM. "See more" is expanded here, in place, since the element is gone later.
+    Posts already older than the cutoff, or already handled by a previous run
+    (storage.should_skip), skip the expansion — they get pre-filtered anyway.
+    Returns the newly harvested (url, post_dt, is_known) triples in feed order.
+    """
+    new_posts = []
+    for article in _find_articles(page):
+        try:
+            post_url, fb_post_date = extract_post_info(article)
+            if post_url == "Link not extracted" or post_url in harvested:
+                continue
+            post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+            is_known = storage.should_skip(post_url)
+            text = _read_post_text(article)
+            if not is_known and (post_dt is None or not _is_before_cutoff(post_dt, effective_cutoff)):
+                for attempt in range(2):
+                    try:
+                        if article.evaluate(_SEE_MORE_CLICK_JS):
+                            text = _wait_for_text_growth(article, len(text)) or text
+                        break
+                    except Exception:
+                        if attempt == 0:
+                            page.wait_for_timeout(SEE_MORE_RETRY_DELAY_MS)
+        except Exception:
+            continue
+        if len(text) <= 20:
+            continue
+        harvested[post_url] = {"text": text, "date": fb_post_date, "is_known": is_known}
+        new_posts.append((post_url, post_dt, is_known))
+    return new_posts
+
+# FB's "Join group" button (English UI is assumed elsewhere too; Hebrew fallback in case the locale changes).
+_JOIN_GROUP_RE = re.compile(r"^\s*(?:\+\s*)?(?:Join group|Join Group|הצטרפות לקבוצה|הצטרף לקבוצה)\s*$")
 
 def _ensure_sorted_by_new_posts(page, group_label: str):
     """
@@ -276,7 +347,7 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
             if not already_flagged:
                 _safe_print(f"\n[{group_label}] Facebook is asking for a password, 2FA, or CAPTCHA security check. "
                             f"Cannot solve this in --headless mode. Screenshot saved to {screenshot_path}. "
-                            f"Rerun without --headless to resolve it manually.")
+                            f"Rerun with --headful to resolve it manually.")
             raise HeadlessCheckpointAbort()
 
         is_leader = False
@@ -299,6 +370,171 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
             page.wait_for_timeout(3000)
         except Exception:
             pass
+
+def _is_before_cutoff(post_dt: datetime, cutoff: datetime) -> bool:
+    """
+    Post dates are day-only (DD/MM -> midnight), while the cutoff is usually the exact time of the
+    group's last scan — comparing them as datetimes made every post from the cutoff's own day look
+    older than it (posted 11:00, last scan 09:00 -> "00:00 < 09:00"). Found 2026-11-07: 1,648 of
+    2,322 "older than the scan cutoff" rejects were posted the same day they were seen. So compare
+    calendar days only: a same-day post is never treated as already covered.
+    """
+    return post_dt.date() < cutoff.date()
+
+def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, cutoff: datetime) -> int:
+    """
+    Next value of the consecutive-old-posts streak that triggers the scroll early-stop.
+    A post a previous run already handled counts like an old one: a group with no saved
+    baseline can't reach the MAX_POST_AGE_DAYS cutoff in max_scrolls, so without this it
+    re-crawls the same range every run and never catches up. A fresh post resets the
+    streak; an undated, unknown one (comment/unparseable) is inconclusive and leaves it.
+    """
+    if is_known or (post_dt is not None and _is_before_cutoff(post_dt, cutoff)):
+        return current + 1
+    if post_dt is not None:
+        return 0
+    return current
+
+def _yield_scaled_scroll_cap(added: int, total: int, full_cap: int) -> int:
+    """Scroll cap for a group from its measured match rate: GROUP_YIELD_MIN_SCROLLS at or below
+    GROUP_YIELD_POOR_RATE, full_cap at or above GROUP_YIELD_RICH_RATE, linear between. A group
+    with less than GROUP_YIELD_MIN_HISTORY posts of history keeps full_cap."""
+    if total < GROUP_YIELD_MIN_HISTORY:
+        return full_cap
+    rate = added / total
+    if rate >= GROUP_YIELD_RICH_RATE:
+        return full_cap
+    if rate <= GROUP_YIELD_POOR_RATE:
+        return GROUP_YIELD_MIN_SCROLLS
+    fraction = (rate - GROUP_YIELD_POOR_RATE) / (GROUP_YIELD_RICH_RATE - GROUP_YIELD_POOR_RATE)
+    return round(GROUP_YIELD_MIN_SCROLLS + fraction * (full_cap - GROUP_YIELD_MIN_SCROLLS))
+
+def _scroll_and_harvest(page, group_label: str, effective_cutoff: datetime, max_scrolls: int) -> tuple[dict, bool]:
+    """
+    Scrolls the group feed, harvesting posts after every scroll (Facebook unmounts
+    posts that leave the viewport), until the early-stop streak is reached or
+    max_scrolls runs out. Returns (harvested posts by url, caught_up) — caught_up is
+    True only when the early-stop fired, i.e. the scan provably reached content an
+    earlier run already covered.
+    """
+    harvested = {}
+    consecutive_old = 0
+    scrolls_done = 0
+    caught_up = False
+    _safe_print(f"[{group_label}] Scrolling (up to {max_scrolls} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
+    for i in range(max_scrolls):
+        scrolls_done = i + 1
+        # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
+        # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
+        if random.random() < 0.25:
+            try:
+                page.mouse.move(random.randint(200, 1100), random.randint(200, 800), steps=random.randint(5, 15))
+            except Exception:
+                pass
+        page.mouse.wheel(0, random.randint(SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX))
+        jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
+        page.wait_for_timeout(jittered_delay)
+
+        try:
+            new_posts = _harvest_new_articles(page, harvested, effective_cutoff)
+        except Exception:
+            new_posts = []
+
+        for _, post_dt, is_known in new_posts:
+            consecutive_old = _update_old_streak(consecutive_old, is_known, post_dt, effective_cutoff)
+
+        if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
+            caught_up = True
+            if scrolls_done < max_scrolls:
+                _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old/already-processed post(s) found.")
+            break
+    _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
+    if not caught_up:
+        _safe_print(f"[{group_label}] Did not catch up to the last scan within {max_scrolls} scrolls — "
+                     f"last_scan_time not advanced, will retry this range next run.")
+    return harvested, caught_up
+
+def _collect_valid_posts(harvested: dict, target_url: str, group_label: str, seen_urls, effective_cutoff: datetime, stats: dict) -> list:
+    """
+    Runs every harvested post through the cheap, no-LLM gates (cached verdict, already in the
+    sheet, older than the scan cutoff, content pre-filters, text-dedup) and records a verdict
+    for each one it rejects. Returns the posts worth an LLM call.
+    """
+    valid_posts = []
+    # The three "already handled" gates fire for most harvested posts on every run; one count line
+    # per group instead of a line per post keeps the log readable (they used to bury the real errors).
+    skipped = {"already processed": 0, "already in sheet": 0, "older than cutoff": 0}
+    for post_url, item in harvested.items():
+        fb_post_date = item["date"]
+        text = BIDI_RE.sub('', item["text"])
+        text = _strip_comment_section(text)
+
+        if item["is_known"]:
+            skipped["already processed"] += 1
+            continue
+
+        with _sheet_lock:
+            already_seen = post_url in seen_urls
+        if already_seen:
+            skipped["already in sheet"] += 1
+            continue
+
+        # Same effective_cutoff the scroll loop used to decide when to stop — a post
+        # this old either predates MAX_POST_AGE_DAYS or predates the group's last scan
+        # (already handled last run), so there's no point sending it to the LLM here.
+        post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
+        if post_dt is not None and _is_before_cutoff(post_dt, effective_cutoff):
+            skipped["older than cutoff"] += 1
+            storage.record_post(
+                post_url,
+                target_url,
+                text,
+                storage.VERDICT_PREFILTERED,
+                analysis={
+                    "post_date": fb_post_date,
+                    "reject_reason": "older_than_scan_cutoff",
+                },
+            )
+            stats["prefiltered"] += 1
+            continue
+
+        rejection = _content_prefilter(text, post_url)
+        if rejection:
+            verdict, analysis, message = rejection
+            _safe_print(f"    [{group_label}] Pre-filtered: {message}")
+            storage.record_post(post_url, target_url, text, verdict, analysis=analysis)
+            stats["prefiltered"] += 1
+            continue
+
+        # --- Pre-filter: same listing text already seen (this run or a past one) ---
+        # Crossposts to multiple groups are common and otherwise reach the LLM
+        # once per group even though the text is identical — this catches that
+        # before spending a call. Claiming the hash happens under the lock so
+        # concurrent group threads scanning the same crosspost at once still
+        # only let the first one through.
+        text_hash = _text_dedup_hash(text)
+        dup_of_url = None
+        if text_hash:
+            with _text_dedup_lock:
+                dup_of_url = _run_text_hashes.get(text_hash)
+                if dup_of_url is None:
+                    _run_text_hashes[text_hash] = post_url
+            if dup_of_url is None:
+                existing = storage.find_by_text_hash(text_hash, exclude_url=post_url)
+                if existing:
+                    dup_of_url = existing["url"]
+        if dup_of_url:
+            _safe_print(f"    [{group_label}] Pre-filtered: duplicate text of an already-processed post ({dup_of_url}).")
+            storage.record_post(post_url, target_url, text, storage.VERDICT_DUPLICATE_TEXT,
+                                 analysis={"text_hash": text_hash, "reject_reason": f"duplicate_text_of:{dup_of_url}"})
+            stats["prefiltered"] += 1
+            continue
+
+        valid_posts.append({"url": post_url, "text": text, "post_date": fb_post_date})
+    if any(skipped.values()):
+        _safe_print(f"    [{group_label}] Skipped without analysis: " + ", ".join(f"{n} {why}" for why, n in skipped.items() if n)
+                    + f" (cutoff {effective_cutoff:%d/%m %H:%M}).")
+    return valid_posts
 
 def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, headless: bool, live: bool = False) -> dict:
     """
@@ -326,6 +562,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
     pending_rows = []
     pending_seen_urls = set()
     pending_records = []
+    graphql = GraphqlPostCapture(page) if GRAPHQL_CAPTURE_ENABLED else None
     try:
         _safe_print(f"\n{'='*50}\nScanning {group_label}\n{target_url}\n{'='*50}")
 
@@ -356,77 +593,30 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         age_cutoff = datetime.now() - timedelta(days=MAX_POST_AGE_DAYS)
         effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
 
-        _safe_print(f"[{group_label}] Scrolling (up to {SCROLL_COUNT} times, stops early once past {effective_cutoff:%d/%m %H:%M})...")
-        seen_article_count = 0
-        consecutive_old = 0
-        scrolls_done = 0
-        for i in range(SCROLL_COUNT):
-            scrolls_done = i + 1
-            # Jitter the scroll distance too, not just the delay — a perfectly fixed pace and size reads as more bot-like
-            # Occasional cursor drift: a human's mouse doesn't sit frozen while reading a feed
-            if random.random() < 0.25:
-                try:
-                    page.mouse.move(random.randint(200, 1100), random.randint(200, 800), steps=random.randint(5, 15))
-                except Exception:
-                    pass
-            page.mouse.wheel(0, random.randint(3000, 5000))
-            jittered_delay = max(500, SCROLL_DELAY_MS + random.randint(-400, 400))
-            page.wait_for_timeout(jittered_delay)
+        max_scrolls = SCROLL_COUNT if last_scan_time else FIRST_SCAN_SCROLL_COUNT
+        if last_scan_time and GROUP_YIELD_SCALING:
+            verdicts = storage.get_group_stats().get(target_url, {})
+            max_scrolls = _yield_scaled_scroll_cap(verdicts.get(storage.VERDICT_ADDED, 0), sum(verdicts.values()), max_scrolls)
 
-            try:
-                current_articles = _find_articles(page)
-            except Exception:
-                current_articles = []
-            new_articles = current_articles[seen_article_count:]
-            seen_article_count = len(current_articles)
+        with timed("scroll"):
+            harvested, caught_up = _scroll_and_harvest(page, group_label, effective_cutoff, max_scrolls)
 
-            for article in new_articles:
-                try:
-                    _, fb_post_date = extract_post_info(article)
-                except Exception:
-                    continue
-                post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
-                if post_dt is None:
-                    continue  # inconclusive (comment/unparseable) — leave streak unchanged
-                if post_dt < effective_cutoff:
-                    consecutive_old += 1
-                else:
-                    consecutive_old = 0
+        _safe_print(f"[{group_label}] Found {len(harvested)} real posts.")
+        stats["posts_seen"] = len(harvested)
+        if graphql is not None:
+            _report_graphql_capture(graphql, harvested, group_label)
 
-            if scrolls_done >= MIN_SCROLLS_BEFORE_EARLY_STOP and consecutive_old >= CONSECUTIVE_OLD_POSTS_TO_STOP:
-                if scrolls_done < SCROLL_COUNT:
-                    _safe_print(f"[{group_label}] Stopping early after {scrolls_done} scroll(s) — {consecutive_old} consecutive old post(s) found.")
-                break
-        _safe_print(f"[{group_label}] Done scrolling ({scrolls_done} scroll(s)).")
+        # Shown in the Groups tab's status column, so a newly added group the account hasn't joined yet
+        # is visible there instead of silently yielding nothing run after run.
+        if harvested:
+            storage.set_group_status(target_url, "ok")
+        elif _is_visible(page.get_by_role("button", name=_JOIN_GROUP_RE)):
+            storage.set_group_status(target_url, "not_member")
+            _safe_print(f"    WARNING: [{group_label}] not a member of this group — join it on Facebook so its posts can be read.")
+        else:
+            storage.set_group_status(target_url, "no_posts")
 
-        # Click "See more" to reveal the full text of long posts
-        for text_pattern in ["See more", "קרא עוד", "ראה עוד"]:
-            for el in page.locator(f'div[role="button"]:has-text("{text_pattern}"), span:has-text("{text_pattern}")').all():
-                try:
-                    if el.is_visible():
-                        el.click(timeout=1000)
-                        _wait_for_button_settle(el)
-                except Exception:
-                    pass
-        page.wait_for_timeout(1500)
-
-        # Dynamic Selectors fallback loop
-        raw_articles = _find_articles(page)
-
-        # Process articles
-        articles_data = []
-        for article in raw_articles:
-            try:
-                text = article.inner_text().strip()
-                if len(text) > 20:
-                    articles_data.append({"element": article, "text": text})
-            except Exception:
-                continue
-
-        _safe_print(f"[{group_label}] Found {len(articles_data)} real posts.")
-        stats["posts_seen"] = len(articles_data)
-
-        if len(articles_data) == 0:
+        if len(harvested) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")
             try:
                 page.screenshot(path=f"debug_fb_{group_label.replace(' ', '_').replace('/', '-')}.png")
@@ -434,137 +624,7 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
                 _safe_print(f"    WARNING: [{group_label}] debug screenshot failed: {e}")
             return stats
 
-        valid_posts = []
-        for item in articles_data:
-            article = item["element"]
-            text = item["text"]
-
-            # Per-article "See more" — JS click bypasses visibility/off-screen issues.
-            # One retry on a transient failure (DOM not settled yet) — otherwise a post's
-            # text stays truncated forever: storage.should_skip() makes any non-parse_failed
-            # verdict permanent, and --reparse-rejected/--replay only ever re-read the
-            # already-truncated stored raw_text, never re-click.
-            for attempt in range(2):
-                try:
-                    article.scroll_into_view_if_needed(timeout=500)
-                    clicked = article.evaluate(_SEE_MORE_CLICK_JS)
-                    if clicked:
-                        text = _wait_for_text_growth(article, len(text))
-                    break
-                except Exception:
-                    if attempt == 0:
-                        page.wait_for_timeout(SEE_MORE_RETRY_DELAY_MS)
-                        continue
-
-            text = BIDI_RE.sub('', text)
-            text = _strip_comment_section(text)
-
-            post_url, fb_post_date = extract_post_info(article)
-            if post_url == "Link not extracted":
-                continue  # skip comments or elements that aren't a real post
-
-            if storage.should_skip(post_url):
-                _safe_print(f"    [{group_label}] Pre-filtered: Already processed (cached verdict in local DB).")
-                continue
-
-            with _sheet_lock:
-                already_seen = post_url in seen_urls
-            if already_seen:
-                _safe_print(f"    [{group_label}] Pre-filtered: Post already exists in Google Sheets (Duplicate).")
-                continue
-
-            # Same effective_cutoff the scroll loop used to decide when to stop — a post
-            # this old either predates MAX_POST_AGE_DAYS or predates the group's last scan
-            # (already handled last run), so there's no point sending it to the LLM here.
-            post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
-            if post_dt is not None and post_dt < effective_cutoff:
-                _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than the scan cutoff ({effective_cutoff:%d/%m %H:%M}).")
-                storage.record_post(
-                    post_url,
-                    target_url,
-                    text,
-                    storage.VERDICT_PREFILTERED,
-                    analysis={
-                        "post_date": fb_post_date,
-                        "reject_reason": "older_than_scan_cutoff",
-                    },
-                )
-                stats["prefiltered"] += 1
-                continue
-
-            excluded_found = [loc for loc in EXCLUDED_LOCATIONS if loc in text]
-            if excluded_found:
-                _safe_print(f"    [{group_label}] Pre-filtered: Contains excluded location '{excluded_found[0]}'.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
-                stats["prefiltered"] += 1
-                continue
-
-            # --- Pre-filter: roommate/shared-room posts, unless explicitly also couple-friendly ---
-            roommate_match = re.search(ROOMMATE_KEYWORDS, text)
-            if roommate_match and not _ROOMMATE_COUPLE_EXCEPTION_RE.search(text):
-                _safe_print(f"    [{group_label}] Pre-filtered: Contains negative keyword '{roommate_match.group(0)}'.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
-                stats["prefiltered"] += 1
-                continue
-
-            # --- Pre-filter: Remove other obvious non-relevant posts (Sublets, Studio, Commercial, Seekers) ---
-            neg_match = re.search(NEGATIVE_KEYWORDS, text)
-            if neg_match:
-                _safe_print(f"    [{group_label}] Pre-filtered: Contains negative keyword '{neg_match.group(0)}'.")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
-                stats["prefiltered"] += 1
-                continue
-
-            # --- Pre-filter: Identify Sales instead of Rentals ---
-            # Many agent posts omit the word "for sale" and just write "Price:
-            # 3,395,000 ₪" — a 7+ digit price (or "X million") is an
-            # unambiguous sale signal even without the word itself.
-            # The separator requirement ([.,]\d{3}) blocks a false match on a phone number (050-1234567).
-            sale_price_match = re.search(r'(?<!\d)[1-9]\d{0,2}(?:[.,]\d{3}){2,}(?!\d)|[1-9](?:\.\d+)?\s*(?:מיליון|מליון)', text)
-            if sale_price_match:
-                _safe_print(f"    [{group_label}] Pre-filtered: Apartment for sale (price {sale_price_match.group(0).strip()}).")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
-                stats["prefiltered"] += 1
-                continue
-
-            # --- Pre-filter: Check for room counts explicitly before heavy LLM processing ---
-            if not re.search(ROOMS_PRE_FILTER_REGEX, text):
-                clean_snip = text[:100].replace('\n', ' ')
-                actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
-                if actual_rooms_match:
-                    found_val = actual_rooms_match.group(1)
-                    _safe_print(f"    [{group_label}] Pre-filtered: Post is for {found_val} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS}).\n      URL: {post_url}\n      Text: {clean_snip}...")
-                else:
-                    _safe_print(f"    [{group_label}] Pre-filtered: No mention of matching room count.\n      URL: {post_url}\n      Text: {clean_snip}...")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_PREFILTERED)
-                stats["prefiltered"] += 1
-                continue
-
-            # --- Pre-filter: same listing text already seen (this run or a past one) ---
-            # Crossposts to multiple groups are common and otherwise reach the LLM
-            # once per group even though the text is identical — this catches that
-            # before spending a call. Claiming the hash happens under the lock so
-            # concurrent group threads scanning the same crosspost at once still
-            # only let the first one through.
-            text_hash = _text_dedup_hash(text)
-            dup_of_url = None
-            if text_hash:
-                with _text_dedup_lock:
-                    dup_of_url = _run_text_hashes.get(text_hash)
-                    if dup_of_url is None:
-                        _run_text_hashes[text_hash] = post_url
-                if dup_of_url is None:
-                    existing = storage.find_by_text_hash(text_hash, exclude_url=post_url)
-                    if existing:
-                        dup_of_url = existing["url"]
-            if dup_of_url:
-                _safe_print(f"    [{group_label}] Pre-filtered: duplicate text of an already-processed post ({dup_of_url}).")
-                storage.record_post(post_url, target_url, text, storage.VERDICT_DUPLICATE_TEXT,
-                                     analysis={"text_hash": text_hash, "reject_reason": f"duplicate_text_of:{dup_of_url}"})
-                stats["prefiltered"] += 1
-                continue
-
-            valid_posts.append({"url": post_url, "text": text, "post_date": fb_post_date})
+        valid_posts = _collect_valid_posts(harvested, target_url, group_label, seen_urls, effective_cutoff, stats)
 
         _safe_print(f"[{group_label}] Found {len(valid_posts)} valid posts for LLM parsing.")
 
@@ -585,32 +645,32 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             for future in as_completed(futures):
                 future.result()
 
-        if pending_rows and live:
-            with _sheet_lock:
-                try:
-                    _append_rows_batch(sheet, pending_rows)
-                    seen_urls.update(pending_seen_urls)
-                    for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
-                        storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
-                    _safe_print(f"    [{group_label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
-                    if TELEGRAM_ENABLED:
-                        for tg_url, tg_fields, tg_score in pending_telegram:
-                            try:
-                                telegram_notifier.send_listing_alert(tg_url, tg_fields, tg_score)
-                            except Exception as e:
-                                _safe_print(f"    WARNING: [{group_label}] Telegram alert failed for {tg_url}: {e}")
-                except Exception as e:
-                    _safe_print(f"    ERROR: [{group_label}] batch writing to sheet: {e}")
-                    stats["added"] -= len(pending_rows)
-        elif pending_rows:
-            _safe_print(f"    [{group_label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — pass --live to commit).")
+        flush_pending_listings(sheet, seen_urls, pending_rows, pending_seen_urls, pending_records,
+                               pending_telegram, stats, live, group_label)
 
-        storage.set_last_scan_time(target_url, scan_started_at)
+        # A dry run commits nothing, so it must not move the baseline either: a would-be match it
+        # printed but never recorded would then read as older than last_scan_time on the next live run.
+        if caught_up and live:
+            storage.set_last_scan_time(target_url, scan_started_at)
     except GmapsQuotaHalted:
         _safe_print(f"    [{group_label}] Stopping: Google Maps monthly cap reached (GMAPS_ON_CAP='halt').")
     except HeadlessCheckpointAbort:
         stats["checkpoint_hit"] = True
+    finally:
+        if graphql is not None:
+            graphql.detach()
     return stats
+
+def _report_graphql_capture(graphql: GraphqlPostCapture, harvested: dict, group_label: str):
+    """Observational only: how well the passive GraphQL capture lines up with the DOM scan, so it can
+    be trusted (or not) before any post data is taken from it. Never affects the scan."""
+    try:
+        s = compare_with_dom(harvested, graphql.collect(), _infer_post_date)
+    except Exception as e:
+        _safe_print(f"    [{group_label}] GraphQL capture: comparison failed ({e}).")
+        return
+    _safe_print(f"    [{group_label}] GraphQL capture: {s['captured']} post(s) captured, {s['matched']}/{s['dom_posts']} "
+                f"DOM posts matched ({s['with_text']} with text), dates agree on {s['dates_agree']}/{s['dated']}.")
 
 def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_state_path: str, headless: bool,
                 user_agent: str = "", browser_locale: str = "", live: bool = False) -> dict:
@@ -628,7 +688,7 @@ def _scan_group(target_url: str, group_label: str, sheet, seen_urls, storage_sta
         with _checkpoint_lock:
             already_hit = _headless_checkpoint_hit
         if already_hit:
-            _safe_print(f"    [{group_label}] Skipping: a security checkpoint was already hit in another group (headless mode). Rerun without --headless.")
+            _safe_print(f"    [{group_label}] Skipping: a security checkpoint was already hit in another group (headless mode). Rerun with --headful.")
             return {"added": 0, "checkpoint_hit": True, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
 
     with sync_playwright() as p:
@@ -667,22 +727,63 @@ def _print_gmaps_quota_status():
     if GMAPS_MONTHLY_CAP > 0 and usage >= GMAPS_MONTHLY_CAP * 0.8:
         print(f"WARNING: Google Maps usage is at {usage}/{GMAPS_MONTHLY_CAP} ({usage / GMAPS_MONTHLY_CAP:.0%}) of the monthly cap.")
 
+def _make_group_label(index: int, total: int, url: str) -> str:
+    # Order is shuffled every run, so "Group 5/33" alone can't be traced back to the Groups tab.
+    group_id = url.rstrip("/").rsplit("/", 1)[-1]
+    return f"Group {index}/{total} {group_id}"
+
+def _resend_owed_alerts(sheet) -> int:
+    """
+    Re-sends Telegram alerts for recently added listings whose send failed. The
+    batch flush appends to the sheet and records VERDICT_ADDED before sending, so
+    a Telegram/network failure there used to lose the alert for good — the post
+    is never rescanned. The message is rebuilt from the listing's sheet row (same
+    as --backfill-ratings); a listing no longer in the sheet (merged as a
+    cross-post, pruned, voted out) is skipped, not alerted.
+    """
+    owed = storage.get_owed_alert_urls(ALERT_RETRY_MAX_AGE_HOURS)
+    if not owed:
+        return 0
+    rows_by_url = {row[0]: row for row in sheet.get_all_values()[1:] if row and row[0]}
+    sent = 0
+    for url in owed:
+        row = rows_by_url.get(url)
+        if row is None:
+            continue
+        score_cell = row[_SCORE_COL_INDEX].strip() if len(row) > _SCORE_COL_INDEX else ""
+        try:
+            score = int(score_cell)
+        except ValueError:
+            score = 0
+        try:
+            if telegram_notifier.send_listing_alert(url, _fields_from_sheet_row(row), score):
+                sent += 1
+        except Exception as e:
+            print(f"WARNING: re-sending owed Telegram alert failed for {url}: {e}")
+    print(f"Re-sent {sent}/{len(owed)} owed Telegram alert(s) from earlier runs.")
+    return sent
+
 def run_scraper(headless: bool = False, live: bool = False):
     if not live:
-        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Pass --live to commit.")
+        print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
+    run_started = time.perf_counter()
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
     profile_dir = os.path.join(os.getcwd(), "chrome_profile")
     storage_state_path = os.path.join(profile_dir, "_session_state.json")
 
-    shuffled_urls = random.sample(TARGET_URLS, len(TARGET_URLS))
+    # The sheet's Groups tab decides which groups to scan (groups_sync.py); a dry run only reads it.
+    group_urls = sync_groups(sheet.spreadsheet, write=live)
+    print(f"Groups to scan: {len(group_urls)} active in the '{GROUPS_TAB_NAME}' tab.")
+    shuffled_urls = random.sample(group_urls, len(group_urls))
     total = len(shuffled_urls)
     if live and TELEGRAM_ENABLED:
         try:
             telegram_notifier.send_run_started(total)
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
+        _resend_owed_alerts(sheet)
     groups_scanned = 0
     total_added = 0
     total_posts_seen = 0
@@ -693,7 +794,7 @@ def run_scraper(headless: bool = False, live: bool = False):
 
     # --- Login phase: single persistent-context tab, sequential ---
     with sync_playwright() as p:
-        persistent_kwargs = {}
+        persistent_kwargs = {"locale": BROWSER_LOCALE}
         if headless:
             # Headless Chromium's UA says "HeadlessChrome" in both the HTTP header and
             # JS — the most obvious headless tell, and a UA can only be set at context
@@ -705,7 +806,7 @@ def run_scraper(headless: bool = False, live: bool = False):
                 probe_ua = probe_page.evaluate("navigator.userAgent") or ""
                 probe.close()
                 if "HeadlessChrome" in probe_ua:
-                    persistent_kwargs["user_agent"] = probe_ua.replace("HeadlessChrome", "Chrome")
+                    persistent_kwargs["user_agent"] = _normalize_user_agent(probe_ua)
             except Exception:
                 pass
         context = p.chromium.launch_persistent_context(
@@ -725,7 +826,7 @@ def run_scraper(headless: bool = False, live: bool = False):
 
         if headless:
             if _is_visible(page.locator('input[name="email"]')):
-                print("ERROR: Cannot login manually in headless mode. Please run without --headless first.")
+                print("ERROR: Cannot login manually in headless mode. Please run with --headful first.")
                 context.close()
                 sys.exit(1)
         else:
@@ -758,9 +859,9 @@ def run_scraper(headless: bool = False, live: bool = False):
                 if i > 1:
                     time.sleep(random.uniform(5, 15))
                 try:
-                    stats = _scan_group_page(page, url, f"Group {i}/{total}", sheet, seen_urls, headless, live)
+                    stats = _scan_group_page(page, url, _make_group_label(i, total, url), sheet, seen_urls, headless, live)
                 except Exception as e:
-                    _safe_print(f"\nERROR: [Group {i}/{total}] crashed: {e}")
+                    _safe_print(f"\nERROR: [{_make_group_label(i, total, url)}] crashed: {e}")
                     continue
                 groups_scanned += 1
                 total_added += stats["added"]
@@ -783,7 +884,7 @@ def run_scraper(headless: bool = False, live: bool = False):
             real_user_agent = ""
             real_locale = ""
             try:
-                real_user_agent = (page.evaluate("navigator.userAgent") or "").replace("HeadlessChrome", "Chrome")
+                real_user_agent = _normalize_user_agent(page.evaluate("navigator.userAgent") or "")
                 real_locale = page.evaluate("navigator.language") or ""
             except Exception:
                 pass
@@ -800,7 +901,7 @@ def run_scraper(headless: bool = False, live: bool = False):
               f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
         with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS) as executor:
             futures = {
-                executor.submit(_scan_group, url, f"Group {idx}/{total}", sheet, seen_urls, storage_state_path, headless,
+                executor.submit(_scan_group, url, _make_group_label(idx, total, url), sheet, seen_urls, storage_state_path, headless,
                                 real_user_agent, real_locale, live): idx
                 for idx, url in enumerate(shuffled_urls, 1)
             }
@@ -816,7 +917,7 @@ def run_scraper(headless: bool = False, live: bool = False):
                     if stats["checkpoint_hit"]:
                         checkpoint_skipped += 1
                 except Exception as e:
-                    _safe_print(f"\nERROR: [Group {idx}/{total}] crashed: {e}")
+                    _safe_print(f"\nERROR: [{_make_group_label(idx, total, shuffled_urls[idx - 1])}] crashed: {e}")
 
     gmaps_calls_this_month = storage.get_gmaps_usage()
     print(f"\nScraping finished successfully. {total_added} apartments added.")
@@ -828,15 +929,24 @@ def run_scraper(headless: bool = False, live: bool = False):
 
     if live:
         print("Deduplicating cross-posted listings, dropping stale rows, and sorting by post date...")
-        duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
+        with timed("sheets"):
+            duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
         print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
               f"Sheet now has {kept} listings, sorted by post date (newest first).")
 
         pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
         if pruned:
             print(f"Lightened {pruned} local DB row(s) older than {MAX_POST_AGE_DAYS} days (verdict kept, so they won't be rescanned).")
+
+        # Refresh the Groups tab: names/cities just learned from page titles, and this run's stats.
+        sync_groups(sheet.spreadsheet, write=True)
+
+        try:
+            backup_if_stale()
+        except Exception as e:
+            print(f"WARNING: DB backup failed: {e}")
     else:
-        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (pass --live to commit).")
+        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (rerun without --dry-run to commit).")
 
     if live and TELEGRAM_ENABLED:
         try:
@@ -849,13 +959,21 @@ def run_scraper(headless: bool = False, live: bool = False):
                 "added": total_added,
                 "gmaps_calls": gmaps_calls_this_month,
                 "checkpoint_skipped": checkpoint_skipped,
+                "errors": run_log.current.errors if run_log.current else 0,
+                "warnings": run_log.current.warnings if run_log.current else 0,
             })
         except Exception as e:
             print(f"WARNING: Telegram run-finished alert failed: {e}")
+
+    phases = ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(get_phase_seconds().items()))
+    print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
 
     return {
         "groups_scanned": groups_scanned,
         "total": total,
         "checkpoint_skipped": checkpoint_skipped,
         "total_added": total_added,
+        "posts_seen": total_posts_seen,
+        "prefiltered": total_prefiltered,
+        "llm_parsed": total_llm_parsed,
     }

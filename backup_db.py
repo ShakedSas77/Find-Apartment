@@ -8,15 +8,17 @@ or a bad migration would silently lose all of it.
 
     python backup_db.py
 
-Schedule it yourself (e.g. weekly in Task Scheduler) if you want it automatic.
+Every live scrape also calls backup_if_stale() at the end, so a backup happens
+automatically once the newest one is older than config.BACKUP_MAX_AGE_DAYS.
 Backups live in backups/ (gitignored); newest KEEP kept, older pruned.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import sqlite3
 
 import storage
+from config import BACKUP_MAX_AGE_DAYS
 
 BACKUP_DIR = Path(__file__).parent / "backups"
 KEEP = 14
@@ -50,6 +52,16 @@ def backup():
     pruned = _prune()
     print(f"[backup] wrote {dest.name} (kept {KEEP}, pruned {pruned})")
     return dest
+
+
+def backup_if_stale(max_age_days: int = BACKUP_MAX_AGE_DAYS):
+    """Runs backup() unless the newest snapshot is younger than max_age_days. Returns the new path, or None if skipped."""
+    existing = sorted(BACKUP_DIR.glob("bot_data-*.db"))
+    if existing:
+        newest_age = datetime.now() - datetime.fromtimestamp(existing[-1].stat().st_mtime)
+        if newest_age < timedelta(days=max_age_days):
+            return None
+    return backup()
 
 
 if __name__ == "__main__":

@@ -1,21 +1,18 @@
 .env
 credentials.json
-fb_session.json
 bot_data.db
 backups/
 config_local.py
 __pycache__/
 
 chrome_profile/
-chrome_profile_test/
-yad2_profile/
-yad2_profile_explore/
 debug_fb*.png
 checkpoint_*.png
-yad2_*.png
-yad2_*.html
 /test_*.py
 logs/
+alert_dumps/
 
 .idea/
-.claude/
+# Local Claude Code state stays private; the project's domain-notes skills are shared docs.
+.claude/*
+!.claude/skills/

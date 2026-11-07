@@ -17,11 +17,34 @@ CREDENTIALS_FILE = "credentials.json"
 # Gemini LLM – API key for parsing listings
 # Create one at: https://aistudio.google.com/app/apikey
 
-# Gemini LLM – model name. Dated snapshot names (gemini-2.5-flash, gemini-2.5-flash-lite)
-# get pulled from new users without warning (404, verified 2026-07-18). "-latest"
-# is an alias that auto-updates to the active version and isn't blocked the same way.
-# gemini-flash-latest is the higher-quality alternative (smaller free-tier quota).
-GEMINI_MODEL = "gemini-flash-lite-latest"
+# Gemini LLM – model fallback chain, quality-first. Dated snapshot names (gemini-2.5-flash,
+# gemini-2.5-flash-lite) get pulled from new users without warning (404, verified 2026-07-18).
+# "-latest" is an alias that auto-updates to the active version and isn't blocked the same way.
+# On a model-level error (404/quota, or GEMINI_MAX_CONSECUTIVE_ERRORS transient errors like a
+# 503 "high demand"), core/llm.py advances to the next entry instead of dropping straight to the
+# local Ollama fallback — a transient Gemini outage is usually model-specific, not account-wide.
+# Verified callable against this key 2026-08-04 (client.models.list() lists names the key can't
+# actually call, e.g. gemini-3.5-flash-lite/gemini-flash-lite-latest were both 503ing that day —
+# re-probe with a real generate_content call, not just list(), before trusting a new entry here).
+GEMINI_MODELS = [
+    "gemini-3.6-flash",       # newest/strongest verified — primary
+    "gemini-3.5-flash",
+    "gemini-flash-latest",    # higher-quality alias, smaller free-tier quota
+    # Each model below has its own separate daily free quota, so they extend the free chain before the
+    # much slower local Ollama. Verified callable with response_schema 2026-11-07 (gemini-3.8/3.7-flash
+    # answered 429 on the free tier that day — not added until confirmed).
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemma-4-26b-a4b-it",     # Google's open MoE model on the Gemini API (~2s), high free limits
+    "gemma-4-31b-it",         # same family, dense — slow (~24s/call), last before Ollama
+]
+
+# Local fallback once the whole free chain above is exhausted. Pick it by measurement: pull a candidate
+# (`ollama pull aya-expanse:8b`) and compare with `python apartment_bot.py --eval --ollama-model <name>`.
+# RTX 2060 (6 GB VRAM): models up to ~8B at 4-bit run fully on the GPU; 12-14B ones split with RAM (slower).
+# --eval 2026-11-07: aya-expanse:8b 39/42 (93%) at 10.0s/post beat qwen2.5:7b 38/42 (90%) at 10.9s/post.
+OLLAMA_MODEL = "aya-expanse:8b"
 
 # ─── Target locations ────────────────────────────────────────────────────────────
 # Facebook groups to scan — placeholder examples, replace with groups you're a member of
@@ -42,10 +65,13 @@ LOCATIONS = [
 ]
 
 # ─── Criteria (AI-based filtering) ───────────────────────────────────────────────
-MIN_ROOMS = 3.0
+MIN_ROOMS = 2.5
 MAX_ROOMS = 3.5
 MIN_PRICE = 5500
 MAX_PRICE = 6700
+# Price pre-filter ignores candidates below this: arnona/vaad-sized numbers sit next to
+# the same ₪ markers as rent but must never trigger a rejection.
+PRICE_PREFILTER_MIN_RENT = 3000
 
 # A post that passed every filter (rooms/address/distance) but never stated a price
 # in the text at all (both the LLM and the regex "second chance" found nothing) —
@@ -57,17 +83,20 @@ INCLUDE_PRICE_UNKNOWN = False
 
 # Posts older than this are skipped. The sheet still displays DD/MM, but filtering
 # internally uses the full date.
-MAX_POST_AGE_DAYS = 21
+MAX_POST_AGE_DAYS = 14
 
 # Scheduled-run log files (logs/run_*.log) older than this get deleted by run_scheduled.bat.
 LOG_RETENTION_DAYS = 14
+# doctor.py FAILs the "last run" check when no live run has completed OK for this long — catches a
+# scheduled task that silently stopped running. A bit over a day, so one late run doesn't trip it.
+RUN_STALE_HOURS = 26
 
 # ─── Pre-filters (before the AI) ──────────────────────────────────────────────────
 # The post must contain at least one of these phrases to pass the check (saves a lot of time)
-ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|(?<!\d)3\s*וחצי\s*חד'
+ROOMS_PRE_FILTER_REGEX = r'(?<!\d)(2\.5|3|3\.5)\s*חד|שלוש[ה]?\s*חד|שלוש[ה]?\s*וחצי\s*חד|שתיים\s*וחצי\s*חד|(?<!\d)[23]\s*וחצי\s*חד'
 
 # Words that automatically disqualify a post:
-NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות'
+NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת|מחפשים|מחפשות|לא רלוונטי'
 
 # 'שותפ'/'שותף' (roommate) is handled separately: disqualifies roommate posts, unless
 # 'זוג' (couple) is mentioned nearby — e.g. a landlord describing tenant-type flexibility
@@ -77,11 +106,23 @@ NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
 # Locations we want to instantly disqualify (e.g. not in Tel Aviv/Ramat Gan)
-EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה"]
+EXCLUDED_LOCATIONS = ["בני ברק", "נס ציונה", "אור יהודה", "חולון", "פתח תקווה", "התקווה", "מרום נווה", "עוזיאל", "נגבה", "נווה שאנן"]
+# Entries above that are Ramat Gan *street* names, not areas: they only exclude a post that doesn't name
+# another target city — "רחוב הנגבה בגבעתיים" is a different street (decided 2026-11-07).
+EXCLUDED_STREETS_RAMAT_GAN_ONLY = ("עוזיאל", "נגבה")
 
 # ─── Stability ──────────────────────────────────────────────────────────────────
 # Consecutive Gemini errors (not 429 quota) before permanently switching to Ollama
 GEMINI_MAX_CONSECUTIVE_ERRORS = 3
+# Same-model retries on a transient 503 "high demand" before it counts as an error, and the
+# base sleep between them (multiplied by the attempt number).
+GEMINI_UNAVAILABLE_RETRIES = 2
+GEMINI_UNAVAILABLE_BACKOFF_S = 5.0
+# A 429 that isn't a per-day quota (a per-minute burst, or one Google doesn't name) is retried on
+# the same model this many times, sleeping Google's own retryDelay when the error carries one,
+# before the model is given up for the run. Only an explicit PerDay 429 advances immediately.
+GEMINI_RATE_LIMIT_RETRIES = 2
+GEMINI_RETRY_MAX_SLEEP_S = 30.0
 # Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 
@@ -114,6 +155,10 @@ GMAPS_VALIDATE_ADDRESSES = True
 # True = don't waste Distance Matrix calls on a city-only or weak address.
 GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS = True
 
+# False = never call Google (billing off): geocoding and distance both use the free
+# Nominatim + calibrated straight-line estimate in distance_fallback.py instead.
+GMAPS_ENABLED = False
+
 # Monthly Distance Matrix call quota (safety margin below the free tier's ~10,000 elements/month).
 # Over the cap -> behavior per GMAPS_ON_CAP. The counter resets itself every month (keyed by YYYY-MM).
 GMAPS_MONTHLY_CAP = 9000
@@ -125,8 +170,29 @@ GMAPS_ON_CAP = "skip"
 # Hard upper bound on scroll iterations per group — a safety cap for when a group's
 # post dates are unavailable/unparseable and early-stop can never trigger, not the
 # normal case (see MIN_SCROLLS_BEFORE_EARLY_STOP / CONSECUTIVE_OLD_POSTS_TO_STOP).
-SCROLL_COUNT = 20
-SCROLL_DELAY_MS = 500
+SCROLL_COUNT = 30
+# Scroll cap for a group with no saved last-scan time. Its early-stop cutoff is the full
+# MAX_POST_AGE_DAYS lookback, which a busy group can't reach in SCROLL_COUNT scrolls (~1.5
+# new posts each); without a higher cap it never catches up, never saves a baseline, and
+# re-crawls the same range every run. One deep backfill sets the baseline.
+FIRST_SCAN_SCROLL_COUNT = 80
+# Scale SCROLL_COUNT by each group's measured yield (added / posts seen, from the DB), so a
+# group that almost never produces a match is read shallowly and a productive one fully — fewer
+# page loads per run without reading less where matches actually come from. Only applies once a
+# group has GROUP_YIELD_MIN_HISTORY posts, so a new group gets a fair full-depth chance first.
+# The first-scan backfill (FIRST_SCAN_SCROLL_COUNT) is never scaled. Idea from bgu-housing-bot.
+GROUP_YIELD_SCALING = True
+GROUP_YIELD_MIN_HISTORY = 300
+# At or below this rate -> GROUP_YIELD_MIN_SCROLLS; at or above RICH -> full SCROLL_COUNT; linear between.
+GROUP_YIELD_POOR_RATE = 0.002
+GROUP_YIELD_RICH_RATE = 0.01
+GROUP_YIELD_MIN_SCROLLS = 8
+SCROLL_DELAY_MS = 1000
+# Per-scroll wheel distance range. Kept near the viewport height (1600px): Facebook only
+# renders posts close to the viewport and loads new ones lazily, so a step far beyond it
+# (the old 3000-5000) outruns the feed and stalls.
+SCROLL_STEP_MIN_PX = 1200
+SCROLL_STEP_MAX_PX = 2000
 
 # Bounded poll after a "See more" click, replacing a blind fixed sleep — returns as
 # soon as the click visibly took effect instead of always waiting the full ceiling.
@@ -150,11 +216,37 @@ CONSECUTIVE_OLD_POSTS_TO_STOP = 5
 # headless UA artifacts, missing chrome.runtime). Kill switch in case a stealth
 # patch ever breaks Facebook rendering — the bot runs fine without it.
 STEALTH_ENABLED = True
+# A live scrape snapshots bot_data.db (backup_db.py) at the end once the newest backup is older than this.
+BACKUP_MAX_AGE_DAYS = 7
+# Locale the headless session presents (navigator.language/languages + Accept-Language). Headless
+# Chromium otherwise follows the OS regional setting (en-GB here) while this machine's headful
+# Chrome reports en-US, so the same account would show two different locales.
+BROWSER_LOCALE = "en-US"
+# WebGL identity the stealth layer presents. Headless has no real GPU (SwiftShader, a known headless
+# tell) and tf-playwright-stealth's own spoof picks a random Mac/mobile GPU each run, which clashes
+# with a Windows UA. Set both to this machine's real headful values (machine-specific, so override
+# them in config_local.py); None leaves WebGL unspoofed rather than random.
+WEBGL_VENDOR = None
+WEBGL_RENDERER = None
 
 # At the start of every run, visit every URL already in the sheet and remove any
 # whose post Facebook now shows as unavailable (deleted, or visibility changed).
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
+
+# Passively read the feed's own /api/graphql/ responses (graphql_capture.py) and print, per group,
+# how well their post ids/text/exact dates line up with the DOM scan. Observational only — no extra
+# requests, no effect on what's scanned or added. Turn off if it ever slows a run down.
+GRAPHQL_CAPTURE_ENABLED = True
+
+# ─── Alert emails (second listing source) ──────────────────────────────────────
+# Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP
+# by mail_source.py. Credentials live in .env (ALERTS_IMAP_USER/PASSWORD/FOLDER).
+ALERTS_IMAP_HOST = "imap.gmail.com"
+# How far back each run looks for alert emails.
+ALERTS_LOOKBACK_DAYS = 2
+# Where `--mail-dump` writes each email's extracted text (gitignored — it holds listing contact details).
+ALERTS_DUMP_DIR = "alert_dumps"
 
 # ─── Concurrency ────────────────────────────────────────────────────────────────
 # How many groups scan simultaneously. Higher = faster, but also higher risk of a
@@ -163,26 +255,104 @@ PRUNE_DEAD_LINKS_ENABLED = True
 # fingerprint than the real profile. If checkpoints start happening, the safest
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
-MAX_CONCURRENT_GROUPS = 32
+MAX_CONCURRENT_GROUPS = 6
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [
     "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה (ק\"מ)", "תאריך כניסה",
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
-    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה"
+    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה", "עלות חודשית כוללת"
 ]
+
+# Bi-monthly arnona above this is treated as an extraction bug and dropped (left blank).
+ARNONA_MAX_BIMONTHLY = 2000
+
+# ─── Total monthly cost ─────────────────────────────────────────────────────────
+# compute_total_monthly_cost() (scoring.py): rent + arnona + vaad + agent fee amortized.
+# Arnona/vaad missing from a post fall back to these *monthly* amounts. City is matched
+# as a substring of the address; no match uses TOTAL_COST_DEFAULT_CITY.
+DEFAULT_ARNONA_MONTHLY_BY_CITY = {"גבעתיים": 900, "רמת גן": 700, "תל אביב": 500}
+TOTAL_COST_DEFAULT_CITY = "רמת גן"
+DEFAULT_VAAD_MONTHLY = 250
+# One month's rent as broker fee, spread over this many months of lease. Separate from
+# AGENT_FEE_AMORTIZE_MONTHS, which only feeds the fit score.
+TOTAL_COST_AGENT_FEE_AMORTIZE_MONTHS = 24
 
 # ─── Fit score ──────────────────────────────────────────────────────────────────
 # compute_fit_score() (scoring.py) weights, must sum to 100.
-SCORE_WEIGHT_PRICE = 40
-SCORE_WEIGHT_DISTANCE = 40
-SCORE_WEIGHT_AMENITIES = 20
+SCORE_WEIGHT_PRICE = 25
+SCORE_WEIGHT_LOCATION = 25
+SCORE_WEIGHT_ENTRY_DATE = 25
+SCORE_WEIGHT_AMENITIES = 10  # floor/elevator condition (primary) + shelter (minor bonus)
+SCORE_WEIGHT_ROOMS = 10
+SCORE_WEIGHT_PARKING = 5
 
 # Agent listings carry a one-time broker's fee (typically one month's rent) the
 # private-listing price doesn't. Amortized over a year of lease and folded into the
 # *scoring* price only (not the displayed price) so agent vs. private listings are
 # compared on a fairer effective-monthly-cost basis.
 AGENT_FEE_AMORTIZE_MONTHS = 12
+
+# Price scoring is flat-ish up to this point, then decays rapidly toward MAX_PRICE
+# and beyond — "~6500 is still ok, but it gets bad fast after that."
+SCORE_PRICE_SOFT_CEILING = 6500
+
+# Entry-date scoring is rolling, measured from *today* (not a fixed calendar
+# date) — full marks (1.0) for on-or-before today, since moving in ASAP is
+# always best and never penalized for being early, then a smooth (Gaussian)
+# decay the later the listing's entry date gets, not stepped tiers, so e.g.
+# Nov 20 scores lower than Nov 1 even though both are "November".
+# score = 1.0 if days_signed <= 0, else exp(-days_signed^2 / (2*sigma^2));
+# at days_signed == sigma the score is ~0.61, at 2*sigma it's ~0.14. Sigma is
+# tuned so December-or-later is already very low (see scoring._entry_date_score,
+# core.normalize.resolve_entry_date). A missing/unparseable entry date is the
+# only case that scores a hard 0, since there's genuinely no date to measure.
+SCORE_ENTRY_DATE_SIGMA_DAYS_AFTER = 25
+
+# Listings whose entry date is confidently parsed as more than this many days
+# out are rejected outright (verdict rejected_entry_date), not just scored
+# low — see core/evaluate.py. An unparseable/missing entry date is never
+# rejected on this basis, only an actual resolved date this far out.
+SCORE_ENTRY_DATE_MAX_DAYS_AHEAD = 60
+
+# Directional location adjustment relative to DESTINATION_LAT/DESTINATION_LON:
+# north of the destination is a bonus, south or east is a penalty (west is neutral —
+# not mentioned as either good or bad). Points per km, folded into the location
+# score and clamped so it can only shift that component by +/- SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT.
+SCORE_LOCATION_NORTH_BONUS_PER_KM = 1.5
+SCORE_LOCATION_SOUTH_PENALTY_PER_KM = 1.5
+SCORE_LOCATION_EAST_PENALTY_PER_KM = 1.5
+SCORE_LOCATION_DIRECTION_MAX_ADJUSTMENT = 4
+# Givataim is preferred over Ramat Gan — a flat bonus added to the same
+# direction-adjustment budget above (detected from the formatted address string).
+SCORE_LOCATION_GIVATAIM_BONUS = 2
+
+# Preferred neighborhoods (Tel Aviv + Givatayim): a listing whose address or post text
+# mentions one gets SCORE_FOCUS_NEIGHBORHOOD_BONUS added to its total fit score (clamped
+# at 100). A ranking boost only — nothing outside these areas is filtered out. Spelling
+# variants (gershayim/quote forms) are listed explicitly because matching is a plain substring.
+FOCUS_NEIGHBORHOODS_TEL_AVIV = [
+    "תל חיים", "ביצרון", "רמת ישראל", "שיכון חברת החשמל", "שכון חברת החשמל",
+    "שיכון עממי ג", "שכון עממי ג", "יד אליהו", "נחלת יצחק", "רמת הטייסים",
+]
+FOCUS_NEIGHBORHOODS_GIVATAYIM = [
+    "גבעת רמב\"ם", "גבעת רמב״ם", "גבעת רמבם", "תל גנים", "ארלוזורוב",
+    "הל\"ה", "הל״ה",
+]
+FOCUS_NEIGHBORHOODS = FOCUS_NEIGHBORHOODS_TEL_AVIV + FOCUS_NEIGHBORHOODS_GIVATAYIM
+SCORE_FOCUS_NEIGHBORHOOD_BONUS = 15
+
+# No-elevator is only penalized once the floor is high enough that stairs are a
+# real burden; below this floor a walk-up is considered fine.
+SCORE_NO_ELEVATOR_FLOOR_THRESHOLD = 3
+# Points deducted per floor above the threshold when there's no elevator.
+SCORE_NO_ELEVATOR_PENALTY_PER_FLOOR = 2
+# Points granted (out of SCORE_WEIGHT_AMENITIES) when shelter/ממ"ד is present.
+SCORE_SHELTER_BONUS = 2
+
+# 3.5 rooms scores a bit lower than 3.0 — this is the max fraction of
+# SCORE_WEIGHT_ROOMS shaved off at MAX_ROOMS, interpolated linearly from MIN_ROOMS.
+SCORE_ROOMS_MAX_PENALTY_FRACTION = 0.2
 
 # ─── Free routing fallback (over Google's monthly cap) ──────────────────────────
 # Straight-line (haversine) distance to DESTINATION_ADDRESS, used only when
@@ -205,9 +375,16 @@ NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
 # ─── Telegram (optional push + voting) ───────────────────────────────────────────
 # Kill switch — bot runs fine with this False and no Telegram env vars set at all.
 # When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
-TELEGRAM_ENABLED = False
+TELEGRAM_ENABLED = True
 
 # Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
+# Fit-score tiers shown as green/yellow/red on a listing's Telegram message (>= GOOD green, >= OK yellow, else red).
+# Set from the sheet's score spread on 2026-10-15 (tertiles were 60 / 69).
+TELEGRAM_SCORE_GOOD = 70
+TELEGRAM_SCORE_OK = 55
+# A live run re-sends alerts for listings added within this window whose Telegram send failed
+# (row is in the sheet, no message id stored). Older ones are left alone — a days-late alert is noise.
+ALERT_RETRY_MAX_AGE_HOURS = 48
 VOTES_TO_REMOVE = 2
 # Up-votes at which bot_listener.py sends a highlight alert to the Telegram chat.
 VOTES_TO_HIGHLIGHT = 2

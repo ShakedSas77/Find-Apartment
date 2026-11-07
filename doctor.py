@@ -14,6 +14,7 @@ therefore a presence-only check (key set), not a live call.
 """
 
 import json
+from datetime import datetime
 import os
 import sqlite3
 import sys
@@ -55,7 +56,7 @@ def _check_credentials_file():
 def _check_chrome_profile():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
     if not os.path.isdir(path):
-        return ("chrome_profile/", WARN, "not created yet", "created automatically on the first `--live` run (manual FB login)")
+        return ("chrome_profile/", WARN, "not created yet", "created automatically on the first `--headful` run (manual FB login)")
     return ("chrome_profile/", PASS, "present", "")
 
 
@@ -65,9 +66,19 @@ def _check_config_local():
         "https://www.facebook.com/groups/000000000000002",
         "https://www.facebook.com/groups/000000000000003",
     ]
+    # The sheet's Groups tab (mirrored in the DB's groups table) is the group list; TARGET_URLS only seeds it.
+    try:
+        storage.init_db()
+        groups = storage.get_groups()
+    except Exception:
+        groups = []
+    if groups:
+        active = sum(g["active"] for g in groups)
+        return ("groups", PASS, f"{active} active of {len(groups)} in the Groups tab (last sync)", "")
     if config.TARGET_URLS == placeholder:
-        return ("config_local.py", FAIL, "TARGET_URLS still the placeholder", "add your real FB group URLs to config_local.py")
-    return ("config_local.py", PASS, f"{len(config.TARGET_URLS)} group URL(s) configured", "")
+        return ("groups", FAIL, "no groups: Groups tab never synced and TARGET_URLS is the placeholder",
+                "add group links to the sheet's Groups tab, then run `python apartment_bot.py --sync-groups`")
+    return ("groups", PASS, f"{len(config.TARGET_URLS)} group URL(s) in config_local.py (seed the Groups tab with --sync-groups)", "")
 
 
 def _check_db():
@@ -81,6 +92,25 @@ def _check_db():
         return ("bot_data.db", FAIL, f"unreadable: {exc}", "restore from a backup_db.py snapshot")
 
 
+def _check_last_run():
+    """A scheduled run that silently stopped happening (seen: no run log from July 24 to November)
+    shows up here, and `--alert` DMs it, instead of only as a quiet Telegram chat."""
+    if not storage.DB_PATH.exists():
+        return ("last run", WARN, "no database yet", "")
+    try:
+        storage.init_db()
+        last = storage.get_last_successful_live_run()
+    except Exception as exc:
+        return ("last run", FAIL, f"unreadable: {exc}", "")
+    if last is None:
+        return ("last run", WARN, "no successful live run recorded yet", "run `python apartment_bot.py` once")
+    age_hours = (datetime.now() - datetime.fromisoformat(last["started_at"])).total_seconds() / 3600
+    detail = f"last successful live run {last['started_at'][:16]} ({age_hours:.0f}h ago), added {last['added'] or 0}"
+    if age_hours > config.RUN_STALE_HOURS:
+        return ("last run", FAIL, detail, "check Task Scheduler's 'Last Run Result' for the scheduled task, and the newest logs/bot_*.log")
+    return ("last run", PASS, detail, "")
+
+
 def _check_gemini():
     key = os.getenv("GEMINI_API_KEY")
     if not key:
@@ -88,10 +118,18 @@ def _check_gemini():
     try:
         from google import genai
         client = genai.Client(api_key=key)
-        list(client.models.list())  # metadata call, not generation — doesn't spend quota
-        return ("gemini", PASS, f"reachable, model={config.GEMINI_MODEL}", "")
+        # Metadata call, not generation — doesn't spend quota. Note: a model being listed
+        # here doesn't guarantee it's actually callable (dated snapshots can 404 for a key
+        # even while listed) — this only catches an entry that's plainly gone.
+        listed = {m.name.rsplit("/", 1)[-1] for m in client.models.list()}
     except Exception as exc:
         return ("gemini", FAIL, f"unreachable: {exc}", "check GEMINI_API_KEY / network")
+    missing = [m for m in config.GEMINI_MODELS if m not in listed]
+    if not missing:
+        return ("gemini", PASS, f"reachable, chain={config.GEMINI_MODELS}", "")
+    if len(missing) < len(config.GEMINI_MODELS):
+        return ("gemini", WARN, f"reachable, but not listed for this key: {missing}", "remove dead entries from GEMINI_MODELS in config.py")
+    return ("gemini", FAIL, f"none of GEMINI_MODELS listed for this key: {config.GEMINI_MODELS}", "update GEMINI_MODELS in config.py")
 
 
 def _ollama_base() -> str:
@@ -134,6 +172,7 @@ def _check_gmaps():
 def _check_telegram():
     if not config.TELEGRAM_ENABLED:
         return ("telegram", WARN, "TELEGRAM_ENABLED=False", "optional — set True + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env to enable")
+    import telegram_notifier
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -144,12 +183,12 @@ def _check_telegram():
             return ("telegram", PASS, "bot token valid", "")
         return ("telegram", FAIL, "getMe rejected the token", "check TELEGRAM_BOT_TOKEN")
     except Exception as exc:
-        return ("telegram", FAIL, f"unreachable: {exc}", "check network / TELEGRAM_BOT_TOKEN")
+        return ("telegram", FAIL, f"unreachable: {telegram_notifier._redact_bot_token(str(exc))}", "check network / TELEGRAM_BOT_TOKEN")
 
 
 _CHECKS = [
     _check_env, _check_credentials_file, _check_chrome_profile, _check_config_local,
-    _check_db, _check_gemini, _check_ollama, _check_sheets, _check_gmaps, _check_telegram,
+    _check_db, _check_last_run, _check_gemini, _check_ollama, _check_sheets, _check_gmaps, _check_telegram,
 ]
 
 
@@ -176,7 +215,7 @@ def main(argv=None) -> int:
             )
             telegram_notifier.send_failure_alert(summary)
         except Exception as exc:
-            print(f"(could not send Telegram alert: {exc})")
+            print(f"(could not send Telegram alert: {telegram_notifier._redact_bot_token(str(exc))})")
 
     return 1 if any_fail else 0
 
