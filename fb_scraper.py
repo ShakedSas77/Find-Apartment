@@ -161,8 +161,31 @@ _SEE_MORE_CLICK_JS = """el => {
     return false;
 }"""
 
+# The post body's own container(s) — FB marks the author's message, so reading it skips the author
+# header, "Follow"/timestamp chrome, reaction counts and the comment thread that article.inner_text()
+# drags along (and that _strip_comment_section then has to cut back out by pattern). A shared post can
+# carry two (the sharer's note + the original), so all are joined. Selectors from MasuRii/FBScrapeIdeas.
+_POST_BODY_SELECTORS = (
+    'div[data-ad-rendering-role="story_message"]',
+    'div[data-ad-preview="message"]',
+    'div[data-ad-comet-preview="message"]',
+)
+_MIN_POST_BODY_CHARS = 20
+
+def _read_post_text(article) -> str:
+    """The post body's text when FB marks it, else the whole article's text (the pre-2026-11-07 behaviour)."""
+    for selector in _POST_BODY_SELECTORS:
+        try:
+            parts = [el.inner_text().strip() for el in article.locator(selector).all()]
+        except Exception:
+            continue
+        body = "\n".join(part for part in parts if part)
+        if len(body) > _MIN_POST_BODY_CHARS:
+            return body
+    return article.inner_text().strip()
+
 def _wait_for_text_growth(article, before_len: int) -> str:
-    """Bounded poll after a "See more" click: re-reads article.inner_text() at short
+    """Bounded poll after a "See more" click: re-reads the post text at short
     intervals up to a ceiling, returning as soon as text visibly grows, instead of
     always sleeping the full fixed duration. Local DOM re-checks only — no extra
     requests to Facebook. Best-effort: returns the last successfully read text."""
@@ -175,7 +198,7 @@ def _wait_for_text_growth(article, before_len: int) -> str:
             break
         elapsed += SEE_MORE_SETTLE_POLL_MS
         try:
-            text = article.inner_text().strip()
+            text = _read_post_text(article)
         except Exception:
             break
         if len(text) > before_len:
@@ -241,7 +264,7 @@ def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> 
                 continue
             post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
             is_known = storage.should_skip(post_url)
-            text = article.inner_text().strip()
+            text = _read_post_text(article)
             if not is_known and (post_dt is None or post_dt >= effective_cutoff):
                 for attempt in range(2):
                     try:
