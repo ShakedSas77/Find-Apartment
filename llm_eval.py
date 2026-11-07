@@ -24,15 +24,25 @@ def score_extraction(expected: dict, actual: dict | None) -> dict[str, bool]:
     return {field: _matches(field, want, actual.get(field)) for field, want in expected.items()}
 
 
-def run_eval() -> dict[str, list[bool]]:
-    """Runs every fixture through the LLM, prints each mismatch and the per-field accuracy, returns the scores."""
-    from core.llm import analyze_post_with_llm, last_model_used
+def run_eval(ollama_model: str | None = None) -> dict[str, list[bool]]:
+    """
+    Runs every fixture through the LLM, prints each mismatch, the per-field accuracy and the average time
+    per post, returns the scores. ollama_model skips the Gemini chain and scores that local model instead
+    — how a local fallback candidate is compared without editing config.
+    """
+    import time
+    import core.llm as llm
 
+    if ollama_model:
+        llm.OLLAMA_MODEL = ollama_model
+        llm.GEMINI_EXHAUSTED = True
     expected_by_file = json.loads((FIXTURES_DIR / "expected.json").read_text(encoding="utf-8"))
     by_field: dict[str, list[bool]] = {}
+    started = time.perf_counter()
     for name, expected in expected_by_file.items():
         text = (FIXTURES_DIR / name).read_text(encoding="utf-8")
-        actual = analyze_post_with_llm(text)
+        actual = llm.analyze_post_with_llm(text)
+        last_model_used = llm.last_model_used
         scores = score_extraction(expected, actual)
         for field, ok in scores.items():
             by_field.setdefault(field, []).append(ok)
@@ -42,7 +52,8 @@ def run_eval() -> dict[str, list[bool]]:
     print("\nPer-field accuracy:")
     for field, oks in by_field.items():
         print(f"  {field:<10} {sum(oks)}/{len(oks)}")
-    print(f"Overall: {sum(total)}/{len(total)} ({100 * sum(total) / max(len(total), 1):.0f}%)")
+    print(f"Overall: {sum(total)}/{len(total)} ({100 * sum(total) / max(len(total), 1):.0f}%), "
+          f"{(time.perf_counter() - started) / max(len(expected_by_file), 1):.1f}s per post")
     return by_field
 
 

@@ -340,6 +340,8 @@ if __name__ == "__main__":
                          help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
     parser.add_argument("--eval", action="store_true",
                          help="Score the LLM's extraction of test_posts/*.txt against test_posts/expected.json (one LLM call per fixture), then exit")
+    parser.add_argument("--ollama-model", metavar="NAME",
+                         help="With --eval: score this local Ollama model instead of the Gemini chain (e.g. aya-expanse:8b)")
     parser.add_argument("--mail-dump", action="store_true",
                          help="Save recent saved-search alert emails (read-only IMAP) as text files in ALERTS_DUMP_DIR, then exit")
     args = parser.parse_args()
@@ -372,7 +374,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.eval:
-        run_eval()
+        run_eval(ollama_model=args.ollama_model)
         sys.exit(0)
 
     if args.mail_dump:

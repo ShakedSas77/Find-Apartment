@@ -25,6 +25,7 @@ from google.genai import types
 from pydantic import BaseModel
 from typing import Optional
 
+import config
 import env
 from config import (
     GEMINI_MODELS, GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_UNAVAILABLE_RETRIES, GEMINI_UNAVAILABLE_BACKOFF_S,
@@ -85,7 +86,8 @@ _gemini_rate_lock = threading.Lock()
 # Which model produced the current thread's last result — group threads x post workers run
 # concurrently, so a plain module variable would mix up which post used which model.
 _last_model = threading.local()
-OLLAMA_MODEL = "qwen2.5:7b"
+# The local fallback model (config.OLLAMA_MODEL); a module global so --eval --ollama-model can swap it.
+OLLAMA_MODEL = config.OLLAMA_MODEL
 
 _last_gemini_call = 0.0
 

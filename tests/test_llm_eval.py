@@ -33,3 +33,18 @@ def test_every_fixture_has_an_expected_answer():
     expected = json.loads((FIXTURES_DIR / "expected.json").read_text(encoding="utf-8"))
 
     assert {p.name for p in FIXTURES_DIR.glob("*.txt")} == set(expected)
+
+
+def test_eval_with_an_ollama_model_scores_that_local_model(monkeypatch):
+    import core.llm as llm
+    import llm_eval
+
+    used = []
+    monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", False)
+    monkeypatch.setattr(llm, "OLLAMA_MODEL", llm.OLLAMA_MODEL)
+    monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3}'}})
+
+    llm_eval.run_eval(ollama_model="aya-expanse:8b")
+
+    assert set(used) == {"aya-expanse:8b"}

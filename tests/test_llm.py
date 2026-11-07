@@ -132,3 +132,15 @@ def test_an_ollama_answer_is_recorded_as_ollama(monkeypatch):
     llm.analyze_post_with_llm("להשכרה 3 חדרים")
 
     assert llm.last_model_used() == f"ollama:{llm.OLLAMA_MODEL}"
+
+
+def test_ollama_fallback_uses_the_configured_local_model(monkeypatch):
+    used = []
+    monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", True)
+    monkeypatch.setattr(llm, "OLLAMA_MODEL", "aya-expanse:8b")
+    monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3.0}'}})
+
+    llm.analyze_post_with_llm("להשכרה 3 חדרים")
+
+    assert used == ["aya-expanse:8b"]

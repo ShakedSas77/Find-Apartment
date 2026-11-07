@@ -30,8 +30,20 @@ GEMINI_MODELS = [
     "gemini-3.6-flash",       # newest/strongest verified — primary
     "gemini-3.5-flash",
     "gemini-flash-latest",    # higher-quality alias, smaller free-tier quota
-    "gemini-3.1-flash-lite",  # lightest — last resort before Ollama
+    # Each model below has its own separate daily free quota, so they extend the free chain before the
+    # much slower local Ollama. Verified callable with response_schema 2026-11-07 (gemini-3.8/3.7-flash
+    # answered 429 on the free tier that day — not added until confirmed).
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3.1-flash-lite",
+    "gemma-4-26b-a4b-it",     # Google's open MoE model on the Gemini API (~2s), high free limits
+    "gemma-4-31b-it",         # same family, dense — slow (~24s/call), last before Ollama
 ]
+
+# Local fallback once the whole free chain above is exhausted. Pick it by measurement: pull a candidate
+# (`ollama pull aya-expanse:8b`) and compare with `python apartment_bot.py --eval --ollama-model <name>`.
+# RTX 2060 (6 GB VRAM): models up to ~8B at 4-bit run fully on the GPU; 12-14B ones split with RAM (slower).
+OLLAMA_MODEL = "qwen2.5:7b"
 
 # ─── Target locations ────────────────────────────────────────────────────────────
 # Facebook groups to scan — placeholder examples, replace with groups you're a member of
