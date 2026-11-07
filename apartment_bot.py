@@ -1,22 +1,23 @@
 import argparse
 import json
+import re
 import sys
 import time
 import traceback
 
 from config import (
     TARGET_URLS,
-    MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS,
+    MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS, ROOMS_PRE_FILTER_REGEX,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
     TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
-from core.normalize import BIDI_RE, _strip_comment_section
+from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
-    _content_prefilter,
+    _content_prefilter, _extract_price_candidates,
 )
 from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from fb_scraper import run_scraper
@@ -190,6 +191,8 @@ def print_stats():
         for address, cnt in top_addresses:
             print(f"  {cnt:4}  {address}")
 
+    _print_suspicious_rejects()
+
     runs = storage.get_recent_runs(10)
     if runs:
         print("\n--- last runs (newest first) ---")
@@ -197,6 +200,31 @@ def print_stats():
             print(f"  {run['started_at'][:16]}  {run['mode']:<7} {run['status']:<17} "
                   f"groups {run['groups_scanned'] or 0}/{run['groups_total'] or 0}, added {run['added'] or 0}, "
                   f"{run['errors'] or 0} error(s), {run['warnings'] or 0} warning(s)  {run['log_path'] or ''}")
+
+def _print_suspicious_rejects():
+    """
+    Posts a pre-filter rule rejected even though they state a target room count AND an in-range price —
+    the likeliest false rejects, grouped by rule. Every rule fix on 2026-11-07 (same-day cutoff, "מחפשים
+    דייר", "סטודיו פילאטיס", "הנגבה בגבעתיים") started as exactly this kind of hand audit.
+    """
+    by_rule: dict[str, list[str]] = {}
+    for post in storage.get_recent_prefiltered(MAX_POST_AGE_DAYS):
+        text = post["raw_text"]
+        rule = post["reject_reason"]
+        if rule.startswith(("older_than_scan_cutoff", "for_sale", "no_price_amount")):
+            continue
+        has_rooms = re.search(ROOMS_PRE_FILTER_REGEX, text) or _ENGLISH_ROOMS_RE.search(text)
+        if has_rooms and any(MIN_PRICE <= p <= MAX_PRICE for p in _extract_price_candidates(text)):
+            by_rule.setdefault(rule, []).append(text)
+    if not by_rule:
+        return
+    print(f"\n--- suspicious rejects, last {MAX_POST_AGE_DAYS} days (rule fired, but rooms + price fit) ---")
+    for rule, texts in sorted(by_rule.items(), key=lambda kv: -len(kv[1])):
+        print(f"  {len(texts):4}  {rule}")
+        keyword = rule.split(":", 1)[1] if ":" in rule else ""
+        for text in texts[:2]:
+            at = text.find(keyword) if keyword else 0
+            print(f"          ...{text[max(0, at - 40):at + 50].replace(chr(10), ' ')}...")
 
 _TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
 

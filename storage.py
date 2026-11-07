@@ -735,3 +735,16 @@ def get_last_successful_live_run() -> dict | None:
             "SELECT * FROM runs WHERE mode = 'live' AND status = 'ok' ORDER BY id DESC LIMIT 1"
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_recent_prefiltered(days: int) -> list[dict]:
+    """Posts rejected by a content pre-filter rule in the last `days` days, with their stored text —
+    the input for --stats' suspicious-rejects audit."""
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, reject_reason, raw_text FROM posts WHERE verdict = ? AND raw_text IS NOT NULL "
+            "AND reject_reason IS NOT NULL AND first_seen >= ?",
+            (VERDICT_PREFILTERED, cutoff),
+        ).fetchall()
+    return [dict(row) for row in rows]
