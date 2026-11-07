@@ -91,6 +91,17 @@ def test_fetch_sends_the_visitor_token_as_a_bearer_header(monkeypatch):
     assert sent["authorization"] == "Bearer tok123"
 
 
+def test_fetch_headers_are_latin1_encodable_for_a_hebrew_location(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(madlan_source.requests, "post",
+                        lambda url, json, headers, timeout: sent.update(headers) or
+                        _FakeResponse({"data": {"searchPoiV2": {"poi": []}}}))
+
+    madlan_source.fetch_madlan_listings("רמת-גן-ישראל")
+
+    assert all(value.isascii() for value in sent.values())
+
+
 def test_fetch_raises_on_graphql_errors(monkeypatch):
     monkeypatch.setattr(madlan_source.requests, "post",
                         lambda *args, **kwargs: _FakeResponse({"errors": [{"message": "unauthorized"}]}))

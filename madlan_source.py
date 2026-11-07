@@ -16,6 +16,7 @@ or a schema change costs this source's listings for the run, nothing else.
 """
 import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 import requests
 
@@ -73,7 +74,8 @@ def fetch_madlan_listings(doc_id: str) -> list[dict]:
     headers = {
         "content-type": "application/json",
         "origin": "https://www.madlan.co.il",
-        "referer": _SEARCH_PAGE_URL.format(doc_id=doc_id),
+        # Headers must be latin-1 — the Hebrew slug goes percent-encoded, as a browser sends it.
+        "referer": _SEARCH_PAGE_URL.format(doc_id=quote(doc_id)),
         "x-requested-with": "XMLHttpRequest",
         "x-source": "web",
     }
