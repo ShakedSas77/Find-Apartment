@@ -267,7 +267,7 @@ def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> 
             post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
             is_known = storage.should_skip(post_url)
             text = _read_post_text(article)
-            if not is_known and (post_dt is None or post_dt >= effective_cutoff):
+            if not is_known and (post_dt is None or not _is_before_cutoff(post_dt, effective_cutoff)):
                 for attempt in range(2):
                     try:
                         if article.evaluate(_SEE_MORE_CLICK_JS):
@@ -366,6 +366,16 @@ def _handle_checkpoint_if_present(page, target_url: str, group_label: str, headl
         except Exception:
             pass
 
+def _is_before_cutoff(post_dt: datetime, cutoff: datetime) -> bool:
+    """
+    Post dates are day-only (DD/MM -> midnight), while the cutoff is usually the exact time of the
+    group's last scan — comparing them as datetimes made every post from the cutoff's own day look
+    older than it (posted 11:00, last scan 09:00 -> "00:00 < 09:00"). Found 2026-11-07: 1,648 of
+    2,322 "older than the scan cutoff" rejects were posted the same day they were seen. So compare
+    calendar days only: a same-day post is never treated as already covered.
+    """
+    return post_dt.date() < cutoff.date()
+
 def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, cutoff: datetime) -> int:
     """
     Next value of the consecutive-old-posts streak that triggers the scroll early-stop.
@@ -374,7 +384,7 @@ def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, c
     re-crawls the same range every run and never catches up. A fresh post resets the
     streak; an undated, unknown one (comment/unparseable) is inconclusive and leaves it.
     """
-    if is_known or (post_dt is not None and post_dt < cutoff):
+    if is_known or (post_dt is not None and _is_before_cutoff(post_dt, cutoff)):
         return current + 1
     if post_dt is not None:
         return 0
@@ -465,7 +475,7 @@ def _collect_valid_posts(harvested: dict, target_url: str, group_label: str, see
         # this old either predates MAX_POST_AGE_DAYS or predates the group's last scan
         # (already handled last run), so there's no point sending it to the LLM here.
         post_dt = _infer_post_date(fb_post_date) if fb_post_date else None
-        if post_dt is not None and post_dt < effective_cutoff:
+        if post_dt is not None and _is_before_cutoff(post_dt, effective_cutoff):
             _safe_print(f"    [{group_label}] Pre-filtered: Post date {fb_post_date} is older than the scan cutoff ({effective_cutoff:%d/%m %H:%M}).")
             storage.record_post(
                 post_url,

@@ -104,3 +104,9 @@ def test_falls_back_when_the_marked_container_is_too_short_to_be_the_post():
     article = _FakeArticle(_WHOLE, {'div[data-ad-rendering-role="story_message"]': ["😀"]})
 
     assert _read_post_text(article) == _WHOLE
+
+
+def test_post_from_the_cutoffs_own_day_is_not_treated_as_old():
+    same_day_midnight = _CUTOFF.replace(hour=0, minute=0)
+
+    assert _update_old_streak(2, is_known=False, post_dt=same_day_midnight, cutoff=_CUTOFF) == 0
