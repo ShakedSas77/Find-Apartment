@@ -18,4 +18,6 @@ yad2_*.html
 logs/
 
 .idea/
-.claude/
+# Local Claude Code state stays private; the project's domain-notes skills are shared docs.
+.claude/*
+!.claude/skills/
