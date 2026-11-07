@@ -22,6 +22,7 @@ from sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet
 from fb_scraper import run_scraper
 from mail_source import dump_alert_emails
 from run_log import start_run_log
+from llm_eval import run_eval
 import env
 import scoring
 import storage
@@ -309,6 +310,8 @@ if __name__ == "__main__":
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
     parser.add_argument("--backfill-ratings", action="store_true",
                          help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
+    parser.add_argument("--eval", action="store_true",
+                         help="Score the LLM's extraction of test_posts/*.txt against test_posts/expected.json (one LLM call per fixture), then exit")
     parser.add_argument("--mail-dump", action="store_true",
                          help="Save recent saved-search alert emails (read-only IMAP) as text files in ALERTS_DUMP_DIR, then exit")
     args = parser.parse_args()
@@ -338,6 +341,10 @@ if __name__ == "__main__":
 
     if args.backfill_ratings:
         backfill_ratings()
+        sys.exit(0)
+
+    if args.eval:
+        run_eval()
         sys.exit(0)
 
     if args.mail_dump:

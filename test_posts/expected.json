@@ -1,0 +1,10 @@
+{
+  "post_1_full_details.txt": {"rooms": 3, "price": 6200, "is_agent": false, "floor": 3, "elevator": true, "shelter": true, "address": "טור הברושים"},
+  "post_2_agent_landmark.txt": {"rooms": 3.5, "price": 6500, "is_agent": true, "floor": 0, "elevator": false},
+  "post_3_minimal_info.txt": {"rooms": 3, "price": 5900, "is_agent": false},
+  "post_4_street_with_descriptor.txt": {"rooms": 3, "price": 5800, "is_agent": false, "floor": 2, "elevator": true, "shelter": false, "address": "ביאליק"},
+  "post_5_noisy_no_address.txt": {"rooms": 3, "price": 5900, "is_agent": true, "floor": 1, "shelter": true},
+  "post_6_old_price_distractor.txt": {"rooms": 3, "price": 7200, "is_agent": false, "floor": 2, "elevator": true, "address": "אחד העם"},
+  "post_7_couple_or_roommates.txt": {"rooms": 3, "price": 6000, "is_agent": false, "floor": 2, "elevator": true, "address": "ביאליק"},
+  "post_8_genuine_roommate.txt": {"price": 2000, "floor": 1, "shelter": true}
+}

@@ -14,6 +14,10 @@ python apartment_bot.py
 # or
 run_bot.bat
 
+# Score the LLM's extraction of test_posts/*.txt against test_posts/expected.json
+# (one real LLM call per fixture) — run before/after any prompt or model change
+python apartment_bot.py --eval
+
 # Save recent saved-search alert emails as text (read-only IMAP, no browser, no writes)
 python apartment_bot.py --mail-dump
 
