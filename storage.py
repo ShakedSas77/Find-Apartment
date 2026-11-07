@@ -125,6 +125,13 @@ def init_db():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS group_status (
+                group_url TEXT PRIMARY KEY,
+                status TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS groups (
                 url TEXT PRIMARY KEY,
                 name TEXT,
@@ -782,7 +789,7 @@ def get_groups() -> list[dict]:
 
 
 def get_group_overview() -> dict[str, dict]:
-    """group_url -> {name, cities, posts, added, last_added, last_scanned} from what scans have recorded:
+    """group_url -> {name, cities, posts, added, last_added, last_scanned, status} from what scans have recorded:
     the FB page title and inferred cities (group_city_hints), post/match counts, and scan baselines."""
     with _lock, _connect() as conn:
         hints = conn.execute("SELECT group_url, group_name, cities_json FROM group_city_hints").fetchall()
@@ -793,6 +800,7 @@ def get_group_overview() -> dict[str, dict]:
             (VERDICT_ADDED, VERDICT_ADDED),
         ).fetchall()
         scans = conn.execute("SELECT group_url, last_scanned_at FROM group_scan_state").fetchall()
+        statuses = conn.execute("SELECT group_url, status FROM group_status").fetchall()
     overview: dict[str, dict] = {}
     for row in hints:
         overview.setdefault(row["group_url"], {}).update(
@@ -802,4 +810,16 @@ def get_group_overview() -> dict[str, dict]:
             posts=row["posts"], added=row["added"] or 0, last_added=row["last_added"])
     for row in scans:
         overview.setdefault(row["group_url"], {})["last_scanned"] = row["last_scanned_at"]
+    for row in statuses:
+        overview.setdefault(row["group_url"], {})["status"] = row["status"]
     return overview
+
+
+def set_group_status(group_url: str, status: str):
+    """The latest scan outcome for a group: "ok", "not_member" (FB shows a Join button and no posts) or "no_posts"."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO group_status (group_url, status, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(group_url) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at",
+            (group_url, status, datetime.now().isoformat(timespec="seconds")),
+        )

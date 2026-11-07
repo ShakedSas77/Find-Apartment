@@ -16,14 +16,16 @@ import re
 
 import config
 import storage
-from core.normalize import _sheet_safe_cell
+from core.normalize import BIDI_RE, _sheet_safe_cell
 from core.util import _with_retries
 
 TAB_NAME = "Groups"
 HEADERS = ["קישור לקבוצה", "שם הקבוצה", "ערים", "פעיל", "הערות",
-           "פוסטים שנסרקו", "דירות שנוספו", "אחוז התאמה", "דירה אחרונה שנוספה", "סריקה אחרונה"]
+           "פוסטים שנסרקו", "דירות שנוספו", "אחוז התאמה", "דירה אחרונה שנוספה", "סריקה אחרונה", "סטטוס"]
 _COL = {name: i for i, name in enumerate(HEADERS)}
 _INACTIVE_VALUES = {"לא", "no", "false", "0", "x"}
+# The latest scan outcome (storage.set_group_status), as the user should read it.
+_STATUS_TEXT = {"ok": "תקין", "not_member": "לא חבר/ה בקבוצה — יש להצטרף בפייסבוק", "no_posts": "לא נמצאו פוסטים"}
 _GROUP_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 _TITLE_SUFFIX_RE = re.compile(r"\s*\|\s*Facebook\s*$")
 
@@ -59,7 +61,8 @@ def sync_groups(spreadsheet, write: bool = True) -> list[str]:
 def canonical_group_url(raw: str) -> str | None:
     """A group link in any shape ("https://www.facebook.com/groups/123/?ref=..", "facebook.com/groups/x",
     or a bare id/slug) -> "https://www.facebook.com/groups/<id>", the form stored throughout the DB."""
-    text = (raw or "").strip().split("?")[0].split("#")[0]
+    # Links copied from FB's Hebrew UI often carry invisible direction marks — strip them first.
+    text = BIDI_RE.sub("", raw or "").strip().split("?")[0].split("#")[0]
     if "/groups/" in text:
         group_id = text.split("/groups/", 1)[1].split("/")[0]
     elif "facebook.com" in text or "/" in text.strip("/"):
@@ -70,16 +73,28 @@ def canonical_group_url(raw: str) -> str | None:
 
 
 def parse_group_rows(values: list[list[str]]) -> list[dict]:
-    """Sheet rows (header first) -> groups, de-duplicated by canonical URL, rows without a usable link skipped."""
-    groups, seen = [], set()
-    for row in values[1:]:
+    """
+    Sheet rows (header first) -> groups. Rows without a usable link are skipped. Duplicates — the same
+    group under any link shape — collapse into the first row: its cells win, a blank one is filled from
+    the duplicate (so notes typed on a second copy aren't lost), and the extra row is reported and
+    dropped on the next write.
+    """
+    groups, by_url = [], {}
+    for line, row in enumerate(values[1:], start=2):
         cell = lambda name: (row[_COL[name]] if len(row) > _COL[name] else "").strip()
         url = canonical_group_url(cell("קישור לקבוצה"))
-        if not url or url in seen:
+        if not url:
             continue
-        seen.add(url)
-        groups.append({"url": url, "name": cell("שם הקבוצה"), "cities": cell("ערים"),
-                       "active": cell("פעיל").lower() not in _INACTIVE_VALUES, "notes": cell("הערות")})
+        entry = {"url": url, "name": cell("שם הקבוצה"), "cities": cell("ערים"),
+                 "active": cell("פעיל").lower() not in _INACTIVE_VALUES, "notes": cell("הערות")}
+        first = by_url.get(url)
+        if first is None:
+            by_url[url] = entry
+            groups.append(entry)
+            continue
+        print(f"WARNING: '{TAB_NAME}' row {line} duplicates {url} (already listed) — merged into the first row.")
+        for field in ("name", "cities", "notes"):
+            first[field] = first[field] or entry[field]
     return groups
 
 
@@ -93,8 +108,9 @@ def _fill_from_scans(group: dict, seen: dict):
 
 def _stats_cells(seen: dict) -> list:
     posts, added = seen.get("posts", 0), seen.get("added", 0)
+    status = _STATUS_TEXT.get(seen.get("status"), "") or ("" if posts else "ממתינה לסריקה ראשונה")
     return [posts, added, f"{100 * added / posts:.1f}%" if posts else "",
-            (seen.get("last_added") or "")[:10], (seen.get("last_scanned") or "")[:16].replace("T", " ")]
+            (seen.get("last_added") or "")[:10], (seen.get("last_scanned") or "")[:16].replace("T", " "), status]
 
 
 def _write_tab(worksheet, groups: list[dict], overview: dict):
@@ -107,7 +123,8 @@ def _write_tab(worksheet, groups: list[dict], overview: dict):
     # Write first, then clear only the leftover rows below — a failed write must never leave the tab empty.
     _with_retries(lambda: worksheet.update(range_name="A1", values=rows, value_input_option="USER_ENTERED"))
     if old_row_count > len(rows):
-        _with_retries(lambda: worksheet.batch_clear([f"A{len(rows) + 1}:J{old_row_count}"]))
+        last_col = chr(ord("A") + len(HEADERS) - 1)
+        _with_retries(lambda: worksheet.batch_clear([f"A{len(rows) + 1}:{last_col}{old_row_count}"]))
 
 
 def _groups_worksheet(spreadsheet):

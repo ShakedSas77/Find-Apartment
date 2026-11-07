@@ -286,6 +286,9 @@ def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> 
         new_posts.append((post_url, post_dt, is_known))
     return new_posts
 
+# FB's "Join group" button (English UI is assumed elsewhere too; Hebrew fallback in case the locale changes).
+_JOIN_GROUP_RE = re.compile(r"^\s*(?:\+\s*)?(?:Join group|Join Group|הצטרפות לקבוצה|הצטרף לקבוצה)\s*$")
+
 def _ensure_sorted_by_new_posts(page, group_label: str):
     """
     Group feeds default to "Most relevant" sort (falls back to "Recent
@@ -602,6 +605,16 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         stats["posts_seen"] = len(harvested)
         if graphql is not None:
             _report_graphql_capture(graphql, harvested, group_label)
+
+        # Shown in the Groups tab's status column, so a newly added group the account hasn't joined yet
+        # is visible there instead of silently yielding nothing run after run.
+        if harvested:
+            storage.set_group_status(target_url, "ok")
+        elif _is_visible(page.get_by_role("button", name=_JOIN_GROUP_RE)):
+            storage.set_group_status(target_url, "not_member")
+            _safe_print(f"    WARNING: [{group_label}] not a member of this group — join it on Facebook so its posts can be read.")
+        else:
+            storage.set_group_status(target_url, "no_posts")
 
         if len(harvested) == 0:
             _safe_print(f"    [{group_label}] No posts detected. Saving debug screenshot...")

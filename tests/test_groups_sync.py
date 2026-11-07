@@ -121,3 +121,44 @@ def test_a_dry_run_never_writes_the_tab():
     groups_sync.sync_groups(FakeSpreadsheet(tab), write=False)
 
     assert tab.written is None
+
+
+def test_a_row_with_only_a_link_is_an_active_group():
+    assert groups_sync.sync_groups(FakeSpreadsheet(_tab([_G1])), write=False) == [_G1]
+
+
+def test_a_new_link_only_group_shows_it_awaits_its_first_scan():
+    tab = _tab([_G1])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
+
+    assert tab.written[1][-1] == "ממתינה לסריקה ראשונה"
+
+
+def test_a_link_pasted_with_invisible_direction_marks_is_accepted():
+    assert groups_sync.canonical_group_url("\u200f" + _G1 + "\u200e") == _G1
+
+
+def test_the_same_group_under_two_link_shapes_is_written_once():
+    tab = _tab([_G1], [_G1 + "/?ref=share"])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
+
+    assert [row[0] for row in tab.written[1:]] == [_G1]
+
+
+def test_notes_typed_on_a_duplicate_row_are_kept():
+    tab = _tab([_G1], ["111", "", "", "", "קבוצה טובה"])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
+
+    assert tab.written[1][4] == "קבוצה טובה"
+
+
+def test_a_group_the_account_has_not_joined_is_flagged():
+    storage.set_group_status(_G1, "not_member")
+    tab = _tab([_G1])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
+
+    assert tab.written[1][-1] == "לא חבר/ה בקבוצה — יש להצטרף בפייסבוק"
