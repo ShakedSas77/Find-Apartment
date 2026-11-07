@@ -157,6 +157,17 @@ SCROLL_COUNT = 30
 # new posts each); without a higher cap it never catches up, never saves a baseline, and
 # re-crawls the same range every run. One deep backfill sets the baseline.
 FIRST_SCAN_SCROLL_COUNT = 80
+# Scale SCROLL_COUNT by each group's measured yield (added / posts seen, from the DB), so a
+# group that almost never produces a match is read shallowly and a productive one fully — fewer
+# page loads per run without reading less where matches actually come from. Only applies once a
+# group has GROUP_YIELD_MIN_HISTORY posts, so a new group gets a fair full-depth chance first.
+# The first-scan backfill (FIRST_SCAN_SCROLL_COUNT) is never scaled. Idea from bgu-housing-bot.
+GROUP_YIELD_SCALING = True
+GROUP_YIELD_MIN_HISTORY = 300
+# At or below this rate -> GROUP_YIELD_MIN_SCROLLS; at or above RICH -> full SCROLL_COUNT; linear between.
+GROUP_YIELD_POOR_RATE = 0.002
+GROUP_YIELD_RICH_RATE = 0.01
+GROUP_YIELD_MIN_SCROLLS = 8
 SCROLL_DELAY_MS = 1000
 # Per-scroll wheel distance range. Kept near the viewport height (1600px): Facebook only
 # renders posts close to the viewport and loads new ones lazily, so a step far beyond it

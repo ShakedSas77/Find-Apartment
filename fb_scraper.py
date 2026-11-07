@@ -23,7 +23,8 @@ import storage
 import telegram_notifier
 from config import (
     TARGET_URLS, SCROLL_COUNT, FIRST_SCAN_SCROLL_COUNT, SCROLL_DELAY_MS, SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX,
-    MIN_SCROLLS_BEFORE_EARLY_STOP,
+    MIN_SCROLLS_BEFORE_EARLY_STOP, GROUP_YIELD_SCALING, GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_POOR_RATE,
+    GROUP_YIELD_RICH_RATE, GROUP_YIELD_MIN_SCROLLS,
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
@@ -354,6 +355,20 @@ def _update_old_streak(current: int, is_known: bool, post_dt: datetime | None, c
         return 0
     return current
 
+def _yield_scaled_scroll_cap(added: int, total: int, full_cap: int) -> int:
+    """Scroll cap for a group from its measured match rate: GROUP_YIELD_MIN_SCROLLS at or below
+    GROUP_YIELD_POOR_RATE, full_cap at or above GROUP_YIELD_RICH_RATE, linear between. A group
+    with less than GROUP_YIELD_MIN_HISTORY posts of history keeps full_cap."""
+    if total < GROUP_YIELD_MIN_HISTORY:
+        return full_cap
+    rate = added / total
+    if rate >= GROUP_YIELD_RICH_RATE:
+        return full_cap
+    if rate <= GROUP_YIELD_POOR_RATE:
+        return GROUP_YIELD_MIN_SCROLLS
+    fraction = (rate - GROUP_YIELD_POOR_RATE) / (GROUP_YIELD_RICH_RATE - GROUP_YIELD_POOR_RATE)
+    return round(GROUP_YIELD_MIN_SCROLLS + fraction * (full_cap - GROUP_YIELD_MIN_SCROLLS))
+
 def _scroll_and_harvest(page, group_label: str, effective_cutoff: datetime, max_scrolls: int) -> tuple[dict, bool]:
     """
     Scrolls the group feed, harvesting posts after every scroll (Facebook unmounts
@@ -532,6 +547,9 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         effective_cutoff = max(age_cutoff, last_scan_time) if last_scan_time else age_cutoff
 
         max_scrolls = SCROLL_COUNT if last_scan_time else FIRST_SCAN_SCROLL_COUNT
+        if last_scan_time and GROUP_YIELD_SCALING:
+            verdicts = storage.get_group_stats().get(target_url, {})
+            max_scrolls = _yield_scaled_scroll_cap(verdicts.get(storage.VERDICT_ADDED, 0), sum(verdicts.values()), max_scrolls)
 
         with timed("scroll"):
             harvested, caught_up = _scroll_and_harvest(page, group_label, effective_cutoff, max_scrolls)
