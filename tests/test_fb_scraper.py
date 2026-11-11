@@ -111,6 +111,17 @@ def test_falls_back_when_the_marked_container_is_too_short_to_be_the_post():
     assert _read_post_text(article) == _WHOLE
 
 
+def test_a_shared_marketplace_cards_caption_is_appended_to_the_post_text():
+    # The card's photos are links too, with no text; only the caption link carries the price.
+    caption = "₪9,250\n · תל אביב - יפו\nלהשכרה דירה 3 חדרים קומה 45"
+    article = _FakeArticle(_WHOLE, {
+        'div[data-ad-rendering-role="story_message"]': [_BODY],
+        'a[href*="/commerce/listing/"]': ["", "", caption],
+    })
+
+    assert _read_post_text(article) == _BODY + "\n" + caption
+
+
 def test_post_from_the_cutoffs_own_day_is_not_treated_as_old():
     same_day_midnight = _CUTOFF.replace(hour=0, minute=0)
 
