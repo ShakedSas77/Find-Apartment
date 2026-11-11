@@ -240,6 +240,9 @@ WEBGL_RENDERER = None
 # whose post Facebook now shows as unavailable (deleted, or visibility changed).
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
+# The check visits every listing in the sheet (~8.5s each, ~8 minutes for 60) and usually finds
+# 0-3 dead posts, so it runs at most this often instead of on every scan.
+DEAD_LINK_CHECK_INTERVAL_HOURS = 24
 
 # Passively read the feed's own /api/graphql/ responses (graphql_capture.py) and print, per group,
 # how well their post ids/text/exact dates line up with the DOM scan. Observational only — no extra

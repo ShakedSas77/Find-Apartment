@@ -114,6 +114,13 @@ def init_db():
                 value TEXT
             )
         """)
+        # Run-to-run bookkeeping that belongs to no single post or group (e.g. when the dead-link check last ran).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bot_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ratings (
                 url TEXT,
@@ -676,6 +683,20 @@ def get_ratings_with_listing_data() -> list[dict]:
             LEFT JOIN posts p ON p.url = r.url
         """).fetchall()
     return [dict(row) for row in rows]
+
+
+def get_bot_state(key: str) -> str | None:
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_bot_state(key: str, value: str):
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO bot_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
 
 
 def get_telegram_offset() -> int:

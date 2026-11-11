@@ -7,10 +7,12 @@ from datetime import datetime, timedelta
 import pytest
 
 from config import GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_MIN_SCROLLS, GROUP_YIELD_POOR_RATE, GROUP_YIELD_RICH_RATE
+from core import storage
 from core.errors import LoginRequired
 from sources import fb_scraper
 from sources.fb_scraper import (
-    _ScanProgress, _ensure_logged_in, _estimate_seconds_left, _new_totals, _progress_line, _read_post_text,
+    _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
+    _blocked_membership, _new_totals, _progress_line, _read_post_text,
     _scan_groups_sequentially, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
 
@@ -243,3 +245,52 @@ def test_a_crashed_group_still_moves_the_progress_bar(monkeypatch):
     progress.stop()
 
     assert progress.done == 1
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "bot_data.db")
+    storage.init_db()
+
+
+def test_dead_link_check_runs_when_it_never_ran_before(db):
+    assert _dead_link_check_due(datetime(2026, 11, 12, 9, 0)) is True
+
+
+def test_dead_link_check_is_skipped_within_the_interval(db):
+    storage.set_bot_state(_DEAD_LINKS_CHECKED_KEY, "2026-11-12T08:00:00")
+
+    assert _dead_link_check_due(datetime(2026, 11, 12, 9, 0)) is False
+
+
+def test_dead_link_check_runs_again_once_the_interval_passed(db):
+    storage.set_bot_state(_DEAD_LINKS_CHECKED_KEY, "2026-11-11T08:00:00")
+
+    assert _dead_link_check_due(datetime(2026, 11, 12, 9, 0)) is True
+
+
+class _FakeGroupPage:
+    def __init__(self, button, article_count):
+        self.button = button
+        self.article_count = article_count
+
+    def get_by_role(self, role, name):
+        return _FakeLoginForm(is_shown=bool(name.match(self.button)))
+
+    def locator(self, selector):
+        return self
+
+    def count(self):
+        return self.article_count
+
+
+def test_a_private_group_not_joined_is_detected_before_scrolling():
+    assert _blocked_membership(_FakeGroupPage("Join group", article_count=0)) == "not_member"
+
+
+def test_a_group_with_a_pending_join_request_is_detected_before_scrolling():
+    assert _blocked_membership(_FakeGroupPage("Cancel request", article_count=0)) == "pending"
+
+
+def test_a_public_group_showing_posts_to_non_members_is_still_scanned():
+    assert _blocked_membership(_FakeGroupPage("Join group", article_count=3)) is None

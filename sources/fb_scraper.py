@@ -26,7 +26,7 @@ from config import (
     GROUP_YIELD_RICH_RATE, GROUP_YIELD_MIN_SCROLLS,
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
-    PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
+    PRUNE_DEAD_LINKS_ENABLED, DEAD_LINK_CHECK_INTERVAL_HOURS, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
     GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME, PROGRESS_TICK_S,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
@@ -57,6 +57,7 @@ _headless_checkpoint_hit = False  # set once any group hits a checkpoint in --he
 
 _DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
 _DEAD_LINK_PROGRESS_EVERY = 10
+_DEAD_LINKS_CHECKED_KEY = "dead_links_checked_at"
 _PROGRESS_BAR_WIDTH = 24
 
 def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
@@ -84,6 +85,14 @@ def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
     except Exception:
         return False
     return _is_visible(page.get_by_text(_DEAD_POST_RE))
+
+def _dead_link_check_due(now: datetime) -> bool:
+    last = storage.get_bot_state(_DEAD_LINKS_CHECKED_KEY)
+    if last and now - datetime.fromisoformat(last) < timedelta(hours=DEAD_LINK_CHECK_INTERVAL_HOURS):
+        hours = (now - datetime.fromisoformat(last)).total_seconds() / 3600
+        print(f"Dead-link check: skipped — last ran {hours:.1f}h ago (every {DEAD_LINK_CHECK_INTERVAL_HOURS}h).")
+        return False
+    return True
 
 def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
     """
@@ -308,6 +317,22 @@ def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> 
 
 # FB's "Join group" button (English UI is assumed elsewhere too; Hebrew fallback in case the locale changes).
 _JOIN_GROUP_RE = re.compile(r"^\s*(?:\+\s*)?(?:Join group|Join Group|הצטרפות לקבוצה|הצטרף לקבוצה)\s*$")
+# Shown instead of Join once a request to join is waiting for an admin's approval.
+_JOIN_PENDING_RE = re.compile(r"^\s*(?:Cancel request|ביטול בקשה|בטל בקשה)\s*$")
+
+def _blocked_membership(page) -> str | None:
+    # "not_member" / "pending" (join requested) when the group shows that button and no posts at all,
+    # else None. Posts on the page mean it's readable — a public group shows them to non-members.
+    try:
+        if page.locator('div[role="article"], div[aria-posinset]').count():
+            return None
+    except Exception:
+        return None
+    if _is_visible(page.get_by_role("button", name=_JOIN_GROUP_RE)):
+        return "not_member"
+    if _is_visible(page.get_by_role("button", name=_JOIN_PENDING_RE)):
+        return "pending"
+    return None
 
 def _ensure_sorted_by_new_posts(page, group_label: str):
     """
@@ -600,6 +625,18 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         except Exception:
             pass
 
+        # A private group the account hasn't joined shows a Join button and no posts, and used to be
+        # found only after FIRST_SCAN_SCROLL_COUNT scrolls of an empty page (~1.5 min each, 5 groups
+        # on 2026-11-12). A public group shows its posts to non-members and is scanned as usual.
+        membership = _blocked_membership(page)
+        if membership:
+            storage.set_group_status(target_url, membership)
+            if membership == "pending":
+                _safe_print(f"    [{group_label}] join request still waiting for approval — skipped.")
+            else:
+                _safe_print(f"    WARNING: [{group_label}] not a member of this group — join it on Facebook so its posts can be read.")
+            return stats
+
         _ensure_sorted_by_new_posts(page, group_label)
 
         scan_started_at = datetime.now()
@@ -818,8 +855,10 @@ def run_scraper(headless: bool = False, live: bool = False):
             _apply_stealth(page)
             _ensure_logged_in(page, headless)
 
-            if PRUNE_DEAD_LINKS_ENABLED:
+            if PRUNE_DEAD_LINKS_ENABLED and _dead_link_check_due(datetime.now()):
                 _prune_dead_links(page, sheet, headless, live)
+                if live:
+                    storage.set_bot_state(_DEAD_LINKS_CHECKED_KEY, datetime.now().isoformat(timespec="seconds"))
 
             if sequential_mode:
                 progress = _ScanProgress(len(shuffled_urls), totals, run_message)
