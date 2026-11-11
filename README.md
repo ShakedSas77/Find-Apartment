@@ -307,7 +307,7 @@ A second listing source: Yad2's daily digest email for a saved search ("התרא
 2. In Gmail, make a filter that puts those emails under a label (e.g. `apartment-alerts`).
 3. In `.env`, set `ALERTS_IMAP_USER` (your full Gmail address), `ALERTS_IMAP_PASSWORD` (a Gmail [app password](https://myaccount.google.com/apppasswords), not your account password) and `ALERTS_IMAP_FOLDER` (the label).
 
-Every scan then reads the last `ALERTS_LOOKBACK_DAYS` of digests before opening the browser, and each listing goes through the same filters, distance check, sheet and Telegram alert as a Facebook post — with no AI call, since the email already states price, rooms and street. Access is read-only: mail is never marked, moved or deleted. If the email layout ever changes, the scan prints a warning and skips that email; `--mail-dump` saves recent emails as text under `alert_dumps/` to fix the parser against.
+Every scan then reads the last `ALERTS_LOOKBACK_DAYS` of digests before opening the browser, and each listing goes through the same filters, distance check and Telegram alert as a Facebook post, landing in its own **Yad2** tab of the sheet (same columns, created automatically) — with no AI call, since the email already states price, rooms and street. Access is read-only: mail is never marked, moved or deleted. If the email layout ever changes, the scan prints a warning and skips that email; `--mail-dump` saves recent emails as text under `alert_dumps/` to fix the parser against.
 
 ## Other Tools
 

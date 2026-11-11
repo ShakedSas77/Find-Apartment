@@ -30,8 +30,19 @@ def sent(monkeypatch):
 
 
 class FakeSheet:
-    def __init__(self, data):
+    def __init__(self, data, yad2_data=None):
         self.data = data
+        self.yad2_data = yad2_data or [SHEET_HEADERS]
+
+    @property
+    def spreadsheet(self):
+        return self
+
+    def worksheet(self, title):
+        return FakeSheet(self.yad2_data)
+
+    def row_values(self, row):
+        return self.data[row - 1]
 
     def get_all_values(self):
         return self.data
@@ -76,6 +87,15 @@ def test_owed_alert_is_resent_with_the_sheet_rows_values(sent):
     fb_scraper._resend_owed_alerts(FakeSheet([SHEET_HEADERS, _row(_URL, price="6100", score="72")]))
 
     assert [(url, fields["price_val"], score) for url, fields, score in sent] == [(_URL, 6100.0, 72)]
+
+
+def test_owed_yad2_alert_is_resent_from_the_yad2_tab(sent):
+    yad2_url = "https://www.yad2.co.il/realestate/item/r9hn1gua"
+    _add(yad2_url)
+
+    fb_scraper._resend_owed_alerts(FakeSheet([SHEET_HEADERS], yad2_data=[SHEET_HEADERS, _row(yad2_url)]))
+
+    assert [url for url, _, _ in sent] == [yad2_url]
 
 
 def test_owed_listing_missing_from_the_sheet_is_not_sent(sent):

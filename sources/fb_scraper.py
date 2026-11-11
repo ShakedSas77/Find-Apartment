@@ -27,7 +27,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
-    GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED,
+    GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -45,7 +45,7 @@ from sources.graphql_capture import GraphqlPostCapture, compare_with_dom
 from sources.mail_source import scan_alert_emails
 from core import run_log
 from integrations.sheets import (
-    setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
+    setup_google_sheet, dedupe_and_sort_sheet, open_listings_tab, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
 )
 
@@ -748,7 +748,10 @@ def _resend_owed_alerts(sheet) -> int:
     owed = storage.get_owed_alert_urls(ALERT_RETRY_MAX_AGE_HOURS)
     if not owed:
         return 0
-    rows_by_url = {row[0]: row for row in sheet.get_all_values()[1:] if row and row[0]}
+    tabs = [sheet]
+    if ALERTS_SCAN_ENABLED:
+        tabs.append(open_listings_tab(sheet.spreadsheet, YAD2_TAB_NAME))
+    rows_by_url = {row[0]: row for tab in tabs for row in tab.get_all_values()[1:] if row and row[0]}
     sent = 0
     for url in owed:
         row = rows_by_url.get(url)
@@ -795,7 +798,7 @@ def run_scraper(headless: bool = False, live: bool = False):
             print(f"WARNING: Telegram run-started alert failed: {e}")
         _resend_owed_alerts(sheet)
     if ALERTS_SCAN_ENABLED:
-        _scan_alert_emails(sheet, seen_urls, live, totals)
+        _scan_alert_emails(sheet, live, totals)
     sequential_mode = MAX_CONCURRENT_GROUPS == 1
 
     # --- Login phase: single persistent-context tab, sequential ---
@@ -841,12 +844,12 @@ def _new_totals(total_groups: int) -> dict:
     return {"groups_scanned": 0, "total": total_groups, "checkpoint_skipped": 0,
             "total_added": 0, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
 
-def _scan_alert_emails(sheet, seen_urls, live: bool, totals: dict):
+def _scan_alert_emails(sheet, live: bool, totals: dict):
     # Runs before the browser opens, and a mailbox problem (password revoked, Gmail down) is only a
     # warning: the Facebook scan must never depend on the email source.
     print("Reading Yad2 alert emails...")
     try:
-        stats = scan_alert_emails(sheet, seen_urls, live)
+        stats = scan_alert_emails(sheet.spreadsheet, live)
     except Exception as e:
         print(f"WARNING: Yad2 alert emails skipped: {e}")
         return
@@ -990,6 +993,10 @@ def _end_of_run_upkeep(sheet):
         duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
     print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s) (older than {MAX_POST_AGE_DAYS} days). "
           f"Sheet now has {kept} listings, sorted by post date (newest first).")
+    if ALERTS_SCAN_ENABLED:
+        with timed("sheets"):
+            duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(open_listings_tab(sheet.spreadsheet, YAD2_TAB_NAME))
+        print(f"'{YAD2_TAB_NAME}' tab: removed {duplicates_removed} duplicate(s) and {stale_removed} stale row(s); {kept} listings.")
 
     pruned = storage.prune_old_posts(MAX_POST_AGE_DAYS)
     if pruned:
