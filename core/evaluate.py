@@ -24,7 +24,7 @@ from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.llm import analyze_post_with_llm, last_model_used
 from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
-    _strip_foreign_letters, _reject_hallucinated_address, _parse_floor, _detect_agent,
+    _strip_foreign_letters, _reject_hallucinated_address, _is_price_in_text, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE, _CITY_DISPLAY_RES,
     _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
@@ -74,6 +74,9 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "", post_url: st
     """
     rooms = data.get("rooms")
     price = data.get("price")
+    if price is not None and not _is_price_in_text(price, text):
+        # A price the post never states is the model's invention, not a reading; treated as missing.
+        price = None
 
     try:
         rooms_val = float(rooms) if rooms is not None else 0.0

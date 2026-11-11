@@ -37,9 +37,9 @@ def test_replay_reuses_the_stored_parse_without_calling_the_llm(monkeypatch):
 def test_replay_with_llm_re_parses_the_post(monkeypatch):
     _store(_URL, storage.VERDICT_ADDED)
     calls = []
-    monkeypatch.setattr(apartment_bot, "analyze_post_with_llm", lambda text: calls.append(text) or dict(_PARSE, price=9000))
+    monkeypatch.setattr(apartment_bot, "analyze_post_with_llm", lambda text: calls.append(text) or dict(_PARSE, rooms=5))
 
-    assert apartment_bot.replay_all_posts(use_llm=True) == [(_URL, storage.VERDICT_ADDED, storage.VERDICT_REJECTED_PRICE)]
+    assert apartment_bot.replay_all_posts(use_llm=True) == [(_URL, storage.VERDICT_ADDED, storage.VERDICT_REJECTED_ROOMS)]
 
 
 def test_post_never_parsed_is_not_judged_without_the_llm(monkeypatch):

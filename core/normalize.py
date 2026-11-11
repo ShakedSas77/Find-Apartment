@@ -438,13 +438,50 @@ def resolve_entry_date(entry_date: str, today: date | None = None) -> date | Non
         candidate = candidate.replace(year=today.year + 1)
     return candidate
 
+# A small local model fills fields the post never states with the prompt's own example values
+# (seen 2026-11-11: aya-expanse:8b returned price 5500 and "רחוב טור הברושים 5" for a post with
+# neither — 4 of 224 stored prices, every one of them this model). A number or street the model
+# reports must appear in the post itself.
+_TEXT_NUMBER_RE = re.compile(r'\d{1,3}(?:[,.]\d{3})+(?!\d)|\d+(?:\.\d+)?')
+_THOUSANDS_GROUPED_RE = re.compile(r'\d{1,3}(?:[,.]\d{3})+')
+_THOUSANDS_WORD_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:k|K|אלף)")
+_QUOTE_MARKS_RE = re.compile(r"[\"'׳״`]")
+_HEBREW_WORD_RE = re.compile(r"[א-ת\"'׳״]{2,}")
+# Words an address shares with any post, so they can't show the street came from this one.
+_GENERIC_ADDRESS_WORDS = {
+    "רחוב", "רח", "שדרות", "שד", "שכונת", "שכ", "ליד", "פינת", "קרוב", "מול", "בין", "אזור", "באזור",
+    "דרך", "רמת", "גן", "גבעתיים", "תל", "אביב", "יפו", "ישראל",
+}
+# An English post's street comes back transliterated into Hebrew ("Chlenov 4" -> "צ'לנוב 4"),
+# which can't be found in the text — 5 of the 7 stored address mismatches. Those aren't checked.
+_MOSTLY_LATIN_MIN_LETTERS = 40
+
+def _numbers_in_text(text: str) -> set[float]:
+    numbers = set()
+    for match in _TEXT_NUMBER_RE.findall(text):
+        digits = re.sub(r'[,.]', '', match) if _THOUSANDS_GROUPED_RE.fullmatch(match) else match
+        numbers.add(float(digits))
+    for match in _THOUSANDS_WORD_RE.findall(text):
+        numbers.add(float(match.replace(',', '.')) * 1000)
+    return numbers
+
+def _is_price_in_text(price, text: str) -> bool:
+    try:
+        return float(price) in _numbers_in_text(text)
+    except (TypeError, ValueError):
+        return False
+
 def _reject_hallucinated_address(address: str, source_text: str) -> str:
-    """
-    qwen2.5 repeatedly invents "נמל התעופה" (airport) as an address for posts that
-    never mention an airport at all — even with an explicit anti-invention prompt
-    rule. Deterministic denylist: reject it unless the source text actually says so.
-    """
+    # The airport case predates the general check and stays for English posts, which it skips:
+    # qwen2.5 kept inventing "נמל התעופה" despite an explicit anti-invention prompt rule.
     if address and "נמל התעופה" in address and "נמל התעופה" not in source_text and "שדה תעופה" not in source_text:
+        return ""
+    if not address or len(re.findall(r'[A-Za-z]', source_text)) >= _MOSTLY_LATIN_MIN_LETTERS:
+        return address
+    words = [_QUOTE_MARKS_RE.sub('', w) for w in _HEBREW_WORD_RE.findall(address)]
+    words = [w for w in words if len(w) >= 2 and w not in _GENERIC_ADDRESS_WORDS]
+    text = _QUOTE_MARKS_RE.sub('', source_text)
+    if words and not any(w in text for w in words):
         return ""
     return address
 
