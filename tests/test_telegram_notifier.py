@@ -93,7 +93,7 @@ def test_score_tier_is_red_below_the_ok_threshold():
 
 
 def test_new_listing_keyboard_is_only_the_open_post_link():
-    keyboard = telegram_notifier.build_link_keyboard("123", "456")
+    keyboard = telegram_notifier.build_link_keyboard("https://www.facebook.com/groups/123/posts/456/")
 
     assert keyboard == {"inline_keyboard": [[{"text": "🔗 פתח פוסט", "url": "https://www.facebook.com/groups/123/posts/456/"}]]}
 
@@ -119,6 +119,17 @@ def test_send_listing_alert_uses_html_without_a_link_preview(monkeypatch):
     telegram_notifier.send_listing_alert("https://www.facebook.com/groups/123/posts/456/", _FULL_FIELDS, 70)
 
     assert (sent["parse_mode"], sent["disable_web_page_preview"]) == ("HTML", True)
+
+
+def test_a_yad2_listing_alert_links_to_the_yad2_page(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(telegram_notifier, "_configured", lambda: True)
+    monkeypatch.setattr(telegram_notifier, "_call", lambda method, payload: sent.update(payload) or {"message_id": 1})
+    monkeypatch.setattr(telegram_notifier.storage, "set_telegram_message", lambda *args: None)
+
+    telegram_notifier.send_listing_alert("https://www.yad2.co.il/realestate/item/r9hn1gua", _FULL_FIELDS, 70)
+
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["url"] == "https://www.yad2.co.il/realestate/item/r9hn1gua"
 
 
 def test_send_listing_alert_attaches_no_vote_buttons(monkeypatch):
@@ -163,13 +174,13 @@ def test_maps_link_respects_a_downgraded_stored_confidence():
 
 
 def test_link_keyboard_adds_the_maps_button_next_to_the_post_button():
-    keyboard = telegram_notifier.build_link_keyboard("123", "456", "https://www.google.com/maps/search/?api=1&query=x")
+    keyboard = telegram_notifier.build_link_keyboard("https://www.facebook.com/groups/123/posts/456/", "https://www.google.com/maps/search/?api=1&query=x")
 
     assert [button["text"] for button in keyboard["inline_keyboard"][0]] == ["🔗 פתח פוסט", "🗺 פתח במפות"]
 
 
 def test_link_keyboard_without_a_maps_url_has_only_the_post_button():
-    keyboard = telegram_notifier.build_link_keyboard("123", "456")
+    keyboard = telegram_notifier.build_link_keyboard("https://www.facebook.com/groups/123/posts/456/")
 
     assert [button["text"] for button in keyboard["inline_keyboard"][0]] == ["🔗 פתח פוסט"]
 

@@ -27,7 +27,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
-    GRAPHQL_CAPTURE_ENABLED,
+    GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -42,6 +42,7 @@ from core.evaluate import process_candidate_listing, _content_prefilter, flush_p
 from backup_db import backup_if_stale
 from integrations.groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
 from sources.graphql_capture import GraphqlPostCapture, compare_with_dom
+from sources.mail_source import scan_alert_emails
 from core import run_log
 from integrations.sheets import (
     setup_google_sheet, dedupe_and_sort_sheet, _rewrite_sheet_data_rows,
@@ -793,6 +794,8 @@ def run_scraper(headless: bool = False, live: bool = False):
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
         _resend_owed_alerts(sheet)
+    if ALERTS_SCAN_ENABLED:
+        _scan_alert_emails(sheet, seen_urls, live, totals)
     sequential_mode = MAX_CONCURRENT_GROUPS == 1
 
     # --- Login phase: single persistent-context tab, sequential ---
@@ -837,6 +840,20 @@ def _new_totals(total_groups: int) -> dict:
     # apartment_bot.py records via storage.finish_run and turns into the exit code.
     return {"groups_scanned": 0, "total": total_groups, "checkpoint_skipped": 0,
             "total_added": 0, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
+
+def _scan_alert_emails(sheet, seen_urls, live: bool, totals: dict):
+    # Runs before the browser opens, and a mailbox problem (password revoked, Gmail down) is only a
+    # warning: the Facebook scan must never depend on the email source.
+    print("Reading Yad2 alert emails...")
+    try:
+        stats = scan_alert_emails(sheet, seen_urls, live)
+    except Exception as e:
+        print(f"WARNING: Yad2 alert emails skipped: {e}")
+        return
+    totals["posts_seen"] += stats["posts_seen"]
+    totals["prefiltered"] += stats["prefiltered"]
+    totals["total_added"] += stats["added"]
+    print(f"Yad2 alert emails: {stats['posts_seen']} listing(s) read, {stats['added']} added.")
 
 def _launch_login_context(p, profile_dir: str, headless: bool):
     persistent_kwargs = {"locale": BROWSER_LOCALE}

@@ -220,24 +220,27 @@ def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "",
 def process_candidate_listing(post_url: str, text: str, post_date: str, group_url: str, label: str, live: bool,
                                seen_urls: set, pending_rows: list, pending_seen_urls: set,
                                pending_records: list, stats: dict, local_lock: threading.Lock,
-                               pending_telegram: list | None = None) -> None:
+                               pending_telegram: list | None = None, parsed: dict | None = None) -> None:
     """
     Runs one scraped listing (any source) through LLM parse -> _evaluate_post_data
     -> _build_row -> queue-for-sheet-write. Pulled out of _scan_group_page's
     process_post closure so another source can feed the same pipeline without a
     second hand-copied version of this logic — see CLAUDE.md on keeping
-    _evaluate_post_data/_build_row call sites in sync.
+    _evaluate_post_data/_build_row call sites in sync. A source that already
+    has the fields (Yad2's alert emails) passes them as `parsed` and skips the LLM.
     """
     _safe_print(f"[{label}] Analyzing post (URL: {post_url})...")
 
-    try:
-        with timed("llm"):
-            data = analyze_post_with_llm(text)
-    except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-        raise
-
-    with local_lock:
-        stats["llm_parsed"] += 1
+    if parsed is not None:
+        data = parsed
+    else:
+        try:
+            with timed("llm"):
+                data = analyze_post_with_llm(text)
+        except (GmapsQuotaHalted, HeadlessCheckpointAbort):
+            raise
+        with local_lock:
+            stats["llm_parsed"] += 1
     if not data:
         _safe_print(f"    [{label}] Skipped: LLM failed to parse or returned no data.")
         storage.record_post(post_url, group_url, text, storage.VERDICT_PARSE_FAILED,
