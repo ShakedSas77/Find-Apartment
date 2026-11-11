@@ -53,6 +53,23 @@ def test_no_price_anywhere_is_price_unknown_verdict():
     assert verdict == storage.VERDICT_PRICE_UNKNOWN
 
 
+# The post that showed the bug (2026-11-11): no rent at all, only fees. aya-expanse:8b answered with
+# the prompt's own example price, 5500, and the post was added as a match.
+_NO_RENT_TEXT = "דירת 3 חדרים במגדל השחר היוקרתי\nדמי ניהול 1600₪\nארנונה 1200₪ לחודשיים\nמתיווך"
+
+
+def test_a_price_the_post_never_states_is_not_a_match():
+    verdict, _ = evaluate._evaluate_post_data({"rooms": 3, "price": 5500}, _NO_RENT_TEXT)
+
+    assert verdict != storage.VERDICT_ADDED
+
+
+def test_a_price_written_with_a_thousands_separator_is_found_in_the_text():
+    verdict, _ = evaluate._evaluate_post_data({"rooms": 3, "price": 6300}, "להשכרה 3 חדרים ברמת גן, 6,300 ₪ לחודש.")
+
+    assert verdict == storage.VERDICT_ADDED
+
+
 def test_far_out_entry_date_is_rejected():
     # ~90 days out, past SCORE_ENTRY_DATE_MAX_DAYS_AHEAD (60) — a confidently
     # resolved date this far ahead should never reach the sheet.

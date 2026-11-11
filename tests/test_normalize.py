@@ -4,6 +4,8 @@ Unit tests for the pure text-normalization/dedupe helpers.
 from datetime import datetime
 
 from core.normalize import (
+    _is_price_in_text,
+    _reject_hallucinated_address,
     _extract_price_candidates,
     _detect_agent,
     _infer_post_date,
@@ -253,3 +255,25 @@ def test_a_realtor_booking_link_marks_an_agent():
 
 def test_private_parking_is_not_an_agent_signal():
     assert _detect_agent("דירת 3 חדרים עם חניה בלעדית", None) is None
+
+
+def test_price_in_k_notation_is_found_in_the_text():
+    assert _is_price_in_text(5500, "3 חדרים, 5.5K לחודש")
+
+
+def test_price_absent_from_the_text_is_not_found():
+    assert not _is_price_in_text(5500, "דמי ניהול 1600₪, ארנונה 1200₪")
+
+
+def test_a_street_the_post_never_names_is_dropped():
+    assert _reject_hallucinated_address("רחוב טור הברושים 5", "דירת 3 חדרים במגדל השחר, קומה 40") == ""
+
+
+def test_a_street_named_with_a_prefix_letter_is_kept():
+    assert _reject_hallucinated_address("רחוב ביאליק 14", "דירה ברחוב בביאליק 14, רמת גן") == "רחוב ביאליק 14"
+
+
+def test_an_english_posts_transliterated_street_is_kept():
+    text = "3 room apartment near Rothschild Boulevard, Chlenov 4, 5400 including all the bills"
+
+    assert _reject_hallucinated_address("צ'לנוב 4", text) == "צ'לנוב 4"
