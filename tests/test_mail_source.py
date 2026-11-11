@@ -6,6 +6,7 @@ from email.message import EmailMessage
 
 import pytest
 
+from core.evaluate import _content_prefilter
 from sources import mail_source
 
 
@@ -105,3 +106,57 @@ def test_dump_writes_one_text_file_per_email(fake_imap, tmp_path):
     mail_source.dump_alert_emails(days=2, out_dir=str(tmp_path))
 
     assert "3 חדרים בביאליק" in (tmp_path / "alert_001.txt").read_text(encoding="utf-8")
+
+
+# A trimmed, made-up Yad2 daily digest in the real layout (2026-11-08): the HTML is the only part,
+# each listing's link is wrapped in the click-tracking redirect, and the city is only in the title.
+def _yad2_listing(item_id: str, price: str, street: str, details: str) -> str:
+    tracked = f"https://x.awstrack.me/L0/https:%2F%2Fwww.yad2.co.il%2Frealestate%2Fitem%2F{item_id}%3FisFromMyAlerts=true/1/abc"
+    return (f'<div><a href="{tracked}"><img></a></div><div>ירד ב-</div><div>\u200f{price} \u200f₪</div>'
+            f"<div>{street}</div><div>{details}</div><div><a href=\"{tracked}\">לפרטים נוספים</a></div>")
+
+
+def _yad2_digest(*listings: str) -> EmailMessage:
+    body = ("<div>מצאנו 2 מודעות חדשות שמתאימות לחיפוש שלך:</div><div>דירות להשכרה בגבעתיים</div>"
+            "<div>מחיר מינימלי:</div><div>5500</div><div>|</div>"
+            + "".join(listings) + "<div><a href=\"https://x.awstrack.me/my-alerts\">לכל המודעות</a></div>")
+    return _email(html_body=body)
+
+
+_DIGEST = _yad2_digest(
+    _yad2_listing("go1c2c33", "6,500", 'כ"ג 11', "חברת חשמל | דירה | 3.5 חדרים | 90 מ״ר"),
+    _yad2_listing("r9hn1gua", "6,300", "כצנלסון 71", "בורוכוב | דירה | 3 חדרים | 65 מ״ר"),
+)
+
+
+def test_digest_listing_gets_its_own_item_link_out_of_the_tracking_redirect():
+    assert mail_source.parse_yad2_digest(_DIGEST)[1]["url"] == "https://www.yad2.co.il/realestate/item/r9hn1gua"
+
+
+def test_digest_listing_price_is_read():
+    assert mail_source.parse_yad2_digest(_DIGEST)[0]["price"] == 6500
+
+
+def test_digest_listing_rooms_are_read():
+    assert mail_source.parse_yad2_digest(_DIGEST)[0]["rooms"] == 3.5
+
+
+def test_digest_listing_street_is_the_line_above_the_details():
+    assert mail_source.parse_yad2_digest(_DIGEST)[0]["street"] == 'כ"ג 11'
+
+
+def test_digest_city_comes_from_the_search_title():
+    assert mail_source.parse_yad2_digest(_DIGEST)[1]["city"] == "גבעתיים"
+
+
+def test_digest_whose_links_dont_pair_up_with_its_listings_is_skipped():
+    listing = _yad2_listing("go1c2c33", "6,500", 'כ"ג 11', "חברת חשמל | דירה | 3.5 חדרים | 90 מ״ר")
+    unlinked = listing.replace("go1c2c33", "")
+
+    assert mail_source.parse_yad2_digest(_yad2_digest(listing, unlinked)) == []
+
+
+def test_digest_listing_text_passes_the_same_pre_filters_as_a_post():
+    listing = mail_source.parse_yad2_digest(_DIGEST)[1]
+
+    assert _content_prefilter(mail_source._listing_text(listing)) is None

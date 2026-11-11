@@ -72,15 +72,6 @@ def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
         return None
 
 
-def _group_post_ids(post_url: str) -> tuple[str, str] | None:
-    """Pulls (group_id, post_id) out of the canonical
-    https://www.facebook.com/groups/<gid>/posts/<pid>/ shape."""
-    parts = post_url.rstrip("/").split("/")
-    if len(parts) < 4 or parts[-2] != "posts":
-        return None
-    return parts[-3], parts[-1]
-
-
 def _escape(value) -> str:
     """Telegram HTML parse mode: address/warning/entry-date text comes from scraped Facebook text via
     an LLM, so it is untrusted — an unescaped `<` or `&` makes Telegram reject the whole message."""
@@ -190,12 +181,11 @@ def _link_row(post_url: str, maps_url: str | None = None, whatsapp_url: str | No
     return row
 
 
-def build_link_keyboard(group_id: str, post_id: str, maps_url: str | None = None,
-                        whatsapp_url: str | None = None) -> dict:
+def build_link_keyboard(post_url: str, maps_url: str | None = None, whatsapp_url: str | None = None) -> dict:
     """reply_markup for every new listing message: "open post", plus "open in Maps" when the street is
     known and "WhatsApp" when the post had a mobile number. The ⭐/🗑 vote buttons and the 0-10 rating
     rows were dropped from new messages."""
-    return {"inline_keyboard": [_link_row(_post_url(group_id, post_id), maps_url, whatsapp_url)]}
+    return {"inline_keyboard": [_link_row(post_url, maps_url, whatsapp_url)]}
 
 
 def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> dict:
@@ -216,18 +206,13 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
     Returns the sent message_id, or None on any failure/misconfiguration."""
     if not _configured():
         return None
-    ids = _group_post_ids(post_url)
-    if not ids:
-        print(f"WARNING: could not extract group/post id from {post_url} — skipping Telegram alert")
-        return None
-    group_id, post_id = ids
-
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": _format_listing_message(fields, score),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": build_link_keyboard(group_id, post_id, _maps_url(fields), _whatsapp_url(fields)),
+        # The button opens the listing's own URL, so a non-Facebook source (Yad2) links to its page too.
+        "reply_markup": build_link_keyboard(post_url, _maps_url(fields), _whatsapp_url(fields)),
     }
     result = _call("sendMessage", payload)
     if not result:

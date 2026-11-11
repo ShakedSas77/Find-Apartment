@@ -250,7 +250,11 @@ GRAPHQL_CAPTURE_ENABLED = True
 # Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP
 # by mail_source.py. Credentials live in .env (ALERTS_IMAP_USER/PASSWORD/FOLDER).
 ALERTS_IMAP_HOST = "imap.gmail.com"
-# How far back each run looks for alert emails.
+# Every live/dry scan reads Yad2's daily digest emails first (no browser, no LLM — the email
+# already states price/rooms/street). Off, or no ALERTS_IMAP_* in .env, skips it.
+ALERTS_SCAN_ENABLED = True
+# How far back each run looks for alert emails. Already-seen listings are skipped by URL, so a
+# window wider than the run interval only costs one IMAP fetch.
 ALERTS_LOOKBACK_DAYS = 2
 # Where `--mail-dump` writes each email's extracted text (gitignored — it holds listing contact details).
 ALERTS_DUMP_DIR = "alert_dumps"

@@ -299,9 +299,15 @@ The bot also sends a run-started / run-finished summary on every live run, inclu
 
 Messages sent before the vote buttons were removed still carry ⭐/🗑 buttons; `python bot_listener.py` (a separate long-running process) still handles taps on those: 2 down-votes delete the row, 2 up-votes send a 🔥 highlight, each up-vote bumps the fit score.
 
-## Alert Emails (in progress)
+## Yad2 Alert Emails
 
-A second listing source: the saved-search alert emails sites like Yad2 send. Point a Gmail filter at a label, set `ALERTS_IMAP_*` in `.env` (a Gmail **app password**), and run `--mail-dump` to save recent alerts as text under `alert_dumps/`. Access is read-only — mail is never marked, moved or deleted. Not yet wired into the scan.
+A second listing source: Yad2's daily digest email for a saved search ("התראות יד2 - ריכוז מודעות יומי").
+
+1. On Yad2, save your search with email alerts on.
+2. In Gmail, make a filter that puts those emails under a label (e.g. `apartment-alerts`).
+3. In `.env`, set `ALERTS_IMAP_USER` (your full Gmail address), `ALERTS_IMAP_PASSWORD` (a Gmail [app password](https://myaccount.google.com/apppasswords), not your account password) and `ALERTS_IMAP_FOLDER` (the label).
+
+Every scan then reads the last `ALERTS_LOOKBACK_DAYS` of digests before opening the browser, and each listing goes through the same filters, distance check, sheet and Telegram alert as a Facebook post — with no AI call, since the email already states price, rooms and street. Access is read-only: mail is never marked, moved or deleted. If the email layout ever changes, the scan prints a warning and skips that email; `--mail-dump` saves recent emails as text under `alert_dumps/` to fix the parser against.
 
 ## Other Tools
 
