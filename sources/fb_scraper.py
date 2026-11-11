@@ -174,6 +174,13 @@ _POST_BODY_SELECTORS = (
     'div[data-ad-comet-preview="message"]',
 )
 _MIN_POST_BODY_CHARS = 20
+# A post that shares a Marketplace listing shows the price only on the attached card, outside the
+# body container (seen 2026-11-11: rent ₪9,250 on the card, none in the text, and the LLM filled
+# in an example price instead). The card is the link to the listing; its text is price · city · title.
+_LISTING_CARD_SELECTORS = (
+    'a[href*="/commerce/listing/"]',
+    'a[href*="/marketplace/item/"]',
+)
 
 def _read_post_text(article) -> str:
     for selector in _POST_BODY_SELECTORS:
@@ -183,8 +190,19 @@ def _read_post_text(article) -> str:
             continue
         body = "\n".join(part for part in parts if part)
         if len(body) > _MIN_POST_BODY_CHARS:
-            return body
+            return "\n".join([body] + _read_listing_cards(article))
     return article.inner_text().strip()
+
+def _read_listing_cards(article) -> list[str]:
+    cards = []
+    for selector in _LISTING_CARD_SELECTORS:
+        try:
+            texts = [el.inner_text().strip() for el in article.locator(selector).all()]
+        except Exception:
+            continue
+        # Each photo in the card is its own link with no text; only the caption link carries any.
+        cards.extend(t for t in texts if t and t not in cards)
+    return cards
 
 def _wait_for_text_growth(article, before_len: int) -> str:
     # Polls instead of always sleeping a fixed time after a "See more" click; local DOM re-reads
