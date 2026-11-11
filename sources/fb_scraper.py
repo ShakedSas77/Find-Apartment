@@ -27,7 +27,7 @@ from config import (
     CONSECUTIVE_OLD_POSTS_TO_STOP, LOGIN_MAX_ATTEMPTS,
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
-    GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME,
+    GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME, PROGRESS_TICK_S,
     SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
@@ -57,6 +57,7 @@ _headless_checkpoint_hit = False  # set once any group hits a checkpoint in --he
 
 _DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
 _DEAD_LINK_PROGRESS_EVERY = 10
+_PROGRESS_BAR_WIDTH = 24
 
 def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
     """
@@ -796,9 +797,12 @@ def run_scraper(headless: bool = False, live: bool = False):
     print(f"Groups to scan: {len(group_urls)} active in the '{GROUPS_TAB_NAME}' tab.")
     shuffled_urls = random.sample(group_urls, len(group_urls))
     totals = _new_totals(len(shuffled_urls))
+    run_message = None  # (message_id, info) of the run-started message, which the progress bar edits
     if live and TELEGRAM_ENABLED:
         try:
-            telegram_notifier.send_run_started(_run_started_info(group_urls, run_started_at))
+            info = _run_started_info(group_urls, run_started_at)
+            message_id = telegram_notifier.send_run_started(info)
+            run_message = (message_id, info) if message_id else None
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
         _resend_owed_alerts(sheet)
@@ -818,7 +822,12 @@ def run_scraper(headless: bool = False, live: bool = False):
                 _prune_dead_links(page, sheet, headless, live)
 
             if sequential_mode:
-                _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals)
+                progress = _ScanProgress(len(shuffled_urls), totals, run_message)
+                try:
+                    _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals,
+                                              progress=progress)
+                finally:
+                    progress.stop()
             else:
                 real_user_agent, real_locale = _export_session_for_workers(page, context, storage_state_path)
         finally:
@@ -827,8 +836,12 @@ def run_scraper(headless: bool = False, live: bool = False):
             _close_context(context)
 
     if not sequential_mode:
-        _scan_groups_in_parallel(shuffled_urls, sheet, seen_urls, storage_state_path, headless,
-                                 real_user_agent, real_locale, live, totals)
+        progress = _ScanProgress(len(shuffled_urls), totals, run_message)
+        try:
+            _scan_groups_in_parallel(shuffled_urls, sheet, seen_urls, storage_state_path, headless,
+                                     real_user_agent, real_locale, live, totals, progress=progress)
+        finally:
+            progress.stop()
 
     gmaps_calls_this_month = storage.get_gmaps_usage()
     _print_run_summary(totals, gmaps_calls_this_month)
@@ -912,7 +925,7 @@ def _ensure_logged_in(page, headless: bool):
     raise LoginRequired("Login not completed after several attempts.")
 
 def _scan_groups_sequentially(page, urls: list[str], sheet, seen_urls, headless: bool, live: bool, totals: dict,
-                              scan_group=None):
+                              scan_group=None, progress: "_ScanProgress | None" = None):
     # No storage_state at all: every group is scanned on the same page inside the original
     # context, to preserve the profile's real fingerprint. scan_group defaults to
     # _scan_group_page (the browser-driving step); tests pass a stand-in.
@@ -928,8 +941,12 @@ def _scan_groups_sequentially(page, urls: list[str], sheet, seen_urls, headless:
             stats = scan_group(page, url, label, sheet, seen_urls, headless, live)
         except Exception as e:
             _safe_print(f"\nERROR: [{label}] crashed: {e}")
+            if progress:
+                progress.group_done()
             continue
         _tally(totals, stats)
+        if progress:
+            progress.group_done()
         if stats["checkpoint_hit"]:
             # _tally already counted the group that hit the checkpoint; a headless checkpoint ends
             # the whole sequential scan, so the groups never reached are skipped too.
@@ -954,7 +971,8 @@ def _export_session_for_workers(page, context, storage_state_path: str) -> tuple
     return real_user_agent, real_locale
 
 def _scan_groups_in_parallel(urls: list[str], sheet, seen_urls, storage_state_path: str, headless: bool,
-                             real_user_agent: str, real_locale: str, live: bool, totals: dict):
+                             real_user_agent: str, real_locale: str, live: bool, totals: dict,
+                             progress: "_ScanProgress | None" = None):
     print(f"Continuing to scan groups ({MAX_CONCURRENT_GROUPS} in parallel — this raises checkpoint/ban risk "
           f"vs. sequential mode; set MAX_CONCURRENT_GROUPS=1 in config.py if you start seeing checkpoints)...")
     labels = {url: _make_group_label(idx, len(urls), url) for idx, url in enumerate(urls, 1)}
@@ -969,6 +987,87 @@ def _scan_groups_in_parallel(urls: list[str], sheet, seen_urls, storage_state_pa
                 _tally(totals, future.result())
             except Exception as e:
                 _safe_print(f"\nERROR: [{futures[future]}] crashed: {e}")
+            if progress:
+                progress.group_done()
+
+class _ScanProgress:
+    # Group-scan progress: a console bar line and, on a live run with Telegram, a bar edited into
+    # the run-started message. Reported when a group finishes and every PROGRESS_TICK_S in between
+    # (a background ticker), so the time-left estimate keeps counting down while long groups are
+    # still scrolling. A report identical to the previous one is skipped — Telegram rejects an
+    # edit that changes nothing, and the console shouldn't repeat itself.
+
+    def __init__(self, total: int, totals: dict, run_message: tuple[str, dict] | None = None):
+        self.total = total
+        self.totals = totals
+        self.run_message = run_message
+        self.started = time.perf_counter()
+        self.done = 0
+        self.done_elapsed_s = 0.0
+        self._lock = threading.Lock()
+        self._last_console = None
+        self._last_telegram = None
+        self._stopped = threading.Event()
+        threading.Thread(target=self._tick, daemon=True).start()
+
+    def group_done(self):
+        with self._lock:
+            self.done += 1
+            self.done_elapsed_s = time.perf_counter() - self.started
+        self._report()
+
+    def stop(self):
+        self._stopped.set()
+
+    def _tick(self):
+        while not self._stopped.wait(PROGRESS_TICK_S):
+            self._report()
+
+    def _report(self):
+        with self._lock:
+            elapsed_s = time.perf_counter() - self.started
+            left_s = _estimate_seconds_left(self.done, self.total, self.done_elapsed_s, elapsed_s)
+            added = self.totals["total_added"]
+            line = _progress_line(self.done, self.total, added, elapsed_s, left_s)
+            if line != self._last_console:
+                self._last_console = line
+                _safe_print(line)
+            if not self.run_message:
+                return
+            progress_text = telegram_notifier.format_run_progress(self.done, self.total, added, left_s)
+            if progress_text == self._last_telegram:
+                return
+            self._last_telegram = progress_text
+        message_id, info = self.run_message
+        try:
+            telegram_notifier.update_run_progress(message_id, info, progress_text)
+        except Exception as e:
+            _safe_print(f"WARNING: Telegram progress update failed: {e}")
+
+def _estimate_seconds_left(done: int, total: int, done_elapsed_s: float, elapsed_s: float) -> float | None:
+    # Projects the whole scan from the average time per finished group, then counts down against
+    # the clock: between finished groups the estimate keeps shrinking, and each finished group
+    # corrects it. None until a first group has finished.
+    if not done:
+        return None
+    return max(0.0, done_elapsed_s / done * total - elapsed_s)
+
+def _progress_line(done: int, total: int, added: int, elapsed_s: float, left_s: float | None) -> str:
+    # A line per report, not a bar redrawn in place: six groups print at once in parallel mode and
+    # the console is teed to the log file, so a \r-redrawn bar would garble both.
+    filled = round(_PROGRESS_BAR_WIDTH * done / total) if total else _PROGRESS_BAR_WIDTH
+    line = (f"[{'#' * filled}{'-' * (_PROGRESS_BAR_WIDTH - filled)}] {done}/{total} groups | "
+            f"{added} added | {_minutes(elapsed_s)} elapsed")
+    if done >= total:
+        return line
+    if left_s is None:
+        return line + " | estimating time left..."
+    if left_s < 60:
+        return line + " | almost done"
+    return line + f" | ~{_minutes(left_s)} left"
+
+def _minutes(seconds: float) -> str:
+    return f"{round(seconds / 60)} min" if seconds >= 90 else f"{round(seconds)}s"
 
 def _tally(totals: dict, stats: dict):
     totals["groups_scanned"] += 1

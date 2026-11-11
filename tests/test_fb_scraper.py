@@ -10,8 +10,8 @@ from config import GROUP_YIELD_MIN_HISTORY, GROUP_YIELD_MIN_SCROLLS, GROUP_YIELD
 from core.errors import LoginRequired
 from sources import fb_scraper
 from sources.fb_scraper import (
-    _ensure_logged_in, _new_totals, _read_post_text, _scan_groups_sequentially, _tally, _update_old_streak,
-    _yield_scaled_scroll_cap,
+    _ScanProgress, _ensure_logged_in, _estimate_seconds_left, _new_totals, _progress_line, _read_post_text,
+    _scan_groups_sequentially, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
 
 _CUTOFF = datetime(2026, 10, 1, 12, 0)
@@ -212,3 +212,34 @@ def test_headless_run_with_a_lost_session_raises_login_required():
 
 def test_headless_run_with_a_live_session_continues():
     assert _ensure_logged_in(_FakeLoginPage(is_logged_in=True), headless=True) is None
+
+
+def test_no_time_estimate_before_the_first_group_finishes():
+    assert _estimate_seconds_left(done=0, total=54, done_elapsed_s=0, elapsed_s=200) is None
+
+
+def test_time_left_keeps_counting_down_while_no_group_finishes():
+    # 2 of 10 groups done after 120s projects a 600s scan; a minute later there's a minute less left.
+    earlier = _estimate_seconds_left(done=2, total=10, done_elapsed_s=120, elapsed_s=180)
+    later = _estimate_seconds_left(done=2, total=10, done_elapsed_s=120, elapsed_s=240)
+
+    assert earlier - later == 60
+
+
+def test_progress_line_shows_the_bar_counts_and_time_left():
+    line = _progress_line(done=12, total=24, added=3, elapsed_s=300, left_s=300)
+
+    assert line == "[############------------] 12/24 groups | 3 added | 5 min elapsed | ~5 min left"
+
+
+def test_a_crashed_group_still_moves_the_progress_bar(monkeypatch):
+    def crash(*args):
+        raise RuntimeError("page crashed")
+    monkeypatch.setattr(fb_scraper.time, "sleep", lambda s: None)
+    totals = _new_totals(1)
+    progress = _ScanProgress(1, totals)
+
+    _scan_groups_sequentially(None, ["g1"], None, set(), True, False, totals, scan_group=crash, progress=progress)
+    progress.stop()
+
+    assert progress.done == 1

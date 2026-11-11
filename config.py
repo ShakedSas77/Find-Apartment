@@ -269,6 +269,9 @@ ALERTS_DUMP_DIR = "alert_dumps"
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
 MAX_CONCURRENT_GROUPS = 6
+# How often the group-scan progress bars (console line, and the Telegram run-started message on a
+# live run) refresh between finished groups, so the time-left estimate keeps counting down.
+PROGRESS_TICK_S = 30
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [
