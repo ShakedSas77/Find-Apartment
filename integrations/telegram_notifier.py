@@ -278,11 +278,37 @@ def send_failure_alert(summary: str):
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚠️ apartment-bot doctor check failed:\n\n{summary}"})
 
 
-def send_run_started(info: dict):
-    """Sent once at the start of a live run_scraper() call — never on a dry run. info: see _format_run_started."""
+def send_run_started(info: dict) -> str | None:
+    """
+    Sent once at the start of a live run_scraper() call — never on a dry run. info: see
+    _format_run_started. Returns the message_id, which update_run_progress() edits as groups finish.
+    """
+    if not _configured():
+        return None
+    result = _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_started(info), "parse_mode": "HTML"})
+    return str(result["message_id"]) if result else None
+
+
+def update_run_progress(message_id: str, info: dict, progress_text: str):
+    """Rewrites the run-started message with progress_text (format_run_progress()) under it."""
     if not _configured():
         return
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_started(info), "parse_mode": "HTML"})
+    text = _format_run_started(info) + "\n\n" + progress_text
+    _call("editMessageText", {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id, "text": text, "parse_mode": "HTML"})
+
+
+def format_run_progress(done: int, total: int, added: int, left_s: float | None) -> str:
+    """The progress line under the run-started message. left_s: estimated seconds left, None = not known yet."""
+    filled = round(_RUN_PROGRESS_BAR_WIDTH * done / total) if total else _RUN_PROGRESS_BAR_WIDTH
+    bar = "▓" * filled + "░" * (_RUN_PROGRESS_BAR_WIDTH - filled)
+    line = f"{bar} {done}/{total} קבוצות · {added} נוספו"
+    if done >= total:
+        return f"✔️ {line} · הסיכום בהודעה הבאה"
+    if left_s is None:
+        return f"⏳ {line} · מעריך זמן..."
+    if left_s < 60:
+        return f"⏳ {line} · כמעט סיום"
+    return f"⏳ {line} · עוד ~{_ago(timedelta(seconds=left_s))}"
 
 
 def send_run_finished(stats: dict):
@@ -306,6 +332,7 @@ _REJECTION_LABELS = {
 }
 # A run-finished message lists at most this many new listings; Telegram caps a message at 4096 characters.
 _RUN_FINISHED_MAX_LISTINGS = 10
+_RUN_PROGRESS_BAR_WIDTH = 12
 
 
 def _format_run_started(info: dict) -> str:

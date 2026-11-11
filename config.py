@@ -240,6 +240,9 @@ WEBGL_RENDERER = None
 # whose post Facebook now shows as unavailable (deleted, or visibility changed).
 # Kill switch in case this ever needs to be turned off without a code change.
 PRUNE_DEAD_LINKS_ENABLED = True
+# The check visits every listing in the sheet (~8.5s each, ~8 minutes for 60) and usually finds
+# 0-3 dead posts, so it runs at most this often instead of on every scan.
+DEAD_LINK_CHECK_INTERVAL_HOURS = 24
 
 # Passively read the feed's own /api/graphql/ responses (graphql_capture.py) and print, per group,
 # how well their post ids/text/exact dates line up with the DOM scan. Observational only — no extra
@@ -269,6 +272,9 @@ ALERTS_DUMP_DIR = "alert_dumps"
 # value is 1: true sequential mode, scanning group by group on the same page inside
 # the real profile (chrome_profile/), never exporting storage_state at all.
 MAX_CONCURRENT_GROUPS = 6
+# How often the group-scan progress bars (console line, and the Telegram run-started message on a
+# live run) refresh between finished groups, so the time-left estimate keeps counting down.
+PROGRESS_TICK_S = 30
 
 # ─── Google Sheets ─────────────────────────────────────────────────────────────
 SHEET_HEADERS = [

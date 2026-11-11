@@ -276,3 +276,11 @@ def test_run_finished_lists_rejections_most_common_first():
 
 def test_run_finished_with_no_new_listings_says_so():
     assert "אין דירות חדשות" in _finished()
+
+
+def test_run_progress_bar_shows_the_time_left():
+    assert telegram_notifier.format_run_progress(27, 54, 4, 900) == "⏳ ▓▓▓▓▓▓░░░░░░ 27/54 קבוצות · 4 נוספו · עוד ~15 דק'"
+
+
+def test_run_progress_bar_at_the_end_points_to_the_summary():
+    assert "הסיכום בהודעה הבאה" in telegram_notifier.format_run_progress(54, 54, 6, 0)
