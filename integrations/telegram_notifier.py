@@ -13,6 +13,7 @@ import html
 import os
 import re
 import time
+from datetime import datetime, timedelta
 from urllib.parse import urlencode
 
 import requests
@@ -268,6 +269,125 @@ def send_backfill_announcement(count: int):
         f"דרגו כל אחת (0-10) — עוזר לנו לכייל את מערכת הניקוד לפי מה שבאמת חשוב לכם."
     )
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
+
+
+def send_failure_alert(summary: str):
+    """Used by doctor.py --alert to DM a health-check failure summary."""
+    if not _configured():
+        return
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚠️ apartment-bot doctor check failed:\n\n{summary}"})
+
+
+def send_run_started(info: dict):
+    """Sent once at the start of a live run_scraper() call — never on a dry run. info: see _format_run_started."""
+    if not _configured():
+        return
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_started(info), "parse_mode": "HTML"})
+
+
+def send_run_finished(stats: dict):
+    """Sent once at the end of a live run_scraper() call. stats: see _format_run_finished."""
+    if not _configured():
+        return
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_finished(stats),
+                          "parse_mode": "HTML", "disable_web_page_preview": True})
+
+
+# How a rejected post is named in the run-finished breakdown.
+_REJECTION_LABELS = {
+    storage.VERDICT_REJECTED_PRICE: "מחיר",
+    storage.VERDICT_REJECTED_ROOMS: "חדרים",
+    storage.VERDICT_REJECTED_DISTANCE: "מרחק",
+    storage.VERDICT_REJECTED_LOCATION: "מיקום",
+    storage.VERDICT_REJECTED_ENTRY_DATE: "תאריך כניסה",
+    storage.VERDICT_PRICE_UNKNOWN: "בלי מחיר",
+    storage.VERDICT_DUPLICATE_LISTING: "פרסום חוזר",
+    storage.VERDICT_PARSE_FAILED: "לא פוענח",
+}
+# A run-finished message lists at most this many new listings; Telegram caps a message at 4096 characters.
+_RUN_FINISHED_MAX_LISTINGS = 10
+
+
+def _format_run_started(info: dict) -> str:
+    """
+    info: groups (count), new_groups (never scanned before), alerts (Yad2 emails read too),
+    previous (storage.get_last_successful_live_run() row, or None), now (datetime).
+    """
+    groups_line = f"🔎 {info['groups']} קבוצות פייסבוק"
+    if info.get("new_groups"):
+        groups_line += f" · {info['new_groups']} חדשות (סריקה ראשונה, ארוכה יותר)"
+    lines = [f"▶️ <b>סריקה התחילה</b> · {info['now']:%H:%M}", groups_line]
+    if info.get("alerts"):
+        lines.append("📧 + התראות יד2 מהמייל")
+    lines.append(f"🎯 {config.MIN_ROOMS:g}–{config.MAX_ROOMS:g} חדרים · ₪{config.MIN_PRICE:,}–{config.MAX_PRICE:,}"
+                 f" · עד {config.MAX_WALKING_DISTANCE_KM:g} ק\"מ")
+    previous = info.get("previous")
+    if previous and previous.get("started_at"):
+        ago = _ago(info["now"] - datetime.fromisoformat(previous["started_at"]))
+        lines.append(f"⏮ סריקה קודמת: לפני {ago} · {previous.get('added') or 0} דירות נוספו")
+    return "\n".join(lines)
+
+
+def _format_run_finished(stats: dict) -> str:
+    """
+    stats: the console summary numbers (groups_scanned, total, posts_seen, prefiltered, llm_parsed,
+    added, gmaps_calls, checkpoint_skipped, errors, warnings) plus duration_s, activity
+    (storage.get_run_activity()) and not_member_groups (count).
+    """
+    activity = stats.get("activity") or {"verdicts": {}, "models": {}, "added": []}
+    added = activity["added"]
+    lines = [f"✅ <b>סריקה הסתיימה</b> · {_ago(timedelta(seconds=stats.get('duration_s', 0)))}"]
+
+    if added:
+        yad2 = sum(1 for listing in added if "yad2.co.il" in listing["url"])
+        sources = f" ({len(added) - yad2} פייסבוק, {yad2} יד2)" if yad2 else ""
+        lines.append(f"🏠 <b>{len(added)} דירות חדשות</b>{sources}")
+        lines += [_run_listing_line(listing) for listing in added[:_RUN_FINISHED_MAX_LISTINGS]]
+        if len(added) > _RUN_FINISHED_MAX_LISTINGS:
+            lines.append(f"  ועוד {len(added) - _RUN_FINISHED_MAX_LISTINGS} — בגיליון")
+    else:
+        lines.append("🏠 אין דירות חדשות הפעם")
+
+    lines.append(f"🔎 {stats['groups_scanned']}/{stats['total']} קבוצות · {stats['posts_seen']:,} פוסטים · "
+                 f"{stats['prefiltered']:,} סוננו מראש · {stats['llm_parsed']} נשלחו ל-AI")
+    rejections = sorted(((activity["verdicts"].get(verdict, 0), label) for verdict, label in _REJECTION_LABELS.items()),
+                        reverse=True)
+    if any(n for n, _ in rejections):
+        lines.append("🚫 נדחו: " + " · ".join(f"{label} {n}" for n, label in rejections if n))
+    if activity["models"]:
+        lines.append("🤖 " + " · ".join(f"{_escape(model)} {n}" for model, n in activity["models"].items()))
+    if stats.get("gmaps_calls"):
+        lines.append(f"🗺 {stats['gmaps_calls']} קריאות Google Maps החודש")
+    if stats.get("not_member_groups"):
+        lines.append(f"👥 {stats['not_member_groups']} קבוצות שלא הצטרפת אליהן — ראה/י את לשונית Groups")
+    if stats.get("checkpoint_skipped"):
+        lines.append(f"⚠️ {stats['checkpoint_skipped']} קבוצות דולגו עקב checkpoint — יש להריץ עם --headful")
+    if stats.get("errors") or stats.get("warnings"):
+        lines.append(f"⚠️ {stats.get('errors', 0)} שגיאות, {stats.get('warnings', 0)} אזהרות — ראו את קובץ הלוג")
+    return "\n".join(lines)
+
+
+def _run_listing_line(listing: dict) -> str:
+    parts = []
+    if listing.get("rooms_val"):
+        parts.append(f"{listing['rooms_val']:g} חד'")
+    if listing.get("price_val"):
+        parts.append(f"₪{int(listing['price_val']):,}")
+    distance = listing.get("distance_text") or ""
+    if distance.replace(".", "", 1).isdigit():
+        parts.append(f"{distance} ק\"מ")
+    address = _escape(listing.get("address") or "פתח מודעה")
+    url = html.escape(listing["url"], quote=True)
+    return "• " + " · ".join(parts + [f'<a href="{url}">{address}</a>'])
+
+
+def _ago(delta: timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    if minutes < 60:
+        return f"{minutes} דק'"
+    if minutes < 48 * 60:
+        return f"{minutes // 60}:{minutes % 60:02d} שע'"
+    return f"{minutes // (24 * 60)} ימים"
 
 
 def send_failure_alert(summary: str):

@@ -780,6 +780,7 @@ def run_scraper(headless: bool = False, live: bool = False):
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
     run_started = time.perf_counter()
+    run_started_at = datetime.now()
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
@@ -793,7 +794,7 @@ def run_scraper(headless: bool = False, live: bool = False):
     totals = _new_totals(len(shuffled_urls))
     if live and TELEGRAM_ENABLED:
         try:
-            telegram_notifier.send_run_started(totals["total"])
+            telegram_notifier.send_run_started(_run_started_info(group_urls, run_started_at))
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
         _resend_owed_alerts(sheet)
@@ -832,7 +833,8 @@ def run_scraper(headless: bool = False, live: bool = False):
     else:
         print("DRY RUN: skipping sheet dedupe/sort and DB pruning (rerun without --dry-run to commit).")
     if live and TELEGRAM_ENABLED:
-        _notify_run_finished(totals, gmaps_calls_this_month)
+        _notify_run_finished(totals, gmaps_calls_this_month, group_urls, run_started_at,
+                             time.perf_counter() - run_started)
 
     phases = ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(get_phase_seconds().items()))
     print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
@@ -1010,9 +1012,24 @@ def _end_of_run_upkeep(sheet):
     except Exception as e:
         print(f"WARNING: DB backup failed: {e}")
 
-def _notify_run_finished(totals: dict, gmaps_calls_this_month: int):
+def _run_started_info(group_urls: list[str], now: datetime) -> dict:
+    overview = storage.get_group_overview()
+    return {
+        "groups": len(group_urls),
+        "new_groups": sum(1 for url in group_urls if not overview.get(url, {}).get("posts")),
+        "alerts": ALERTS_SCAN_ENABLED,
+        "previous": storage.get_last_successful_live_run(),
+        "now": now,
+    }
+
+def _notify_run_finished(totals: dict, gmaps_calls_this_month: int, group_urls: list[str],
+                         run_started_at: datetime, duration_s: float):
     try:
+        overview = storage.get_group_overview()
         telegram_notifier.send_run_finished({
+            "duration_s": duration_s,
+            "activity": storage.get_run_activity(run_started_at.isoformat()),
+            "not_member_groups": sum(1 for url in group_urls if overview.get(url, {}).get("status") == "not_member"),
             "groups_scanned": totals["groups_scanned"],
             "total": totals["total"],
             "posts_seen": totals["posts_seen"],

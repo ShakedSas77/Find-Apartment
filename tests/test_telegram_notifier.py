@@ -2,6 +2,7 @@
 Regression test for the bot-token leak: requests/urllib3 exceptions embed the full
 request URL, and Telegram carries the token in the URL path.
 """
+from datetime import datetime, timedelta
 from urllib.parse import unquote_plus
 
 import requests
@@ -223,3 +224,55 @@ def test_send_listing_alert_includes_the_whatsapp_button_when_the_post_had_a_mob
                                          dict(_FULL_FIELDS, contact_phone="0541234567"), 70)
 
     assert "💬 וואטסאפ" in [button["text"] for button in sent["reply_markup"]["inline_keyboard"][0]]
+
+
+_NOW = datetime(2026, 11, 11, 22, 40)
+
+
+def _finished(added=(), verdicts=None, **extra):
+    stats = {"groups_scanned": 54, "total": 54, "posts_seen": 1181, "prefiltered": 1022, "llm_parsed": 33,
+             "added": len(added), "gmaps_calls": 0, "checkpoint_skipped": 0, "errors": 0, "warnings": 0,
+             "duration_s": 2100, "activity": {"verdicts": verdicts or {}, "models": {}, "added": list(added)}}
+    return telegram_notifier._format_run_finished(dict(stats, **extra))
+
+
+_YAD2_LISTING = {"url": "https://www.yad2.co.il/realestate/item/r9hn1gua", "price_val": 6300.0, "rooms_val": 3.0,
+                 "address": "כצנלסון 71, גבעתיים", "distance_text": "1.9"}
+
+
+def test_run_started_names_the_groups_scanned_for_the_first_time():
+    text = telegram_notifier._format_run_started({"groups": 54, "new_groups": 20, "alerts": True, "now": _NOW, "previous": None})
+
+    assert "20 חדשות" in text
+
+
+def test_run_started_says_how_long_ago_the_previous_scan_was():
+    previous = {"started_at": (_NOW - timedelta(hours=1, minutes=35)).isoformat(), "added": 3}
+
+    text = telegram_notifier._format_run_started({"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW, "previous": previous})
+
+    assert "לפני 1:35 שע' · 3 דירות נוספו" in text
+
+
+def test_run_finished_lists_each_new_listing_with_a_link():
+    assert '₪6,300 · 1.9 ק"מ · <a href="https://www.yad2.co.il/realestate/item/r9hn1gua">' in _finished([_YAD2_LISTING])
+
+
+def test_run_finished_counts_new_listings_by_source():
+    facebook = dict(_YAD2_LISTING, url="https://www.facebook.com/groups/1/posts/2/")
+
+    assert "2 דירות חדשות</b> (1 פייסבוק, 1 יד2)" in _finished([facebook, _YAD2_LISTING])
+
+
+def test_run_finished_escapes_a_scraped_address():
+    assert "&lt;b&gt;" in _finished([dict(_YAD2_LISTING, address="<b>הרצל 5")])
+
+
+def test_run_finished_lists_rejections_most_common_first():
+    text = _finished(verdicts={"rejected_rooms": 2, "rejected_price": 126})
+
+    assert "נדחו: מחיר 126 · חדרים 2" in text
+
+
+def test_run_finished_with_no_new_listings_says_so():
+    assert "אין דירות חדשות" in _finished()
