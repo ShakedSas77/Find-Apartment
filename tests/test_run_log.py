@@ -118,3 +118,11 @@ def test_doctor_passes_after_a_recent_live_run(db):
     storage.finish_run(storage.start_run("live"), "ok", {}, warnings=0, errors=0)
 
     assert doctor._check_last_run()[1] == doctor.PASS
+
+
+def test_run_activity_lists_the_listings_added_since_the_run_started(db):
+    started = datetime.now().isoformat()
+    storage.record_post("https://www.yad2.co.il/realestate/item/r9hn1gua", "yad2", "text", storage.VERDICT_ADDED,
+                        analysis={"address": "כצנלסון 71, גבעתיים", "price_val": 6300.0, "rooms_val": 3.0})
+
+    assert [row["url"] for row in storage.get_run_activity(started)["added"]] == ["https://www.yad2.co.il/realestate/item/r9hn1gua"]

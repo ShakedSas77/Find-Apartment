@@ -755,6 +755,30 @@ def get_last_successful_live_run() -> dict | None:
     return dict(row) if row else None
 
 
+def get_run_activity(since: str) -> dict:
+    """
+    What a run did, read back from the posts it touched since `since` (ISO time): how many got each
+    verdict, which models parsed them, and the listings it added — for the run-finished message.
+    """
+    with _lock, _connect() as conn:
+        verdicts = conn.execute(
+            "SELECT verdict, COUNT(*) AS n FROM posts WHERE last_processed >= ? GROUP BY verdict", (since,)
+        ).fetchall()
+        models = conn.execute(
+            "SELECT model_used, COUNT(*) AS n FROM posts WHERE last_processed >= ? "
+            "AND model_used IS NOT NULL AND model_used NOT IN ('', 'none') GROUP BY model_used ORDER BY n DESC", (since,)
+        ).fetchall()
+        added = conn.execute(
+            "SELECT url, group_url, price_val, rooms_val, address, distance_text FROM posts "
+            "WHERE verdict = ? AND last_processed >= ? ORDER BY last_processed", (VERDICT_ADDED, since)
+        ).fetchall()
+    return {
+        "verdicts": {row["verdict"]: row["n"] for row in verdicts},
+        "models": {row["model_used"]: row["n"] for row in models},
+        "added": [dict(row) for row in added],
+    }
+
+
 def get_recent_prefiltered(days: int) -> list[dict]:
     """Posts rejected by a content pre-filter rule in the last `days` days, with their stored text —
     the input for --stats' suspicious-rejects audit."""
