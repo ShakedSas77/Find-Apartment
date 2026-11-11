@@ -41,7 +41,7 @@ def test_eval_with_an_ollama_model_scores_that_local_model(monkeypatch):
     monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", False)
     monkeypatch.setattr(llm, "OLLAMA_MODEL", llm.OLLAMA_MODEL)
     monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
-    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3}'}})
+    monkeypatch.setattr(llm._ollama_client, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3}'}})
 
     llm_eval.run_eval(ollama_model="aya-expanse:8b")
 

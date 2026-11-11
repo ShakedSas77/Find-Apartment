@@ -127,7 +127,7 @@ def test_the_model_that_answered_is_recorded(monkeypatch):
 def test_an_ollama_answer_is_recorded_as_ollama(monkeypatch):
     monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", True)
     monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
-    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: {"message": {"content": '{"rooms": 3.0}'}})
+    monkeypatch.setattr(llm._ollama_client, "chat", lambda **kwargs: {"message": {"content": '{"rooms": 3.0}'}})
 
     llm.analyze_post_with_llm("להשכרה 3 חדרים")
 
@@ -139,7 +139,7 @@ def test_ollama_fallback_uses_the_configured_local_model(monkeypatch):
     monkeypatch.setattr(llm, "GEMINI_EXHAUSTED", True)
     monkeypatch.setattr(llm, "OLLAMA_MODEL", "aya-expanse:8b")
     monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
-    monkeypatch.setattr(llm.ollama, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3.0}'}})
+    monkeypatch.setattr(llm._ollama_client, "chat", lambda **kwargs: used.append(kwargs["model"]) or {"message": {"content": '{"rooms": 3.0}'}})
 
     llm.analyze_post_with_llm("להשכרה 3 חדרים")
 
