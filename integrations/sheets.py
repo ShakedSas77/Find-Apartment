@@ -1,9 +1,10 @@
 """
 === Google Sheets I/O ===
 
-setup_google_sheet() (connect + dedupe/write bootstrap) and
+setup_google_sheet() (connect + dedupe/write bootstrap),
+open_listings_tab() (another tab with the same columns, e.g. Yad2) and
 dedupe_and_sort_sheet() (end-of-run cross-post dedupe + stale-row prune +
-sort) are the two public entry points. Everything else here is the shared
+sort) are the public entry points. Everything else here is the shared
 row-rewrite plumbing both use.
 """
 import sys
@@ -57,6 +58,21 @@ def setup_google_sheet():
         print(f"    ERROR: reading Google Sheet: {e}")
         print("    Aborting: cannot dedupe or write results without the sheet.")
         sys.exit(1)
+
+def open_listings_tab(spreadsheet, title: str, create: bool = True):
+    """
+    The tab named `title` with SHEET_HEADERS in row 1, created when missing — or None when it's
+    missing and `create` is False (a dry run writes nothing, not even an empty tab).
+    """
+    try:
+        tab = spreadsheet.worksheet(title)
+    except gspread.WorksheetNotFound:
+        if not create:
+            return None
+        tab = spreadsheet.add_worksheet(title=title, rows=200, cols=len(SHEET_HEADERS))
+    if not tab.row_values(1):
+        tab.insert_row(SHEET_HEADERS, 1)
+    return tab
 
 def _append_rows_batch(sheet, rows: list[list]):
     if not rows:

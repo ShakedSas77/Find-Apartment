@@ -28,10 +28,11 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import env
-from config import ALERTS_IMAP_HOST, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR
+from config import ALERTS_IMAP_HOST, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, YAD2_TAB_NAME
 from core import storage
 from core.evaluate import _content_prefilter, flush_pending_listings, process_candidate_listing
 from core.util import _safe_print
+from integrations.sheets import open_listings_tab
 
 # Stands in for a Facebook group URL in the DB and --stats, so this source's yield shows as one row.
 YAD2_ALERTS_SOURCE = "https://www.yad2.co.il/my-alerts"
@@ -59,13 +60,16 @@ _SIZE_RE = re.compile(r"(\d+)\s*מ[״\"]ר")
 _SEARCH_CITY_RE = re.compile(r"להשכרה ב(\S.*)$", re.M)
 
 
-def scan_alert_emails(sheet, seen_urls: set, live: bool) -> dict:
+def scan_alert_emails(spreadsheet, live: bool) -> dict:
     """
     Runs every listing in the last ALERTS_LOOKBACK_DAYS of Yad2 digest emails through the same
-    pre-filters, evaluation, sheet write and Telegram alert as a Facebook post. No LLM call: the
-    email already states price, rooms and street. Returns stats shaped like a group scan's.
+    pre-filters, evaluation and Telegram alert as a Facebook post, writing matches to the
+    YAD2_TAB_NAME tab. No LLM call: the email already states price, rooms and street. Returns
+    stats shaped like a group scan's.
     """
     stats = {"added": 0, "posts_seen": 0, "prefiltered": 0, "llm_parsed": 0}
+    sheet = open_listings_tab(spreadsheet, YAD2_TAB_NAME, create=live)
+    seen_urls = {url for url in sheet.col_values(1)[1:] if url} if sheet else set()
     pending_rows, pending_seen_urls, pending_records, pending_telegram = [], set(), [], []
     stats_lock = threading.Lock()
     for msg in fetch_recent_messages(ALERTS_LOOKBACK_DAYS):

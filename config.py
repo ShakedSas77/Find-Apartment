@@ -253,6 +253,8 @@ ALERTS_IMAP_HOST = "imap.gmail.com"
 # Every live/dry scan reads Yad2's daily digest emails first (no browser, no LLM — the email
 # already states price/rooms/street). Off, or no ALERTS_IMAP_* in .env, skips it.
 ALERTS_SCAN_ENABLED = True
+# Yad2 listings get their own tab (same columns as the main one), created on the first live run.
+YAD2_TAB_NAME = "Yad2"
 # How far back each run looks for alert emails. Already-seen listings are skipped by URL, so a
 # window wider than the run interval only costs one IMAP fetch.
 ALERTS_LOOKBACK_DAYS = 2
