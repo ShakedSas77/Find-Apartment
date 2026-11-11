@@ -56,6 +56,7 @@ _run_text_hashes: dict[str, str] = {}  # text_hash -> claiming url, this run onl
 _headless_checkpoint_hit = False  # set once any group hits a checkpoint in --headless mode; other groups then skip fast
 
 _DEAD_POST_RE = re.compile(r"isn.t available right now", re.IGNORECASE)
+_DEAD_LINK_PROGRESS_EVERY = 10
 
 def _is_post_removed(page, url: str, headless: bool, label: str) -> bool:
     """
@@ -98,15 +99,18 @@ def _prune_dead_links(page, sheet, headless: bool, live: bool) -> int:
     if len(data) <= 1:
         return 0
     rows = data[1:]
+    urls = [(i, row[0]) for i, row in enumerate(rows) if row and row[0]]
+    # Each visit takes ~8s with the pause, so a 60-listing sheet is ~8 minutes with nothing else printed.
+    print(f"Dead-link check: visiting {len(urls)} listing(s) already in the sheet "
+          f"(~{max(1, round(len(urls) * 8.5 / 60))} min)...")
 
     dead_indices = []
-    for i, row in enumerate(rows):
-        url = row[0] if row else ""
-        if not url:
-            continue
+    for checked, (i, url) in enumerate(urls, 1):
         if _is_post_removed(page, url, headless, "Dead-link check"):
             dead_indices.append(i)
             _safe_print(f"    Dead link found (post no longer available): {url}")
+        if checked % _DEAD_LINK_PROGRESS_EVERY == 0 and checked < len(urls):
+            print(f"    Dead-link check: {checked}/{len(urls)} checked, {len(dead_indices)} dead so far.")
         time.sleep(random.uniform(2, 5))
 
     if not dead_indices:
