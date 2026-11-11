@@ -29,7 +29,7 @@ import config
 import env
 from config import (
     GEMINI_MODELS, GEMINI_MAX_CONSECUTIVE_ERRORS, GEMINI_UNAVAILABLE_RETRIES, GEMINI_UNAVAILABLE_BACKOFF_S,
-    GEMINI_RATE_LIMIT_RETRIES, GEMINI_RETRY_MAX_SLEEP_S,
+    GEMINI_RATE_LIMIT_RETRIES, GEMINI_RETRY_MAX_SLEEP_S, GEMINI_TIMEOUT_S, OLLAMA_TIMEOUT_S,
 )
 from prompts import get_apartment_prompt_improved
 from core.util import _safe_print, _with_retries
@@ -65,7 +65,10 @@ def get_gemini_client():
     if _gemini_client is None:
         with _gemini_client_lock:
             if _gemini_client is None:
-                _gemini_client = genai.Client(api_key=env.get_gemini_api_key())
+                _gemini_client = genai.Client(
+                    api_key=env.get_gemini_api_key(),
+                    http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_S * 1000),
+                )
     return _gemini_client
 
 GEMINI_EXHAUSTED = False
@@ -92,6 +95,7 @@ OLLAMA_MODEL = config.OLLAMA_MODEL
 _last_gemini_call = 0.0
 
 _OLLAMA_BASE = os.environ.get("LLM_BASE_URL", "http://localhost:11434")
+_ollama_client = ollama.Client(host=_OLLAMA_BASE, timeout=OLLAMA_TIMEOUT_S)
 _ollama_verified = False
 
 def _ensure_ollama_running():
@@ -259,7 +263,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
         _ensure_ollama_running()
         with _ollama_lock:
             ollama_response = _with_retries(
-                lambda: ollama.chat(
+                lambda: _ollama_client.chat(
                     model=OLLAMA_MODEL,
                     messages=[{'role': 'user', 'content': prompt}],
                     format=ApartmentData.model_json_schema(),  # forces schema-compliant decoding — no manual JSON repair needed anymore

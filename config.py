@@ -123,6 +123,13 @@ GEMINI_UNAVAILABLE_BACKOFF_S = 5.0
 # before the model is given up for the run. Only an explicit PerDay 429 advances immediately.
 GEMINI_RATE_LIMIT_RETRIES = 2
 GEMINI_RETRY_MAX_SLEEP_S = 30.0
+# Per-request time limits. Neither client has one by default, so a request stuck on the server
+# blocked its group until it came back (seen 2026-11-11: one gemini-flash-latest call took 19 min
+# under Google's 503 overload, and the end-of-run summary waits for every group). A timed-out
+# Gemini call counts as an error (next model or Ollama for that post); Ollama normally answers in
+# 7-13s on the RTX 2060, so its limit only catches a hang (each of its 3 retries gets the full limit).
+GEMINI_TIMEOUT_S = 60
+OLLAMA_TIMEOUT_S = 120
 # Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 
