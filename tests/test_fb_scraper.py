@@ -3,6 +3,7 @@ Tests for fb_scraper's pure decision logic (no browser). The scroll early-stop r
 piece whose regressions silently turn a 3-scroll scan into an 80-scroll crawl every run.
 """
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,7 +12,7 @@ from core import storage
 from core.errors import LoginRequired
 from sources import fb_scraper
 from sources.fb_scraper import (
-    _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
+    _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _load_scan_pace, _save_scan_pace, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
     _blocked_membership, _new_totals, _progress_line, _read_post_text,
     _scan_groups_sequentially, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
@@ -294,3 +295,27 @@ def test_a_group_with_a_pending_join_request_is_detected_before_scrolling():
 
 def test_a_public_group_showing_posts_to_non_members_is_still_scanned():
     assert _blocked_membership(_FakeGroupPage("Join group", article_count=3)) is None
+
+
+def test_last_runs_pace_gives_an_estimate_before_the_first_group_finishes():
+    assert _estimate_seconds_left(done=0, total=54, done_elapsed_s=0, elapsed_s=30, prior_s_per_group=10) == 510
+
+
+def test_halfway_the_estimate_blends_the_observed_and_last_runs_pace_equally():
+    # 20s/group observed, 10s/group last run -> 15s/group over 10 groups, 100s already spent.
+    assert _estimate_seconds_left(done=5, total=10, done_elapsed_s=100, elapsed_s=100, prior_s_per_group=10) == 50
+
+
+def test_a_complete_scan_saves_its_pace_for_the_next_run(db):
+    _save_scan_pace(SimpleNamespace(done=54, total=54, done_elapsed_s=540), _new_totals(54))
+
+    assert _load_scan_pace() == 10
+
+
+def test_a_scan_cut_short_by_a_checkpoint_does_not_save_its_pace(db):
+    totals = _new_totals(54)
+    totals["checkpoint_skipped"] = 40
+
+    _save_scan_pace(SimpleNamespace(done=54, total=54, done_elapsed_s=60), totals)
+
+    assert _load_scan_pace() is None

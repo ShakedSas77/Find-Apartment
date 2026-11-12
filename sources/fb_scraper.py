@@ -861,10 +861,11 @@ def run_scraper(headless: bool = False, live: bool = False):
                     storage.set_bot_state(_DEAD_LINKS_CHECKED_KEY, datetime.now().isoformat(timespec="seconds"))
 
             if sequential_mode:
-                progress = _ScanProgress(len(shuffled_urls), totals, run_message)
+                progress = _ScanProgress(len(shuffled_urls), totals, run_message, _load_scan_pace())
                 try:
                     _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals,
                                               progress=progress)
+                    _save_scan_pace(progress, totals)
                 finally:
                     progress.stop()
             else:
@@ -875,10 +876,11 @@ def run_scraper(headless: bool = False, live: bool = False):
             _close_context(context)
 
     if not sequential_mode:
-        progress = _ScanProgress(len(shuffled_urls), totals, run_message)
+        progress = _ScanProgress(len(shuffled_urls), totals, run_message, _load_scan_pace())
         try:
             _scan_groups_in_parallel(shuffled_urls, sheet, seen_urls, storage_state_path, headless,
                                      real_user_agent, real_locale, live, totals, progress=progress)
+            _save_scan_pace(progress, totals)
         finally:
             progress.stop()
 
@@ -1036,10 +1038,12 @@ class _ScanProgress:
     # still scrolling. A report identical to the previous one is skipped — Telegram rejects an
     # edit that changes nothing, and the console shouldn't repeat itself.
 
-    def __init__(self, total: int, totals: dict, run_message: tuple[str, dict] | None = None):
+    def __init__(self, total: int, totals: dict, run_message: tuple[str, dict] | None = None,
+                 prior_s_per_group: float | None = None):
         self.total = total
         self.totals = totals
         self.run_message = run_message
+        self.prior_s_per_group = prior_s_per_group
         self.started = time.perf_counter()
         self.done = 0
         self.done_elapsed_s = 0.0
@@ -1065,7 +1069,8 @@ class _ScanProgress:
     def _report(self):
         with self._lock:
             elapsed_s = time.perf_counter() - self.started
-            left_s = _estimate_seconds_left(self.done, self.total, self.done_elapsed_s, elapsed_s)
+            left_s = _estimate_seconds_left(self.done, self.total, self.done_elapsed_s, elapsed_s,
+                                            self.prior_s_per_group)
             added = self.totals["total_added"]
             line = _progress_line(self.done, self.total, added, elapsed_s, left_s)
             if line != self._last_console:
@@ -1083,13 +1088,39 @@ class _ScanProgress:
         except Exception as e:
             _safe_print(f"WARNING: Telegram progress update failed: {e}")
 
-def _estimate_seconds_left(done: int, total: int, done_elapsed_s: float, elapsed_s: float) -> float | None:
-    # Projects the whole scan from the average time per finished group, then counts down against
-    # the clock: between finished groups the estimate keeps shrinking, and each finished group
-    # corrects it. None until a first group has finished.
-    if not done:
+def _estimate_seconds_left(done: int, total: int, done_elapsed_s: float, elapsed_s: float,
+                           prior_s_per_group: float | None = None) -> float | None:
+    # Projects the whole scan from a time per group, then counts down against the clock: between
+    # finished groups the estimate keeps shrinking, and each finished group corrects it. The groups
+    # that finish first are the quick ones (caught up, or skipped), so the observed pace alone reads
+    # far too fast early on (~3 min left at 13/54 of a 9-min scan). The previous run's pace anchors
+    # it instead, and the observed pace takes over in proportion to the groups done.
+    observed = done_elapsed_s / done if done else None
+    if prior_s_per_group is None:
+        per_group = observed
+    elif observed is None:
+        per_group = prior_s_per_group
+    else:
+        weight = done / total
+        per_group = weight * observed + (1 - weight) * prior_s_per_group
+    if per_group is None:
         return None
-    return max(0.0, done_elapsed_s / done * total - elapsed_s)
+    return max(0.0, per_group * total - elapsed_s)
+
+def _load_scan_pace() -> float | None:
+    value = storage.get_bot_state(_scan_pace_key())
+    return float(value) if value else None
+
+def _save_scan_pace(progress: "_ScanProgress", totals: dict):
+    # Only a complete, checkpoint-free scan is a fair pace: groups aborted by a checkpoint finish
+    # in seconds and would make the next run's estimate far too short.
+    if progress.done < progress.total or totals["checkpoint_skipped"] or not progress.done:
+        return
+    storage.set_bot_state(_scan_pace_key(), f"{progress.done_elapsed_s / progress.done:.1f}")
+
+def _scan_pace_key() -> str:
+    # Keyed by concurrency: a sequential scan's pace per group is several times a parallel one's.
+    return f"scan_seconds_per_group_x{MAX_CONCURRENT_GROUPS}"
 
 def _progress_line(done: int, total: int, added: int, elapsed_s: float, left_s: float | None) -> str:
     # A line per report, not a bar redrawn in place: six groups print at once in parallel mode and
