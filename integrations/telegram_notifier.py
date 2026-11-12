@@ -415,36 +415,3 @@ def _ago(delta: timedelta) -> str:
     if minutes < 48 * 60:
         return f"{minutes // 60}:{minutes % 60:02d} שע'"
     return f"{minutes // (24 * 60)} ימים"
-
-
-def send_failure_alert(summary: str):
-    """Used by doctor.py --alert to DM a health-check failure summary."""
-    if not _configured():
-        return
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚠️ apartment-bot doctor check failed:\n\n{summary}"})
-
-
-def send_run_started(total_groups: int):
-    """Sent once at the start of a --live run_scraper() call — never on a dry run."""
-    if not _configured():
-        return
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": f"▶️ הרצה התחילה — {total_groups} קבוצות לסריקה"})
-
-
-def send_run_finished(stats: dict):
-    """Sent once at the end of a --live run_scraper() call, with the same
-    numbers printed to the console summary line."""
-    if not _configured():
-        return
-    text = (
-        f"✅ הרצה הסתיימה\n"
-        f"{stats['groups_scanned']}/{stats['total']} קבוצות נסרקו\n"
-        f"{stats['posts_seen']} פוסטים נבדקו | {stats['prefiltered']} סוננו מראש | {stats['llm_parsed']} נשלחו ל-LLM\n"
-        f"{stats['added']} דירות נוספו\n"
-        f"{stats['gmaps_calls']} קריאות Google Maps החודש"
-    )
-    if stats.get("checkpoint_skipped"):
-        text += f"\n⚠️ {stats['checkpoint_skipped']} קבוצה/ות דולגו עקב checkpoint"
-    if stats.get("errors") or stats.get("warnings"):
-        text += f"\n⚠️ {stats.get('errors', 0)} שגיאות, {stats.get('warnings', 0)} אזהרות — ראו את קובץ הלוג"
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
