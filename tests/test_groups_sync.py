@@ -162,3 +162,31 @@ def test_a_group_the_account_has_not_joined_is_flagged():
     groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
 
     assert tab.written[1][-1] == "לא חבר/ה בקבוצה — יש להצטרף בפייסבוק"
+
+
+_G3 = "https://www.facebook.com/groups/333"
+
+
+def _record_posts(group_url, total, added):
+    for i in range(total):
+        verdict = storage.VERDICT_ADDED if i < added else storage.VERDICT_PREFILTERED
+        storage.record_post(f"{group_url}/posts/{i}/", group_url, "", verdict)
+
+
+def test_sync_command_sorts_groups_by_match_rate_with_unscanned_groups_last():
+    _record_posts(_G1, total=10, added=1)
+    _record_posts(_G2, total=10, added=3)
+    tab = _tab([_G3], [_G1], [_G2])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True, sort_by_yield=True)
+
+    assert [row[0] for row in tab.written[1:]] == [_G2, _G1, _G3]
+
+
+def test_a_regular_sync_keeps_the_tab_order():
+    _record_posts(_G2, total=10, added=3)
+    tab = _tab([_G1], [_G2])
+
+    groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
+
+    assert [row[0] for row in tab.written[1:]] == [_G1, _G2]
