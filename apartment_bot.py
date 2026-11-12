@@ -378,8 +378,8 @@ if __name__ == "__main__":
 
     if args.sync_groups:
         sheet, _ = setup_google_sheet()
-        active = sync_groups(sheet.spreadsheet, write=True)
-        print(f"Groups tab synced: {len(active)} active group(s) of {len(storage.get_groups())}.")
+        active = sync_groups(sheet.spreadsheet, write=True, sort_by_yield=True)
+        print(f"Groups tab synced and sorted by match rate: {len(active)} active group(s) of {len(storage.get_groups())}.")
         sys.exit(0)
 
     if args.eval:

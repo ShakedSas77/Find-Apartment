@@ -31,11 +31,13 @@ _GROUP_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 _TITLE_SUFFIX_RE = re.compile(r"\s*\|\s*Facebook\s*$")
 
 
-def sync_groups(spreadsheet, write: bool = True) -> list[str]:
+def sync_groups(spreadsheet, write: bool = True, sort_by_yield: bool = False) -> list[str]:
     """
     Reads the Groups tab, mirrors it into the local DB and returns the active group URLs, in tab order.
     write=True also rewrites the tab with filled-in names/cities and fresh stats (a dry run passes False:
-    it reads only). Never raises for a sheet problem — falls back to the local mirror, then TARGET_URLS.
+    it reads only). sort_by_yield=True (the --sync-groups command) also reorders the rows by match rate,
+    best first, with groups not scanned yet at the bottom. Never raises for a sheet problem — falls back
+    to the local mirror, then TARGET_URLS.
     """
     try:
         worksheet = _groups_worksheet(spreadsheet)
@@ -50,6 +52,8 @@ def sync_groups(spreadsheet, write: bool = True) -> list[str]:
     overview = storage.get_group_overview()
     for group in groups:
         _fill_from_scans(group, overview.get(group["url"], {}))
+    if sort_by_yield:
+        groups.sort(key=lambda g: _yield_sort_key(overview.get(g["url"], {})))
     storage.replace_groups(groups)
     if write:
         try:
@@ -105,6 +109,12 @@ def _fill_from_scans(group: dict, seen: dict):
         group["name"] = _TITLE_SUFFIX_RE.sub("", seen["name"])
     if not group.get("cities") and seen.get("cities"):
         group["cities"] = ", ".join(seen["cities"])
+
+
+def _yield_sort_key(seen: dict) -> tuple:
+    # Same rate as the אחוז התאמה column; ties go to the group with more listings added.
+    posts, added = seen.get("posts", 0), seen.get("added", 0)
+    return (not posts, -(added / posts) if posts else 0, -added)
 
 
 def _stats_cells(seen: dict) -> list:
