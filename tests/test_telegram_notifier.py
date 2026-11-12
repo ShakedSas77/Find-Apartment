@@ -319,3 +319,15 @@ def test_run_finished_sends_the_formatted_summary(monkeypatch):
     telegram_notifier.send_run_finished(stats)
 
     assert sent["text"] == telegram_notifier._format_run_finished(stats)
+
+
+def test_a_facebook_listing_message_names_facebook_as_its_source():
+    message = telegram_notifier._format_listing_message(_FULL_FIELDS, 70, "https://www.facebook.com/groups/1/posts/2/")
+
+    assert "מקור: פייסבוק" in message
+
+
+def test_a_yad2_listing_message_names_yad2_as_its_source():
+    message = telegram_notifier._format_listing_message(_FULL_FIELDS, 70, "https://www.yad2.co.il/realestate/item/abc123")
+
+    assert "מקור: יד2" in message

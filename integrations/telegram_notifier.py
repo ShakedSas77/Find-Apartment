@@ -104,7 +104,7 @@ def _format_floor(floor) -> str:
     return "קרקע" if _as_number(floor) == 0 else _escape(floor)
 
 
-def _format_listing_message(fields: dict, score: int) -> str:
+def _format_listing_message(fields: dict, score: int, post_url: str = "") -> str:
     """HTML message body; a line (or field) with no data is left out rather than shown as a placeholder."""
     headline = [f"{_score_tier(score)} <b>ציון {score}/100</b>"]
     rooms = _as_number(fields.get("rooms_val"))
@@ -114,6 +114,9 @@ def _format_listing_message(fields: dict, score: int) -> str:
     if price:
         headline.append(f"<b>{int(price):,} ₪</b>")
     lines = [" · ".join(headline)]
+    source = _source_label(post_url)
+    if source:
+        lines.append(f"📰 מקור: {source}")
 
     total_cost = scoring.compute_total_monthly_cost(fields)
     if total_cost:
@@ -143,6 +146,14 @@ def _format_listing_message(fields: dict, score: int) -> str:
     if fields.get("is_agent"):
         lines.append("תיווך")
     return "\n".join(lines)
+
+
+def _source_label(post_url: str) -> str:
+    if "yad2.co.il" in post_url:
+        return "יד2"
+    if "facebook.com" in post_url:
+        return "פייסבוק"
+    return ""
 
 
 def _maps_url(fields: dict) -> str | None:
@@ -209,7 +220,7 @@ def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
         return None
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": _format_listing_message(fields, score),
+        "text": _format_listing_message(fields, score, post_url),
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
         # The button opens the listing's own URL, so a non-Facebook source (Yad2) links to its page too.
