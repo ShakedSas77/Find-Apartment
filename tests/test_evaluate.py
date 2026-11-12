@@ -9,6 +9,7 @@ given so _listing_dedupe_key returns None.
 import threading
 from datetime import date, timedelta
 
+import config
 from core import storage
 import core.evaluate as evaluate
 
@@ -302,3 +303,33 @@ def test_genuine_room_share_is_still_rejected():
     _, analysis, _ = evaluate._content_prefilter("יש חדר פנוי לשותף בדירת 3 חדרים, 2,000 ש\"ח")
 
     assert analysis["reject_reason"].startswith("roommate_keyword")
+
+
+
+def _verdict_at_distance(monkeypatch, km, source):
+    """process_candidate_listing for one listing whose distance lookup (a network boundary) answers km
+    from source; returns the verdict recorded, or None when the listing was queued for the sheet."""
+    evaluate._run_queued_listing_keys.clear()
+    fields = {"rooms_val": 3.0, "price_val": 6000.0, "address": "ביאליק, רמת גן", "entry_date": None, "floor": None,
+              "elevator": None, "parking": "", "arnona": "", "vaad": "", "shelter": None, "is_agent": False}
+    recorded = []
+    monkeypatch.setattr(evaluate, "analyze_post_with_llm", lambda text: {"rooms": 3})
+    monkeypatch.setattr(evaluate, "_evaluate_post_data", lambda data, text, group_url="": (storage.VERDICT_ADDED, dict(fields)))
+    monkeypatch.setattr(evaluate, "get_walking_distance",
+                        lambda address: (f"{km}", int(km * 1000), "medium", "", source, None, None))
+    monkeypatch.setattr(evaluate.storage, "record_post", lambda url, group, text, verdict, *args, **kwargs: recorded.append(verdict))
+    evaluate.process_candidate_listing("https://www.facebook.com/groups/1/posts/9/", "text", "1h", "group", "label", True,
+                                       set(), [], set(), [], {"llm_parsed": 0, "added": 0}, threading.Lock())
+    return recorded[0] if recorded else None
+
+
+def test_an_estimate_just_over_the_limit_is_kept_when_its_error_could_bring_it_in(monkeypatch):
+    assert _verdict_at_distance(monkeypatch, config.MAX_WALKING_DISTANCE_KM + 0.3, "street_estimate") is None
+
+
+def test_an_estimate_far_over_the_limit_is_rejected(monkeypatch):
+    assert _verdict_at_distance(monkeypatch, config.MAX_WALKING_DISTANCE_KM + 3, "street_estimate") == storage.VERDICT_REJECTED_DISTANCE
+
+
+def test_a_google_distance_just_over_the_limit_is_rejected(monkeypatch):
+    assert _verdict_at_distance(monkeypatch, config.MAX_WALKING_DISTANCE_KM + 0.3, "google_maps") == storage.VERDICT_REJECTED_DISTANCE

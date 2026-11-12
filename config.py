@@ -280,7 +280,7 @@ PROGRESS_TICK_S = 30
 SHEET_HEADERS = [
     "לינק למודעה", "מחיר", "חדרים", "מרחק הליכה (ק\"מ)", "תאריך כניסה",
     "קומה", "מעלית", "חניה", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)", "ממ\"ד/מקלט", "תיווך/פרטי",
-    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה", "עלות חודשית כוללת"
+    "תאריך פרסום", "כתובת", "זמן סריקה", "ציון התאמה", "עלות חודשית כוללת", "דיוק מרחק"
 ]
 
 # Bi-monthly arnona above this is treated as an extraction bug and dropped (left blank).
@@ -383,9 +383,19 @@ DESTINATION_LAT = 32.0809
 DESTINATION_LON = 34.7806
 
 # Streets aren't straight lines; this scales the haversine distance up to
-# approximate real walking distance. Uncalibrated against real data — a rough
-# correction, not a precise one.
-STRAIGHT_LINE_CALIBRATION_FACTOR = 1.35
+# approximate real walking distance. Calibrated 2026-11-12 against the 89 cached
+# Google walking routes: Google's walk / straight line had median 1.32 (10th-90th
+# percentile 1.15-1.47).
+STRAIGHT_LINE_CALIBRATION_FACTOR = 1.32
+# The free estimate's error, shown as "±" next to it (sheet column דיוק מרחק, Telegram):
+# the route-shape share — 80% of the same 89 routes were within 14% of the
+# calibrated estimate — plus where the flat sits inside what Nominatim matched, by
+# match precision (distance_fallback.ESTIMATE_SOURCES): a house, a street (the
+# flat is somewhere along it), or only a neighbourhood. End to end (Nominatim's own
+# geocode, not Google's coordinates) 47 of 52 found addresses landed within the ±;
+# a very long street (ארלוזורוב, רמת גן) is the typical miss.
+DISTANCE_ESTIMATE_ROUTE_ERROR = 0.14
+DISTANCE_ESTIMATE_LOCATION_ERROR_KM = {"straight_line_estimate": 0.05, "street_estimate": 0.3, "area_estimate": 0.7}
 
 # Required by Nominatim's usage policy (https://operations.osmfoundation.org/policies/nominatim/):
 # identify the app and give a contact method.

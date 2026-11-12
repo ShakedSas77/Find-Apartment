@@ -124,7 +124,9 @@ def _format_listing_message(fields: dict, score: int, post_url: str = "") -> str
     if fields.get("address"):
         lines.append(f"📍 {_escape(fields['address'])}")
     distance_km = _as_number(fields.get("distance_text"))
-    if distance_km is not None:
+    if distance_km is not None and fields.get("distance_error_km") is not None:
+        lines.append(f"🚶 ~{distance_km:g} ק\"מ הליכה (הערכה, ±{fields['distance_error_km']:g})")
+    elif distance_km is not None:
         lines.append(f"🚶 {distance_km:g} ק\"מ הליכה")
 
     details = [

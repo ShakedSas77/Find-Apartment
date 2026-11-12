@@ -52,7 +52,7 @@ def test_a_cached_failed_lookup_is_retried(monkeypatch):
     address = "רמב\"ם 3, גבעתיים"
     storage.save_address_cache(address, address, "גבעתיים", "high", "", "", 999999, "quota", "quota", None, None)
     monkeypatch.setattr(maps, "GMAPS_ENABLED", False)
-    monkeypatch.setattr(distance_fallback, "nominatim_geocode", lambda q: (32.0717, 34.8125))
+    monkeypatch.setattr(distance_fallback, "nominatim_geocode", lambda q: (32.0717, 34.8125, 30))
 
     assert maps.get_walking_distance(address)[4] == "straight_line_estimate"
 
@@ -80,8 +80,60 @@ def test_spelling_variants_end_with_the_street_without_its_house_number():
 def test_fallback_tries_variants_only_after_the_plain_query_misses(monkeypatch):
     queried = []
     monkeypatch.setattr(distance_fallback, "nominatim_geocode",
-                        lambda q: queried.append(q) or ((32.07, 34.80) if '"' in q else None))
+                        lambda q: queried.append(q) or ((32.07, 34.80, 30) if '"' in q else None))
 
     distance_fallback.estimate_straight_line_distance("רמבם 3, גבעתיים")
 
     assert queried == ["רמבם 3, גבעתיים", 'רמב"ם 3, גבעתיים']
+
+
+
+def _geocode_everything_at(lat, lon, rank, monkeypatch):
+    monkeypatch.setattr(maps, "GMAPS_ENABLED", False)
+    monkeypatch.setattr(distance_fallback, "nominatim_geocode", lambda q: (lat, lon, rank))
+
+
+def test_an_address_found_only_at_street_level_is_marked_a_street_estimate(monkeypatch):
+    _geocode_everything_at(32.0717, 34.8125, 26, monkeypatch)
+
+    assert maps.get_walking_distance("שינקין, גבעתיים")[4] == "street_estimate"
+
+
+def test_a_neighbourhood_is_estimated_when_google_is_off(monkeypatch):
+    _geocode_everything_at(32.0717, 34.8125, 20, monkeypatch)
+
+    assert maps.get_walking_distance("שכונת רמת יצחק")[4] == "area_estimate"
+
+
+def test_a_match_for_a_whole_city_gives_no_estimate(monkeypatch):
+    _geocode_everything_at(32.0717, 34.8125, 16, monkeypatch)
+
+    assert distance_fallback.estimate_straight_line_distance("משהו, גבעתיים") is None
+
+
+def test_a_street_found_by_google_only_in_general_is_retried_while_google_is_off(monkeypatch):
+    address = "שינקין, גבעתיים"
+    storage.save_address_cache(address, "", "גבעתיים", "low", "", "", 999999, "skipped", "not_street_precision", None, None)
+    _geocode_everything_at(32.0717, 34.8125, 26, monkeypatch)
+
+    assert maps.get_walking_distance(address)[4] == "street_estimate"
+
+
+def test_estimate_error_grows_with_the_distance():
+    assert distance_fallback.estimate_error_km("straight_line_estimate", 3.0) == 0.5
+
+
+def test_a_neighbourhood_estimate_has_a_wider_error_than_a_house():
+    assert distance_fallback.estimate_error_km("area_estimate", 3.0) == 1.1
+
+
+def test_a_google_distance_has_no_estimate_error():
+    assert distance_fallback.estimate_error_km("google_maps", 3.0) is None
+
+
+def test_the_sheet_label_marks_an_estimate_with_its_error():
+    assert distance_fallback.distance_accuracy_label("street_estimate", 0.7) == "הערכה ±0.7"
+
+
+def test_the_estimate_error_is_read_back_from_the_sheet_label():
+    assert distance_fallback.error_km_from_label("הערכה ±0.7") == 0.7

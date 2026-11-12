@@ -331,3 +331,10 @@ def test_a_yad2_listing_message_names_yad2_as_its_source():
     message = telegram_notifier._format_listing_message(_FULL_FIELDS, 70, "https://www.yad2.co.il/realestate/item/abc123")
 
     assert "מקור: יד2" in message
+
+
+
+def test_an_estimated_distance_is_marked_with_its_error():
+    message = telegram_notifier._format_listing_message(dict(_FULL_FIELDS, distance_text="1.2", distance_error_km=0.3), 70)
+
+    assert "~1.2 ק\"מ הליכה (הערכה, ±0.3)" in message
