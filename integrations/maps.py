@@ -289,7 +289,14 @@ def get_walking_distance(address: str):
     # A cached *failure* (Google off/over cap and the free fallback missed, or a Distance Matrix error)
     # is not an answer — serving it made the address blank forever, even once Google was back on or the
     # fallback improved (seen 2026-11-07: "שינקין 32, גבעתיים", "רמבם 3, גבעתיים"). Retry those.
-    if cached and cached.get("distance_source") not in _RETRYABLE_CACHE_SOURCES:
+    # A weak address skipped before the free estimate accepted street- and neighbourhood-level matches
+    # (2026-11-12) is retried too: a skip for low confidence is free to redo either way, and one Google
+    # found only street-level only while Google is off (seen: "שינקין, גבעתיים", cached when it was on).
+    geocode_status = (cached or {}).get("geocode_status")
+    is_retryable = (cached and (cached.get("distance_source") in _RETRYABLE_CACHE_SOURCES
+                                or geocode_status == "skipped_low_confidence"
+                                or (geocode_status == "not_street_precision" and not GMAPS_ENABLED)))
+    if cached and not is_retryable:
         # Must return the ORIGINAL source ("google_maps"/"skipped"/"quota"),
         # not a hardcoded "cache" — callers gate the > MAX_WALKING_DISTANCE_KM
         # rejection on distance_source == "google_maps", so a hardcoded value
@@ -313,7 +320,10 @@ def get_walking_distance(address: str):
     canonical_address, city, confidence, geocode_warning, geocode_status, lat, lon = _validate_address_with_geocoding(address, confidence)
     warning = geocode_warning or warning
 
-    if GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS and confidence not in {"high", "medium"}:
+    over_cap, placeholder = _handle_gmaps_cap_if_needed()
+    # Google's distance is only worth a paid call for a confident address; the free estimate also takes
+    # a street or a neighbourhood, and widens its ± to match (estimate_error_km).
+    if GMAPS_DISTANCE_ONLY_CONFIDENT_ADDRESS and confidence not in {"high", "medium"} and not over_cap:
         storage.save_address_cache(address, canonical_address, city, confidence, warning, "", 999999, "skipped", geocode_status, lat, lon)
         return "", 999999, confidence, warning, "skipped", lat, lon
 
@@ -322,20 +332,19 @@ def get_walking_distance(address: str):
         storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
         return "", 999999, confidence, south_warning, "excluded_south", lat, lon
 
-    over_cap, placeholder = _handle_gmaps_cap_if_needed()
     if over_cap:
         fallback = distance_fallback.estimate_straight_line_distance(canonical_address or address)
         if fallback:
-            fallback_text, fallback_meters, fallback_lat, fallback_lon = fallback
+            fallback_text, fallback_meters, fallback_lat, fallback_lon, fallback_source = fallback
             lat = lat if lat is not None else fallback_lat
             lon = lon if lon is not None else fallback_lon
             if EXCLUDE_SOUTH_OF_LAT is not None and lat < EXCLUDE_SOUTH_OF_LAT:
                 south_warning = "מיקום מדרום לתחנת הרכבת ההגנה - מחוץ לטווח"
                 storage.save_address_cache(address, canonical_address, city, confidence, south_warning, "", 999999, "excluded_south", geocode_status, lat, lon)
                 return "", 999999, confidence, south_warning, "excluded_south", lat, lon
-            fallback_warning = "הערכה קווית (Google כבוי או מכסה הסתיימה)"
-            storage.save_address_cache(address, canonical_address, city, confidence, fallback_warning, fallback_text, fallback_meters, "straight_line_estimate", geocode_status, lat, lon)
-            return fallback_text, fallback_meters, confidence, fallback_warning, "straight_line_estimate", lat, lon
+            # No warning: the distance itself is marked as an estimate, with its ± (estimate_error_km).
+            storage.save_address_cache(address, canonical_address, city, confidence, "", fallback_text, fallback_meters, fallback_source, geocode_status, lat, lon)
+            return fallback_text, fallback_meters, confidence, "", fallback_source, lat, lon
         storage.save_address_cache(address, canonical_address, city, confidence, warning, placeholder, 999999, "quota", geocode_status, lat, lon)
         return placeholder, 999999, confidence, warning, "quota", lat, lon
 

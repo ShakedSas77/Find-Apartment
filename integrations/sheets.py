@@ -18,9 +18,11 @@ from config import CREDENTIALS_FILE, SHEET_HEADERS
 from core.util import _with_retries
 from core.normalize import _sheet_safe_cell, _is_recent_post_date, _post_date_sort_key
 from core.dedupe import _listing_key
+from integrations.distance_fallback import error_km_from_label
 
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
 _COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
+_COL_DIST_ACCURACY = SHEET_HEADERS.index("דיוק מרחק")
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 
@@ -70,8 +72,12 @@ def open_listings_tab(spreadsheet, title: str, create: bool = True):
         if not create:
             return None
         tab = spreadsheet.add_worksheet(title=title, rows=200, cols=len(SHEET_HEADERS))
-    if not tab.row_values(1):
+    headers = tab.row_values(1)
+    if not headers:
         tab.insert_row(SHEET_HEADERS, 1)
+    elif headers != SHEET_HEADERS and create:
+        # A column added since the tab was made (דיוק מרחק, 2026-11-12) gets its header; rows below keep theirs.
+        _with_retries(lambda: tab.update(range_name="A1", values=[SHEET_HEADERS]))
     return tab
 
 def _append_rows_batch(sheet, rows: list[list]):
@@ -261,5 +267,6 @@ def _fields_from_sheet_row(row: list) -> dict:
         "shelter": _bool_cell(cell(_COL_SHELTER)),
         "is_agent": _bool_cell(cell(_COL_AGENT)),
         "address": cell(_COL_ADDRESS),
+        "distance_error_km": error_km_from_label(cell(_COL_DIST_ACCURACY)),
         "lat": None, "lon": None,
     }

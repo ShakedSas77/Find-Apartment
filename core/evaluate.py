@@ -30,6 +30,7 @@ from core.normalize import (
     _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
+from integrations.distance_fallback import ESTIMATE_SOURCES, distance_accuracy_label, estimate_error_km
 from integrations.maps import _format_address_display, get_walking_distance
 from integrations.sheets import _append_rows_batch
 from integrations import telegram_notifier
@@ -37,12 +38,12 @@ from integrations import telegram_notifier
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 # distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
-# rejection on. "straight_line_estimate" (distance_fallback.py, used only once
-# GMAPS_MONTHLY_CAP is hit) is a real, if rougher, distance figure — same
-# treatment as a Google-sourced one. Anything else ("skipped"/"quota"/"cache"
-# with no real number) must NOT be gated on, or a listing with no real distance
-# data would look like it passed the filter.
-_DISTANCE_FILTERABLE_SOURCES = {"google_maps", "straight_line_estimate"}
+# rejection on. The free estimates (distance_fallback.ESTIMATE_SOURCES) are real, if
+# rougher, figures — gated on their optimistic end (distance minus its ±), so an
+# estimate is only rejected when even its error can't bring it in range. Anything
+# else ("skipped"/"quota"/"cache" with no real number) must NOT be gated on, or a
+# listing with no real distance data would look like it passed the filter.
+_DISTANCE_FILTERABLE_SOURCES = {"google_maps", *ESTIMATE_SOURCES}
 
 # Dedupe keys of listings queued during this process's run (guarded by _sheet_lock) — see process_candidate_listing.
 _run_queued_listing_keys: set[tuple] = set()
@@ -180,6 +181,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     fields["distance_source"] = distance_source
     fields["lat"] = lat
     fields["lon"] = lon
+    fields["distance_error_km"] = estimate_error_km(distance_source, dist_meters / 1000 if dist_text else None)
 
     row = [
         post_url,
@@ -199,6 +201,7 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
         datetime.now().strftime("%Y-%m-%d %H:%M"),
         scoring.compute_fit_score(fields),
         scoring.compute_total_monthly_cost(fields),
+        distance_accuracy_label(distance_source, fields["distance_error_km"]),
     ]
     return [_sheet_safe_cell(v) for v in row]
 
@@ -281,7 +284,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
     # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
     # address/quota/error, not a real distance, and shouldn't disqualify a
     # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
-    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
+    nearest_km = dist_meters / 1000.0 - (fields.get("distance_error_km") or 0) if dist_meters is not None else None
+    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and nearest_km is not None and nearest_km > MAX_WALKING_DISTANCE_KM:
         _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
         storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
         return
