@@ -297,7 +297,7 @@ Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOK
 
 The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts.
 
-**Commands from the chat.** While `python bot_listener.py` is running, the chat accepts commands (also listed in Telegram's `/` menu):
+**Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>un_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu):
 
 | Command | What it does |
 |---|---|

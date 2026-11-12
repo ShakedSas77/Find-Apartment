@@ -49,6 +49,8 @@ python backup_db.py
 # long-running process, not part of the scrape: vote taps + chat commands
 # (/scan /stop /status /stats /doctor /sync_groups /help)
 python bot_listener.py
+# hidden + auto-restart, logs to logs/listener.log (Startup-folder shortcut points at the .vbs)
+run_listener_hidden.vbs
 ```
 
 ## Architecture
