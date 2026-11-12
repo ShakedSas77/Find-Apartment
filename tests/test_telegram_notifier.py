@@ -284,3 +284,38 @@ def test_run_progress_bar_shows_the_time_left():
 
 def test_run_progress_bar_at_the_end_points_to_the_summary():
     assert "הסיכום בהודעה הבאה" in telegram_notifier.format_run_progress(54, 54, 6, 0)
+
+
+def _send_through_fake_api(monkeypatch, sent):
+    monkeypatch.setattr(telegram_notifier, "_configured", lambda: True)
+    monkeypatch.setattr(telegram_notifier, "_call", lambda method, payload: sent.update(payload) or {"message_id": 77})
+
+
+def test_run_started_returns_the_message_id_the_progress_bar_edits(monkeypatch):
+    _send_through_fake_api(monkeypatch, {})
+
+    message_id = telegram_notifier.send_run_started({"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW,
+                                                     "previous": None})
+
+    assert message_id == "77"
+
+
+def test_run_started_sends_the_formatted_message_not_the_raw_info(monkeypatch):
+    sent = {}
+    _send_through_fake_api(monkeypatch, sent)
+    info = {"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW, "previous": None}
+
+    telegram_notifier.send_run_started(info)
+
+    assert sent["text"] == telegram_notifier._format_run_started(info)
+
+
+def test_run_finished_sends_the_formatted_summary(monkeypatch):
+    sent = {}
+    _send_through_fake_api(monkeypatch, sent)
+    stats = {"groups_scanned": 54, "total": 54, "posts_seen": 896, "prefiltered": 446, "llm_parsed": 8, "added": 1,
+             "gmaps_calls": 0, "duration_s": 1147}
+
+    telegram_notifier.send_run_finished(stats)
+
+    assert sent["text"] == telegram_notifier._format_run_finished(stats)
