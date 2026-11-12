@@ -297,6 +297,20 @@ Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOK
 
 The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts.
 
+**Commands from the chat.** While `python bot_listener.py` is running, the chat accepts commands (also listed in Telegram's `/` menu):
+
+| Command | What it does |
+|---|---|
+| `/scan` | Starts a full live scan in the background; the run-started message with its progress bar follows. Refused while a scan is already running. |
+| `/stop` | Stops a scan started with `/scan` (not one started by the Task Scheduler). |
+| `/status` | Whether a scan is running, and how the last one ended. |
+| `/stats` | The `--stats` output. |
+| `/doctor` | The `doctor.py` health check. |
+| `/sync_groups` | Syncs the Groups tab (`--sync-groups`). |
+| `/help` | Lists the commands. |
+
+Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old.
+
 Messages sent before the vote buttons were removed still carry ⭐/🗑 buttons; `python bot_listener.py` (a separate long-running process) still handles taps on those: 2 down-votes delete the row, 2 up-votes send a 🔥 highlight, each up-vote bumps the fit score.
 
 ## Yad2 Alert Emails

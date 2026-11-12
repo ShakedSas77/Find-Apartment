@@ -12,6 +12,8 @@ telegram_notifier.build_listing_keyboard(): a ⭐/🗑 vote row and two rows of
     pure data collection, the training set for eventually regressing
     compute_fit_score()'s weights against real human judgment
     (storage.get_ratings_with_listing_data()).
+Text messages in the configured chat are chat commands (/scan, /status, /stats...),
+handled by integrations/telegram_commands.py.
 A separate long-lived process — not part of the scrape.
 
     python bot_listener.py
@@ -26,10 +28,11 @@ from google.oauth2.service_account import Credentials
 
 import config
 from core import storage
-from integrations import telegram_notifier
+from integrations import telegram_commands, telegram_notifier
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SHEET_ID = os.getenv("SHEET_ID")
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
@@ -168,6 +171,10 @@ def _handle_callback_query(cq: dict, sheet):
     _call("answerCallbackQuery", {"callback_query_id": cq.get("id")})
 
 
+def _send_to_chat(text: str):
+    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"})
+
+
 def run():
     if not TELEGRAM_BOT_TOKEN:
         print("ERROR: TELEGRAM_BOT_TOKEN not set in .env")
@@ -175,7 +182,10 @@ def run():
     storage.init_db()
     sheet = _open_sheet()
     offset = storage.get_telegram_offset()
-    print(f"Listening for Telegram votes (offset={offset})... Ctrl+C to stop.")
+    # Fills the "/" menu in the Telegram chat with the commands below.
+    _call("setMyCommands", {"commands": [{"command": name, "description": text}
+                                         for name, text in telegram_commands.COMMANDS.items()]})
+    print(f"Listening for Telegram votes and commands (offset={offset})... Ctrl+C to stop.")
     while True:
         updates = _call("getUpdates", {"offset": offset, "timeout": _POLL_TIMEOUT_SECONDS})
         if not updates:
@@ -185,6 +195,9 @@ def run():
             cq = update.get("callback_query")
             if cq:
                 _handle_callback_query(cq, sheet)
+            message = update.get("message")
+            if message:
+                telegram_commands.handle_message(message, TELEGRAM_CHAT_ID, _send_to_chat)
         storage.set_telegram_offset(offset)
 
 
