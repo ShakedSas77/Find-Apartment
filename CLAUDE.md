@@ -45,9 +45,12 @@ python doctor.py --alert   # also DMs a Telegram alert if anything FAILs
 # scrape already runs this automatically once the newest backup is over 7 days old
 python backup_db.py
 
-# Telegram vote listener (only relevant if TELEGRAM_ENABLED=True) — separate
-# long-running process, not part of the scrape
+# Telegram listener (only relevant if TELEGRAM_ENABLED=True) — separate
+# long-running process, not part of the scrape: vote taps + chat commands
+# (/scan /stop /status /stats /doctor /sync_groups /help)
 python bot_listener.py
+# hidden + auto-restart, logs to logs/listener.log (Startup-folder shortcut points at the .vbs)
+run_listener_hidden.vbs
 ```
 
 ## Architecture
@@ -88,7 +91,8 @@ run_*.bat run_hidden.vbs                                               launchers
 | `integrations/groups_sync.py` | The sheet's **Groups** tab is the source of truth for which FB groups get scanned (replaces `TARGET_URLS`, which now only seeds an empty tab). User columns: קישור לקבוצה (any link shape or bare id, canonicalized), שם הקבוצה / ערים (filled from the scanned page title only when blank), פעיל ("לא" pauses), הערות. Bot columns: posts scanned, added, match %, last added, last scan, סטטוס (תקין / לא חבר/ה בקבוצה — the scan saw FB's Join button and no posts / לא נמצאו פוסטים / ממתינה לסריקה ראשונה; `storage.set_group_status`). Adding a group needs only its link: invisible direction marks are stripped, a blank פעיל means active. Duplicates (same group under any link shape) merge into the first row — its cells win, blanks are filled from the copy — are reported and dropped on the next write. Known limit: a vanity-slug link and the numeric-id link of the same group can't be matched. `sync_groups()` runs at the start of `run_scraper()` (dry runs read-only) and after a live run's dedupe; mirrors the tab into the `groups` DB table, falling back to that mirror (then `TARGET_URLS`) when the sheet is unreachable. Standalone: `--sync-groups` |
 | `integrations/distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used only when `GMAPS_MONTHLY_CAP` is hit |
 | `integrations/telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
-| `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps, records them, updates the tally shown on the message |
+| `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps (records them, updates the tally shown on the message) and chat commands (`integrations/telegram_commands.py`) |
+| `integrations/telegram_commands.py` | Chat commands from the configured chat only, fixed whitelist (`COMMANDS`), no free-form arguments: `/scan` launches `apartment_bot.py` as a background process (refused while one runs — ours, or a Task Scheduler run seen through its `running` row under 2h old), `/stop` kills the process tree of a scan started from the chat and marks its run row `stopped`, `/status`, and `/stats` `/doctor` `/sync_groups` run the CLI and reply with its output in `<pre>`. Commands older than 5 min (sent while the listener was down) are ignored |
 | `doctor.py` | Dependency health check (env, credentials.json, Sheets, Gemini, Ollama, Telegram) — run manually or `--alert` to DM on failure. Never calls Geocoding/Distance Matrix (shares `GMAPS_MONTHLY_CAP`'s counter) |
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
@@ -123,7 +127,7 @@ run_*.bat run_hidden.vbs                                               launchers
 | `sheets-notes` | `integrations/sheets.py`, `_build_row` in `core/evaluate.py` |
 | `storage-notes` | `core/storage.py`, `core/evaluate.py`, `core/dedupe.py`, `integrations/maps.py`, `apartment_bot.py` CLI flags |
 | `scoring-notes` | `core/scoring.py`, entry-date normalization, `SCORE_*` settings |
-| `telegram-notes` | `integrations/telegram_notifier.py`, `bot_listener.py` |
+| `telegram-notes` | `integrations/telegram_notifier.py`, `integrations/telegram_commands.py`, `bot_listener.py` |
 
 ## Known Issues
 
