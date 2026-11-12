@@ -208,7 +208,7 @@ If the Facebook session is gone in headless mode, the run stops right away and i
 # and posts a pre-filter rejected that look like they might be real listings
 python apartment_bot.py --stats
 
-# Sync the sheet's Groups tab with the local DB (names, cities, stats) and exit
+# Sync the sheet's Groups tab with the local DB (names, cities, stats), sort it by match rate, and exit
 python apartment_bot.py --sync-groups
 
 # Score the LLM's extraction of the labelled fixtures in tests/fixtures/test_posts/
@@ -306,7 +306,7 @@ The bot also sends a run-started / run-finished summary on every live run, inclu
 | `/status` | Whether a scan is running, and how the last one ended. |
 | `/stats` | The `--stats` output. |
 | `/doctor` | The `doctor.py` health check. |
-| `/sync_groups` | Syncs the Groups tab (`--sync-groups`). |
+| `/sync_groups` | Syncs the Groups tab and sorts it by match rate (`--sync-groups`). |
 | `/help` | Lists the commands. |
 
 Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old.
