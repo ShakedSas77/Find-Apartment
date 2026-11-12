@@ -25,7 +25,7 @@ Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the shee
 
 ### Main tab (listings)
 
-17 Hebrew columns:
+18 Hebrew columns:
 
 - Listing URL
 - Price
@@ -44,8 +44,9 @@ Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the shee
 - Scan timestamp (when the bot found the post)
 - Fit score (0-100, see [Fit Score](#fit-score) below)
 - Total monthly cost (rent + arnona/2 + vaad/2, plus the agent fee spread over 24 months for agent listings)
+- Distance accuracy — `Google` for a real walking route, `הערכה ±0.4` for a free estimate (see [Distance](#distance) below)
 
-Headers are auto-inserted on first run if the sheet is empty. Duplicate URLs are skipped automatically.
+Headers are auto-inserted on first run if the sheet is empty, and updated when a column is added. Duplicate URLs are skipped automatically.
 
 ### Groups tab (which groups to scan)
 
@@ -55,7 +56,7 @@ A tab named **Groups** decides which Facebook groups get scanned. To add a group
 - **Active** — write "לא" to pause a group; blank means active.
 - **Notes** — free text, ignored by the bot.
 
-The bot fills the remaining columns after every live run: posts scanned, listings added, match rate, last added, last scan, and a status (OK / not a member of the group / no posts found / waiting for first scan). A group listed twice under different link shapes is merged into its first row and the copy is dropped. The tab is mirrored into the local DB, so a run still works if the sheet can't be reached.
+The bot fills the remaining columns after every live run: posts scanned, listings added, match rate, last added, last scan, and a status (OK / not a member of the group / no posts found / waiting for first scan). `--sync-groups` (or `/sync_groups` from Telegram) also sorts the rows by match rate, best first, with never-scanned groups last; the syncs during a scan keep your order. A group listed twice under different link shapes is merged into its first row and the copy is dropped. The tab is mirrored into the local DB, so a run still works if the sheet can't be reached.
 
 `TARGET_URLS` in `config.py` only seeds the tab the first time it's empty.
 
@@ -293,9 +294,9 @@ Results are cached per address; a failed lookup is retried on the next run rathe
 
 ## Telegram (optional)
 
-Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match is pushed to your chat with a 🟢/🟡/🔴 score tier, the total monthly cost, and buttons to open the post, open the address in Google Maps (when the street is known), and message the poster on WhatsApp (when the post has a mobile number — the bot itself never messages anyone). A Telegram outage never breaks a scrape: the match is already in the sheet, and the alert is re-sent on the next run (within 48 hours).
+Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match is pushed to your chat with a 🟢/🟡/🔴 score tier, the total monthly cost, and buttons to open the post, open the address in Google Maps (when the street is known), and message the poster on WhatsApp (when the post has a mobile number — the bot itself never messages anyone). Each alert names its source (`📰 מקור: פייסבוק` / `יד2`), and a free distance estimate is marked as one: `🚶 ~1.2 ק"מ הליכה (הערכה, ±0.4)`. A Telegram outage never breaks a scrape: the match is already in the sheet, and the alert is re-sent on the next run (within 48 hours).
 
-The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts.
+The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts. The run-started message turns into a live progress bar while groups scan (`⏳ ▓▓▓▓░░░░ 23/54 קבוצות · 4 נוספו · עוד ~15 דק'`); the time left blends the previous run's pace with this run's, trusting this run's more as groups finish.
 
 **Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>\run_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu):
 
