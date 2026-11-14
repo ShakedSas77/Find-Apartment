@@ -144,3 +144,18 @@ def test_the_map_page_places_the_located_listings(basic_user):
 def _map_page():
     from webapp import views
     views.map_page()
+
+
+def test_saving_a_google_maps_key_turns_maps_on(basic_user, monkeypatch):
+    monkeypatch.setattr(config, "GMAPS_ENABLED", False)
+    monkeypatch.setenv("GMAPS_API_KEY", "old")  # so the key save_secrets sets is undone after the test
+    at = AppTest.from_function(_maps_section, default_timeout=60).run()
+    at.text_input(key="maps_key").set_value("AIza-test")
+    at.button[0].click().run()
+
+    assert "GMAPS_ENABLED = True" in (basic_user / "config_local.py").read_text(encoding="utf-8")
+
+
+def _maps_section():
+    from webapp import components
+    components.maps_section(False)

@@ -190,20 +190,16 @@ def settings_page():
     with st.expander("📘 פייסבוק"):
         components.facebook_section(locked)
     with st.expander("📂 איפה התוצאות נשמרות"):
-        if config.OUTPUT_BACKEND == "excel":
-            st.write(f"בקובץ Excel: `{scan_runner.PROJECT_DIR / config.EXCEL_PATH}`")
-        else:
-            st.write("ב-Google Sheet.")
-        st.caption("מעבר בין Excel ל-Google Sheet: `venv\\Scripts\\python setup_wizard.py --add results` (מדריך: docs/user-guide.md, תוסף D)")
-    with st.expander("🧩 תוספים"):
-        add_ons = [("טלגרם — כל דירה חדשה לטלפון", config.TELEGRAM_ENABLED, "telegram"),
-                   ("התראות יד2 מהמייל", config.ALERTS_SCAN_ENABLED, "yad2"),
-                   ("מסלולי הליכה של Google Maps", config.GMAPS_ENABLED, "maps"),
-                   ("סריקות יומיות אוטומטיות", None, "schedule")]
-        for label, enabled, step in add_ons:
-            state = "" if enabled is None else ("✅ פעיל" if enabled else "⚪ כבוי")
-            st.markdown(f"**{label}** {state} — `venv\\Scripts\\python setup_wizard.py --add {step}`")
-        st.caption("פירוט שלב-אחר-שלב לכל תוסף: docs/user-guide.md, חלק 3.")
+        components.sheets_section(locked)
+    st.subheader("🧩 תוספים")
+    with st.expander("📱 טלגרם"):
+        components.telegram_section(locked)
+    with st.expander("🕒 סריקות אוטומטיות"):
+        components.schedule_section(locked)
+    with st.expander("📧 מיילים של יד2"):
+        components.yad2_section(locked)
+    with st.expander("🗺 מסלולי הליכה של Google Maps"):
+        components.maps_section(locked)
 
 
 def stats_page():
