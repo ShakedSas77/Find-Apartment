@@ -17,6 +17,21 @@ from integrations.sheets import open_spreadsheet
 from webapp import components, data
 
 _CACHE_S = 60
+_LOG_MAX_LINES = 1500
+_TOOL_TIMEOUT_S = 1800
+_TOOL_OUTPUT_CHARS = 6000
+# (button, command, what it does) for the Tools page.
+_MAINTENANCE = [
+    ("💾 גיבוי עכשיו", ["backup_db.py"], "עותק של מסד הנתונים בתיקייה backups (נשמרים 14 האחרונים)"),
+    ("🧹 ניקוי דירות ישנות", ["apartment_bot.py", "--prune"],
+     "מוחק מהתוצאות דירות שפורסמו לפני יותר מ-14 יום ומאחד כפילויות"),
+    ("🔁 בדיקה חוזרת של פוסטים שנדחו", ["apartment_bot.py", "--reparse-rejected"],
+     "מריץ שוב את הסינון על פוסטים שנדחו על מחיר/חדרים/מרחק — שימושי אחרי שינוי תקציב. משתמש ב-AI שבחרתם"),
+    ("🧮 חישוב מחדש של הציונים", ["apartment_bot.py", "--recompute-scores"],
+     "מחשב מחדש את ציון ההתאמה והעלות הכוללת לכל הדירות"),
+    ("🔄 סנכרון ומיון הקבוצות", ["apartment_bot.py", "--sync-groups"],
+     "מעדכן את לשונית הקבוצות וממיין לפי אחוז התאמה"),
+]
 
 
 @st.cache_data(ttl=_CACHE_S, show_spinner="טוען את הדירות...")
@@ -87,7 +102,7 @@ def _filtered(frame: pd.DataFrame, key: str, more: bool = False) -> pd.DataFrame
                                       key=f"{key}_sources")
         text = cols[4].text_input("חיפוש בכתובת", key=f"{key}_text")
         left, right = st.columns([2, 1])
-        statuses = left.multiselect("מעקב", [label for label in data.STATUS_LABELS.values() if label],
+        statuses = left.multiselect("מעקב", list(data.STATUS_LABELS.values()),
                                     placeholder="הכול", key=f"{key}_statuses")
         hide_not_relevant = right.checkbox("הסתרת הלא רלוונטיות", value=True, key=f"{key}_hide")
         min_score = max_age_days = None
@@ -226,6 +241,37 @@ def settings_page():
         components.yad2_section(locked)
     with st.expander("🗺 מסלולי הליכה של Google Maps"):
         components.maps_section(locked)
+
+
+def tools_page():
+    st.title("🛠 כלים")
+    st.subheader("יומני סריקה")
+    runs = [r for r in storage.get_recent_runs(30) if r.get("log_path")]
+    if not runs:
+        st.caption("עוד אין סריקות.")
+    else:
+        run = st.selectbox("סריקה", runs, format_func=_run_label)
+        only_problems = st.checkbox("רק שגיאות ואזהרות", value=False)
+        lines = data.log_lines(scan_runner.PROJECT_DIR / run["log_path"], only_problems)
+        if lines is None:
+            st.caption("קובץ היומן כבר נמחק (נשמרים 14 יום).")
+        else:
+            st.caption(f"{run.get('errors') or 0} שגיאות · {run.get('warnings') or 0} אזהרות · {len(lines)} שורות")
+            st.code("\n".join(lines[-_LOG_MAX_LINES:]) or "(ריק)", language=None, height=400)
+    st.subheader("תחזוקה")
+    locked = components.edits_locked()
+    for label, args, help_text in _MAINTENANCE:
+        if st.button(label, help=help_text, disabled=locked, key=f"tool_{label}"):
+            with st.spinner(f"{label}..."):
+                code, stdout, stderr = scan_runner.run_cli(args, timeout_s=_TOOL_TIMEOUT_S)
+            (st.success if code == 0 else st.error)(f"{label}: {'הסתיים' if code == 0 else f'נכשל (קוד {code})'}")
+            st.code(((stdout + stderr).strip() or "(אין פלט)")[-_TOOL_OUTPUT_CHARS:], language=None)
+
+
+def _run_label(run: dict) -> str:
+    kind = data.RUN_TYPES.get(run["mode"], "ניסיון" if run["mode"].startswith("dry_run") else run["mode"])
+    return (f"{run['started_at'].replace('T', ' ')[:16]} · {kind} · "
+            f"{data.RUN_STATUSES.get(run['status'], run['status'])} · {run.get('added') or 0} נוספו")
 
 
 def stats_page():

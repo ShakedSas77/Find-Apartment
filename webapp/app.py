@@ -24,6 +24,8 @@ from webapp import components, data, views  # noqa: E402
 _RTL_CSS = """<style>
 .stApp, .stMarkdown, .stTextInput, .stNumberInput, .stRadio, .stSelectbox, .stMultiSelect, .stTextArea,
 [data-testid="stSidebar"], [data-testid="stExpander"], [data-testid="stMetric"] { direction: rtl; text-align: right; }
+/* Logs and command output are English: keep them left-to-right. */
+[data-testid="stCode"], [data-testid="stCode"] * { direction: ltr; text-align: left; }
 </style>"""
 
 st.set_page_config(page_title="מחפש דירות", page_icon="🏠", layout="wide")
@@ -37,6 +39,7 @@ else:
     page = st.navigation([results, st.Page(views.map_page, title="מפה", icon="🗺"),
                           st.Page(views.groups_page, title="קבוצות", icon="👥"),
                           st.Page(views.settings_page, title="הגדרות", icon="⚙️"),
-                          st.Page(views.stats_page, title="סטטיסטיקה", icon="📊")])
+                          st.Page(views.stats_page, title="סטטיסטיקה", icon="📊"),
+                          st.Page(views.tools_page, title="כלים", icon="🛠")])
     components.scan_panel()
 page.run()

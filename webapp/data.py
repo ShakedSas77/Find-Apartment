@@ -24,7 +24,7 @@ RUN_STATUSES = {"ok": "✅ הצליחה", "running": "⏳ רצה", "stopped": "�
 SOURCE = "מקור"
 STATUS, NOTE = "מעקב", "הערה"
 # storage.TRACKING_STATUSES as the app shows them; "" = not marked yet.
-STATUS_LABELS = {"": "", "interested": "⭐ מעניינת", "contacted": "📞 פניתי", "visited": "👀 ראיתי",
+STATUS_LABELS = {"": "—", "interested": "⭐ מעניינת", "contacted": "📞 פניתי", "visited": "👀 ראיתי",
                  "not_relevant": "❌ לא רלוונטית"}
 STATUS_KEYS = {label: key for key, label in STATUS_LABELS.items()}
 MAPS = "מפה"
@@ -65,7 +65,7 @@ def listings_frame(tabs: list[tuple[str, list[list[str]]]]) -> pd.DataFrame:
 def with_tracking(frame: pd.DataFrame, tracking: dict[str, dict]) -> pd.DataFrame:
     """Adds the user's status (as its label) and note for each listing (storage.get_listing_tracking())."""
     frame = frame.copy()
-    frame[STATUS] = frame["לינק למודעה"].map(lambda url: STATUS_LABELS.get(tracking.get(url, {}).get("status", ""), ""))
+    frame[STATUS] = frame["לינק למודעה"].map(lambda url: STATUS_LABELS[tracking.get(url, {}).get("status", "")])
     frame[NOTE] = frame["לינק למודעה"].map(lambda url: tracking.get(url, {}).get("note", ""))
     return frame
 
@@ -73,7 +73,7 @@ def with_tracking(frame: pd.DataFrame, tracking: dict[str, dict]) -> pd.DataFram
 def tracking_changes(before: pd.DataFrame, after: pd.DataFrame) -> list[tuple[str, str, str]]:
     """(url, status key, note) for each row whose status or note was edited in the table."""
     changed = (before[STATUS] != after[STATUS]) | (before[NOTE].fillna("") != after[NOTE].fillna(""))
-    return [(row["לינק למודעה"], STATUS_KEYS.get(row[STATUS] or "", ""), row[NOTE] or "")
+    return [(row["לינק למודעה"], STATUS_KEYS.get(row[STATUS] or "—", ""), row[NOTE] or "")
             for _, row in after[changed].iterrows()]
 
 
@@ -122,6 +122,15 @@ def groups_frame(groups: list[dict], overview: dict[str, dict]) -> pd.DataFrame:
     rows = [[g["url"], g["name"] or overview.get(g["url"], {}).get("name", ""), g["active"]]
             + stats_cells(overview.get(g["url"], {})) for g in groups]
     return pd.DataFrame(rows, columns=["url", "name", "active"] + GROUP_HEADERS[5:])
+
+
+def log_lines(path, only_problems: bool = False) -> list[str] | None:
+    """A scan log's lines (only the ERROR/WARNING ones if asked), or None once the file was pruned."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    return [line for line in lines if "ERROR" in line or "WARNING" in line] if only_problems else lines
 
 
 def setup_missing() -> list[str]:

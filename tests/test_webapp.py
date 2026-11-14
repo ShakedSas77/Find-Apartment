@@ -188,3 +188,27 @@ def test_tracking_is_kept_in_the_database(basic_user):
     storage.set_listing_tracking("https://f/1", "interested", "לבקר ביום ראשון")
 
     assert storage.get_listing_tracking()["https://f/1"] == {"status": "interested", "note": "לבקר ביום ראשון"}
+
+
+def test_the_log_view_can_show_only_errors_and_warnings(tmp_path):
+    log = tmp_path / "bot.log"
+    log.write_text("[10:00:00] Scanning group 1\n[10:00:05] WARNING: slow\n[10:00:09] done\n", encoding="utf-8")
+
+    assert data.log_lines(log, only_problems=True) == ["[10:00:05] WARNING: slow"]
+
+
+def test_a_pruned_log_reads_as_missing(tmp_path):
+    assert data.log_lines(tmp_path / "gone.log") is None
+
+
+def test_the_tools_page_shows_the_last_runs_log(basic_user):
+    (basic_user / "bot.log").write_text("[10:00:00] Scanning group 1\n", encoding="utf-8")
+    run_id = storage.start_run("live", str(basic_user / "bot.log"))
+    storage.finish_run(run_id, "ok", {}, 0, 0)
+
+    assert "Scanning group 1" in AppTest.from_function(_tools_page, default_timeout=60).run().code[0].value
+
+
+def _tools_page():
+    from webapp import views
+    views.tools_page()
