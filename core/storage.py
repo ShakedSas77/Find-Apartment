@@ -168,6 +168,14 @@ def init_db():
                 log_path TEXT
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS listing_tracking (
+                url TEXT PRIMARY KEY,
+                status TEXT,
+                note TEXT,
+                updated_at TEXT
+            )
+        """)
 
         existing_columns = {
             row["name"]
@@ -804,6 +812,27 @@ def get_run_activity(since: str) -> dict:
         "models": {row["model_used"]: row["n"] for row in models},
         "added": [dict(row) for row in added],
     }
+
+
+# What the user did about a listing (web app): blank = not looked at yet.
+TRACKING_STATUSES = ("interested", "contacted", "visited", "not_relevant")
+
+
+def set_listing_tracking(url: str, status: str, note: str):
+    """The user's status (one of TRACKING_STATUSES, or "") and note for a listing."""
+    with _lock, _connect() as conn:
+        conn.execute(
+            "INSERT INTO listing_tracking (url, status, note, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(url) DO UPDATE SET status = excluded.status, note = excluded.note, updated_at = excluded.updated_at",
+            (url, status, note, datetime.now().isoformat(timespec="seconds")),
+        )
+
+
+def get_listing_tracking() -> dict[str, dict]:
+    """url -> {status, note} for every listing the user has marked."""
+    with _lock, _connect() as conn:
+        rows = conn.execute("SELECT url, status, note FROM listing_tracking").fetchall()
+    return {row["url"]: {"status": row["status"] or "", "note": row["note"] or ""} for row in rows}
 
 
 def get_added_per_day(days: int) -> dict[str, int]:

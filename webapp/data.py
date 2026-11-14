@@ -22,6 +22,11 @@ RUN_STATUSES = {"ok": "✅ הצליחה", "running": "⏳ רצה", "stopped": "�
                 "no_groups_scanned": "⚠️ אף קבוצה", "login_required": "🔑 צריך להתחבר", "crashed": "❌ נכשלה"}
 
 SOURCE = "מקור"
+STATUS, NOTE = "מעקב", "הערה"
+# storage.TRACKING_STATUSES as the app shows them; "" = not marked yet.
+STATUS_LABELS = {"": "", "interested": "⭐ מעניינת", "contacted": "📞 פניתי", "visited": "👀 ראיתי",
+                 "not_relevant": "❌ לא רלוונטית"}
+STATUS_KEYS = {label: key for key, label in STATUS_LABELS.items()}
 MAPS = "מפה"
 LAT, LON = "lat", "lon"
 PRICE, ROOMS, DISTANCE, SCORE = "מחיר", "חדרים", 'מרחק הליכה (ק"מ)', "ציון התאמה"
@@ -57,12 +62,32 @@ def listings_frame(tabs: list[tuple[str, list[list[str]]]]) -> pd.DataFrame:
     return frame
 
 
+def with_tracking(frame: pd.DataFrame, tracking: dict[str, dict]) -> pd.DataFrame:
+    """Adds the user's status (as its label) and note for each listing (storage.get_listing_tracking())."""
+    frame = frame.copy()
+    frame[STATUS] = frame["לינק למודעה"].map(lambda url: STATUS_LABELS.get(tracking.get(url, {}).get("status", ""), ""))
+    frame[NOTE] = frame["לינק למודעה"].map(lambda url: tracking.get(url, {}).get("note", ""))
+    return frame
+
+
+def tracking_changes(before: pd.DataFrame, after: pd.DataFrame) -> list[tuple[str, str, str]]:
+    """(url, status key, note) for each row whose status or note was edited in the table."""
+    changed = (before[STATUS] != after[STATUS]) | (before[NOTE].fillna("") != after[NOTE].fillna(""))
+    return [(row["לינק למודעה"], STATUS_KEYS.get(row[STATUS] or "", ""), row[NOTE] or "")
+            for _, row in after[changed].iterrows()]
+
+
 def filter_listings(frame: pd.DataFrame, max_price: float | None = None, min_rooms: float | None = None,
                     max_km: float | None = None, sources: list[str] | None = None, text: str = "",
-                    min_score: float | None = None, max_age_days: int | None = None) -> pd.DataFrame:
+                    min_score: float | None = None, max_age_days: int | None = None,
+                    statuses: list[str] | None = None, hide_not_relevant: bool = False) -> pd.DataFrame:
     """Rows within every given limit. A blank price, distance or post date is kept — unknown isn't out
     of range, the same rule the scan uses."""
     keep = pd.Series(True, index=frame.index)
+    if statuses:
+        keep &= frame[STATUS].isin(statuses)
+    if hide_not_relevant:
+        keep &= frame[STATUS] != STATUS_LABELS["not_relevant"]
     if min_score is not None:
         keep &= frame[SCORE] >= min_score
     if max_age_days is not None:

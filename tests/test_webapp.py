@@ -159,3 +159,32 @@ def test_saving_a_google_maps_key_turns_maps_on(basic_user, monkeypatch):
 def _maps_section():
     from webapp import components
     components.maps_section(False)
+
+
+def test_a_marked_listing_shows_its_status_label():
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1")])])
+
+    tracked = data.with_tracking(frame, {"https://f/1": {"status": "contacted", "note": ""}})
+
+    assert tracked[data.STATUS].iloc[0] == data.STATUS_LABELS["contacted"]
+
+
+def test_not_relevant_listings_can_be_hidden():
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1"), _row("https://f/2")])])
+    tracked = data.with_tracking(frame, {"https://f/1": {"status": "not_relevant", "note": ""}})
+
+    assert list(data.filter_listings(tracked, hide_not_relevant=True)["לינק למודעה"]) == ["https://f/2"]
+
+
+def test_an_edited_status_is_reported_as_a_change_to_save():
+    frame = data.with_tracking(data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1")])]), {})
+    edited = frame.copy()
+    edited.loc[edited.index[0], data.STATUS] = data.STATUS_LABELS["visited"]
+
+    assert data.tracking_changes(frame, edited) == [("https://f/1", "visited", "")]
+
+
+def test_tracking_is_kept_in_the_database(basic_user):
+    storage.set_listing_tracking("https://f/1", "interested", "לבקר ביום ראשון")
+
+    assert storage.get_listing_tracking()["https://f/1"] == {"status": "interested", "note": "לבקר ביום ראשון"}

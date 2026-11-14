@@ -35,8 +35,13 @@ def results_page():
     sort_by = st.radio("מיון", [data.SCORE, data.POST_DATE, data.PRICE, data.DISTANCE], horizontal=True)
     if sort_by != data.POST_DATE:  # the file itself is kept newest post first
         shown = shown.sort_values(sort_by, ascending=sort_by != data.SCORE, na_position="last")
-    st.caption(f"{len(shown)} מתוך {len(frame)} דירות")
-    _listings_table(shown, height=600)
+    st.caption(f"{len(shown)} מתוך {len(frame)} דירות · אפשר לסמן כל דירה בעמודת המעקב ולהוסיף הערה")
+    edited = _listings_table(shown, height=600, editable=True)
+    changes = data.tracking_changes(shown, edited)
+    for url, status, note in changes:
+        storage.set_listing_tracking(url, status, note)
+    if changes:
+        st.toast("נשמר")
     left, right = st.columns(2)
     if left.button("🔄 רענון"):
         _listings.clear()
@@ -68,6 +73,7 @@ def map_page():
 
 def _filtered(frame: pd.DataFrame, key: str, more: bool = False) -> pd.DataFrame:
     """The filter bar both listing pages share; the map adds fit score and how recent the post is."""
+    frame = data.with_tracking(frame, storage.get_listing_tracking())
     with st.container(border=True):
         cols = st.columns([1, 1, 1, 1.4, 1.4])
         prices = frame[data.PRICE].dropna()
@@ -80,18 +86,29 @@ def _filtered(frame: pd.DataFrame, key: str, more: bool = False) -> pd.DataFrame
         sources = cols[3].multiselect("מקור", sorted(frame[data.SOURCE].unique()), placeholder="הכול",
                                       key=f"{key}_sources")
         text = cols[4].text_input("חיפוש בכתובת", key=f"{key}_text")
+        left, right = st.columns([2, 1])
+        statuses = left.multiselect("מעקב", [label for label in data.STATUS_LABELS.values() if label],
+                                    placeholder="הכול", key=f"{key}_statuses")
+        hide_not_relevant = right.checkbox("הסתרת הלא רלוונטיות", value=True, key=f"{key}_hide")
         min_score = max_age_days = None
         if more:
             left, right = st.columns(2)
             min_score = left.slider("ציון התאמה מינימלי", 0, 100, 0, key=f"{key}_score") or None
             max_age_days = right.slider("פורסמו ב-X הימים האחרונים", 1, config.MAX_POST_AGE_DAYS,
                                         config.MAX_POST_AGE_DAYS, key=f"{key}_days")
-    return data.filter_listings(frame, max_price, min_rooms, max_km, sources, text, min_score, max_age_days)
+    return data.filter_listings(frame, max_price, min_rooms, max_km, sources, text, min_score, max_age_days,
+                                statuses, hide_not_relevant)
 
 
-def _listings_table(frame: pd.DataFrame, height: int):
-    st.dataframe(
-        frame[["לינק למודעה", data.SCORE, data.PRICE, data.ROOMS, data.DISTANCE, "דיוק מרחק", data.ADDRESS, data.MAPS,
+def _listings_table(frame: pd.DataFrame, height: int, editable: bool = False) -> pd.DataFrame:
+    """The listings as a table; editable=True lets the tracking status and note be changed (returns the edits)."""
+    show = st.data_editor if editable else st.dataframe
+    # Keyed by the rows shown: the table keeps edits by row position, so a filter change must start a
+    # fresh table rather than apply an old edit to whichever listing now sits in that row.
+    extra = {"disabled": [c for c in frame.columns if c not in (data.STATUS, data.NOTE)],
+             "key": f"listings_{hash(tuple(frame['לינק למודעה']))}"} if editable else {}
+    return show(
+        frame[[data.STATUS, data.NOTE, "לינק למודעה", data.SCORE, data.PRICE, data.ROOMS, data.DISTANCE, "דיוק מרחק", data.ADDRESS, data.MAPS,
                "עלות חודשית כוללת", "תאריך כניסה", "קומה", "מעלית", "חניה", 'ממ"ד/מקלט', "תיווך/פרטי",
                data.POST_DATE, data.SOURCE]],
         hide_index=True, width="stretch", height=height,
@@ -101,7 +118,9 @@ def _listings_table(frame: pd.DataFrame, height: int):
             data.SCORE: st.column_config.ProgressColumn("ציון", min_value=0, max_value=100, format="%d"),
             data.PRICE: st.column_config.NumberColumn("מחיר", format="₪%d"),
             "עלות חודשית כוללת": st.column_config.NumberColumn("עלות כוללת", format="₪%d"),
-        })
+            data.STATUS: st.column_config.SelectboxColumn("מעקב", options=list(data.STATUS_LABELS.values())),
+            data.NOTE: st.column_config.TextColumn("הערה"),
+        }, **extra)
 
 
 def _map_deck(placed: pd.DataFrame) -> pdk.Deck:
@@ -146,8 +165,15 @@ def _listing_card(listing: dict):
     with st.container(border=True):
         st.markdown(f"**{listing['price']}** · {listing['rooms']} חדרים · ציון {listing['score']} · "
                     f"{listing['distance']} ק\"מ הליכה  \n{listing['address']}")
-        left, right = st.columns(2)
-        left.link_button("פתיחת המודעה", listing["url"])
+        left, middle, right = st.columns([2, 1, 1])
+        tracked = storage.get_listing_tracking().get(listing["url"], {})
+        labels = list(data.STATUS_LABELS.values())
+        status = left.selectbox("מעקב", labels, index=labels.index(data.STATUS_LABELS[tracked.get("status", "")]),
+                                key=f"status_{listing['url']}")
+        if data.STATUS_KEYS[status] != tracked.get("status", ""):
+            storage.set_listing_tracking(listing["url"], data.STATUS_KEYS[status], tracked.get("note", ""))
+            st.toast("נשמר")
+        middle.link_button("פתיחת המודעה", listing["url"])
         if listing.get("maps"):
             right.link_button("Google Maps", listing["maps"])
 
