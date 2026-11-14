@@ -256,7 +256,7 @@ def apartment_page():
         if placed.empty:
             st.caption("הכתובת לא מוקמה במפה.")
         else:
-            st.pydeck_chart(_map_deck(placed, zoom=14), height=330)
+            st.pydeck_chart(_map_deck(placed, zoom=12.5), height=330)
         _price_history(row)
 
     st.subheader("המודעה המלאה")
