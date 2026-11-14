@@ -30,7 +30,8 @@ from core.local_settings import is_saved, save_secrets, save_settings
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
-from sources.fb_scraper import log_in_to_facebook
+from core.errors import LoginRequired
+from sources.fb_scraper import list_my_groups, log_in_to_facebook
 from sources.mail_source import _quote_folder
 
 _PROJECT_DIR = Path(__file__).resolve().parent
@@ -130,10 +131,13 @@ def step_facebook():
     else:
         save_settings({"FACEBOOK_LOGIN": True})
         if ask_yes_no("Open the browser to log in now?", not (_PROJECT_DIR / "chrome_profile").exists()):
-            log_in_to_facebook()
-    print("\nWhich groups? Open each group on Facebook and copy the address bar (facebook.com/groups/...).")
-    print("Paste one link per line; an empty line when done.")
+            print("Log in to Facebook in the window that opens; it closes by itself once you're in.")
+            print("Logged in." if log_in_to_facebook() else "The login window closed before you were logged in.")
     links = []
+    if config.FACEBOOK_LOGIN and ask_yes_no("List the groups you've joined, to pick from?", True):
+        links = _pick_my_groups()
+    print("\nAny other groups? Open each on Facebook and copy the address bar (facebook.com/groups/...).")
+    print("Paste one link per line; an empty line when done.")
     while line := input("> ").strip():
         if canonical_group_url(line):
             links.append(line)
@@ -277,6 +281,26 @@ def _finish():
     print("\nSetup done. Run a scan any time by double-clicking run_bot.bat (or `python apartment_bot.py`).")
     if ask_yes_no("Run the first scan now?", True):
         subprocess.run([sys.executable, "apartment_bot.py"])
+
+
+def _pick_my_groups() -> list[str]:
+    print("Reading your groups from Facebook (about a minute)...")
+    try:
+        groups = list_my_groups()
+    except LoginRequired:
+        print("Not logged in yet - log in first, then run `python setup_wizard.py --add facebook` again.")
+        return []
+    if not groups:
+        print("No groups found.")
+        return []
+    for number, group in enumerate(groups, start=1):
+        print(f"  {number:2}) {'*' if group['looks_like_rentals'] else ' '} {group['name'] or group['url']}")
+    print("(* = looks like an apartment group)")
+    answer = ask("Numbers to add, e.g. 1,3,5 - or 'all*' for every * group, or Enter for none", "none")
+    if answer.strip().lower() == "all*":
+        return [g["url"] for g in groups if g["looks_like_rentals"]]
+    numbers = {int(n) for n in re.findall(r"\d+", answer)}
+    return [g["url"] for number, g in enumerate(groups, start=1) if number in numbers]
 
 
 def _open(url: str):

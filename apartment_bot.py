@@ -21,7 +21,7 @@ from core.evaluate import (
     _content_prefilter, _extract_price_candidates,
 )
 from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
-from sources.fb_scraper import run_scraper
+from sources.fb_scraper import list_my_groups, log_in_to_facebook, run_scraper
 from sources.mail_source import dump_alert_emails
 from core.run_log import start_run_log
 from integrations.groups_sync import sync_groups
@@ -354,7 +354,22 @@ if __name__ == "__main__":
                          help="Scan only this Facebook group (a link from the Groups tab); implies --source fb")
     parser.add_argument("--scheduled", action="store_true",
                          help="Set by the Task Scheduler launcher: skip the run while scheduled scans are paused (/pause in Telegram)")
+    parser.add_argument("--login", action="store_true",
+                         help="Open the bot's browser to log in to Facebook once; it closes by itself when done")
+    parser.add_argument("--list-my-groups", action="store_true",
+                         help="Print the Facebook groups the logged-in account has joined, as JSON (rental-looking first)")
     args = parser.parse_args()
+
+    # Before the key check: the web app's setup runs these before the AI and the rest are chosen.
+    if args.login:
+        sys.exit(0 if log_in_to_facebook() else 1)
+    if args.list_my_groups:
+        try:
+            print(json.dumps(list_my_groups(), ensure_ascii=False))
+        except LoginRequired as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
 
     env.require_env()
     storage.init_db()

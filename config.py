@@ -17,6 +17,10 @@ LLM_PROVIDER = "gemini"
 # False scans public groups without a Facebook account — Facebook shows logged-out visitors little or
 # nothing, and a group behind its login wall is just marked as needing a login.
 FACEBOOK_LOGIN = True
+# How long the one-time Facebook login window (`apartment_bot.py --login`) waits for you to log in.
+LOGIN_WAIT_S = 600
+# Scrolls of Facebook's "your groups" page when listing the groups you've joined (--list-my-groups).
+MY_GROUPS_SCROLLS = 6
 
 # ─── API keys ─────────────────────────────────────────────────────────────────
 # Google Sheets – Service Account JSON key (downloaded from Google Cloud Console)

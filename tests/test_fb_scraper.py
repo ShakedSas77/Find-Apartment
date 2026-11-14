@@ -14,7 +14,7 @@ from sources import fb_scraper
 from sources.fb_scraper import (
     _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _load_scan_pace, _save_scan_pace, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
     _blocked_membership, _new_totals, _progress_line, _read_post_text,
-    _scan_group_page, _scan_groups_sequentially, _scope_group_urls, _tally, _update_old_streak, _yield_scaled_scroll_cap,
+    _scan_group_page, _scan_groups_sequentially, my_groups_from_links, _scope_group_urls, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
 
 _CUTOFF = datetime(2026, 10, 1, 12, 0)
@@ -382,3 +382,23 @@ def test_guest_mode_never_closes_the_login_dialog(guest_mode):
     _scan_group_page(page, "https://www.facebook.com/groups/123", "g", None, set(), headless=True)
 
     assert page.clicks == []
+
+
+def test_my_groups_keeps_each_group_once_with_its_name():
+    links = [["https://www.facebook.com/groups/123/", "דירות להשכרה בגבעתיים\n12 new posts"],
+             ["https://www.facebook.com/groups/123/?ref=bookmarks", ""]]
+
+    assert my_groups_from_links(links) == [{"url": "https://www.facebook.com/groups/123",
+                                            "name": "דירות להשכרה בגבעתיים", "looks_like_rentals": True}]
+
+
+def test_my_groups_skips_facebooks_own_group_pages():
+    links = [["https://www.facebook.com/groups/feed/", "Your feed"], ["https://www.facebook.com/groups/discover/", "Discover"]]
+
+    assert my_groups_from_links(links) == []
+
+
+def test_my_groups_lists_rental_groups_first():
+    links = [["https://www.facebook.com/groups/1/", "Hiking Israel"], ["https://www.facebook.com/groups/2/", "דירות רמת גן"]]
+
+    assert [g["name"] for g in my_groups_from_links(links)] == ["דירות רמת גן", "Hiking Israel"]

@@ -29,7 +29,8 @@ from config import (
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, DEAD_LINK_CHECK_INTERVAL_HOURS, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
     GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME, PROGRESS_TICK_S,
-    SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS, FACEBOOK_LOGIN,
+    SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS, FACEBOOK_LOGIN, LOGIN_WAIT_S,
+    MY_GROUPS_SCROLLS,
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
 from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
@@ -1013,19 +1014,85 @@ def _launch_login_context(p, profile_dir: str, headless: bool):
         **persistent_kwargs
     )
 
-def log_in_to_facebook():
+def log_in_to_facebook(timeout_s: int = LOGIN_WAIT_S) -> bool:
     """
-    Opens the bot's browser profile (chrome_profile/) for a one-time manual Facebook login, and closes
-    it once the feed shows — setup_wizard.py's Facebook step. Scans then reuse the saved session.
+    Opens the bot's browser profile (chrome_profile/) for a one-time manual Facebook login and closes
+    it by itself once the login form is gone — no keypress, so the web app and the wizard can both
+    run it (`apartment_bot.py --login`). Scans then reuse the saved session. False on timeout.
     """
     with sync_playwright() as p:
         context = _launch_login_context(p, os.path.join(os.getcwd(), "chrome_profile"), headless=False)
         try:
             page = context.pages[0] if context.pages else context.new_page()
             _apply_stealth(page)
-            _ensure_logged_in(page, headless=False)
+            try:
+                page.goto("https://www.facebook.com", wait_until="domcontentloaded")
+            except Exception:
+                pass
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                try:
+                    page.wait_for_timeout(2000)
+                    url = page.url
+                except Exception:
+                    return False  # the user closed the window
+                if not _shows_login_wall(page) and "login" not in url and "checkpoint" not in url:
+                    return True
+            return False
         finally:
             _close_context(context)
+
+def list_my_groups() -> list[dict]:
+    """
+    The groups the logged-in account has joined, read from Facebook's "your groups" page (read-only):
+    [{url, name, looks_like_rentals}], rentals first. Raises LoginRequired without a saved session.
+    """
+    with sync_playwright() as p:
+        context = _launch_login_context(p, os.path.join(os.getcwd(), "chrome_profile"), headless=True)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            _apply_stealth(page)
+            try:
+                page.goto("https://www.facebook.com/groups/joins/", wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+            except Exception:
+                pass
+            if _shows_login_wall(page):
+                raise LoginRequired("Not logged in to Facebook - log in first.")
+            for _ in range(MY_GROUPS_SCROLLS):
+                try:
+                    page.mouse.wheel(0, random.randint(SCROLL_STEP_MIN_PX, SCROLL_STEP_MAX_PX))
+                    page.wait_for_timeout(random.randint(1200, 2000))
+                except Exception:
+                    break
+            try:
+                links = page.eval_on_selector_all(
+                    'a[href*="/groups/"]', "els => els.map(e => [e.href, (e.innerText || '').trim()])")
+            except Exception:
+                links = []
+        finally:
+            _close_context(context)
+    return my_groups_from_links(links)
+
+# Paths under /groups/ that are Facebook's own pages, not a group.
+_GROUPS_SECTION_SLUGS = {"feed", "discover", "joins", "create", "notifications", "you", "search", "requests"}
+_RENTAL_NAME_RE = re.compile(r"דיר|השכר|שכירות|שותפ|rent|apartment", re.IGNORECASE)
+
+def my_groups_from_links(links: list[list[str]]) -> list[dict]:
+    """[href, link text] pairs from the "your groups" page -> one entry per group, with its name
+    (the longest first line seen for it), rental-sounding names first."""
+    names: dict[str, str] = {}
+    for href, text in links:
+        url = canonical_group_url(href)
+        if not url or url.rsplit("/", 1)[-1].lower() in _GROUPS_SECTION_SLUGS:
+            continue
+        name = (text or "").splitlines()[0].strip() if text else ""
+        names.setdefault(url, "")
+        if len(name) > len(names[url]):
+            names[url] = name
+    groups = [{"url": url, "name": name, "looks_like_rentals": bool(_RENTAL_NAME_RE.search(name))}
+              for url, name in names.items()]
+    return sorted(groups, key=lambda g: not g["looks_like_rentals"])
 
 def _ensure_logged_in(page, headless: bool):
     print("Opening Facebook...")
