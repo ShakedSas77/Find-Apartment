@@ -37,7 +37,8 @@ _PROJECT_DIR = Path(__file__).resolve().parent
 _CONFIG_LOCAL = _PROJECT_DIR / "config_local.py"
 _ENV_FILE = _PROJECT_DIR / ".env"
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
-_TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
+_TIME_RE = re.compile(r"([01]?\d|2[0-3]):[0-5]\d")
+_TELEGRAM_API ="https://api.telegram.org/bot{token}/{method}"
 _CHAT_WAIT_S = 120
 
 
@@ -205,7 +206,7 @@ def step_schedule():
     times = ask("At what times? (24h, comma separated)", "11:00, 20:00")
     vbs = _PROJECT_DIR / "run_hidden.vbs"
     for at in [t.strip() for t in times.split(",") if t.strip()]:
-        if not re.fullmatch(r"\d{1,2}:\d{2}", at):
+        if not _TIME_RE.fullmatch(at):
             print(f"  '{at}' isn't a time like 20:00 - skipped.")
             continue
         name = f"ApartmentBot {at.replace(':', '')}"
