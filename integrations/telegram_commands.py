@@ -293,7 +293,7 @@ def _stop_scan(send):
 
 def _run_doctor(send):
     send("⏳ בודק את כל השירותים...")
-    stdout, stderr = scan_runner.run_cli(["doctor.py", "--json"])
+    _, stdout, stderr = scan_runner.run_cli(["doctor.py", "--json"])
     try:
         send(format_doctor(json.loads(stdout)))
     except ValueError:
@@ -302,5 +302,5 @@ def _run_doctor(send):
 
 def _run_sync_groups(send):
     send("⏳ מסנכרן את לשונית Groups...")
-    stdout, stderr = scan_runner.run_cli(["apartment_bot.py", "--sync-groups"])
+    _, stdout, stderr = scan_runner.run_cli(["apartment_bot.py", "--sync-groups"])
     send(format_cli_output("sync_groups", (stdout + stderr).strip() or "(אין פלט)"))

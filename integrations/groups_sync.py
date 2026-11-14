@@ -152,7 +152,8 @@ def _yield_sort_key(seen: dict) -> tuple:
     return (not posts, -(added / posts) if posts else 0, -added)
 
 
-def _stats_cells(seen: dict) -> list:
+def stats_cells(seen: dict) -> list:
+    """The bot's columns of a Groups row (posts, added, match %, last added, last scan, status)."""
     posts, added = seen.get("posts", 0), seen.get("added", 0)
     status = _STATUS_TEXT.get(seen.get("status"), "") or ("" if posts else "ממתינה לסריקה ראשונה")
     return [posts, added, f"{100 * added / posts:.1f}%" if posts else "",
@@ -162,7 +163,7 @@ def _stats_cells(seen: dict) -> list:
 def _write_tab(worksheet, groups: list[dict], overview: dict):
     rows = [HEADERS] + [
         [_sheet_safe_cell(v) for v in (g["url"], g["name"], g["cities"], "כן" if g["active"] else "לא", g["notes"])]
-        + _stats_cells(overview.get(g["url"], {}))
+        + stats_cells(overview.get(g["url"], {}))
         for g in groups
     ]
     old_row_count = len(_with_retries(worksheet.get_all_values))

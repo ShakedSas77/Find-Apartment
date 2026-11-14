@@ -22,8 +22,9 @@ echo Installing the bot's browser...
 venv\Scripts\python.exe -m playwright install chromium || goto :failed
 
 echo.
-venv\Scripts\python.exe setup_wizard.py
-pause
+echo Installed. The app opens in your browser for the first-time setup.
+echo (Next time, double-click open_app.bat. For add-ons like Telegram: venv\Scripts\python setup_wizard.py)
+call open_app.bat
 exit /b 0
 
 :no_python

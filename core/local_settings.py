@@ -15,9 +15,10 @@ _CONFIG_LOCAL = _PROJECT_DIR / "config_local.py"
 _ENV_FILE = _PROJECT_DIR / ".env"
 
 
-def save_settings(values: dict, path: Path = _CONFIG_LOCAL):
+def save_settings(values: dict, path: Path | None = None):
     """Sets each NAME = value in config_local.py: an existing assignment (even one spanning several lines)
     is replaced in place, a new one appended; everything else in the file is kept."""
+    path = path or _CONFIG_LOCAL
     text = path.read_text(encoding="utf-8") if path.exists() else (
         '"""Your settings (written by the setup wizard and the web app; gitignored). Anything here overrides config.py."""\n')
     lines = text.splitlines()
@@ -36,8 +37,9 @@ def save_settings(values: dict, path: Path = _CONFIG_LOCAL):
         setattr(config, name, value)
 
 
-def save_secrets(values: dict, path: Path = _ENV_FILE):
+def save_secrets(values: dict, path: Path | None = None):
     """Sets each NAME=value line in .env, replacing an existing one and keeping every other line."""
+    path = path or _ENV_FILE
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
     for name, value in values.items():
         new_line = f"{name}={value}"
@@ -50,8 +52,9 @@ def save_secrets(values: dict, path: Path = _ENV_FILE):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def is_saved(name: str, path: Path = _CONFIG_LOCAL) -> bool:
+def is_saved(name: str, path: Path | None = None) -> bool:
     """Whether config_local.py sets `name`, as opposed to config.py's example value."""
+    path = path or _CONFIG_LOCAL
     if not path.exists():
         return False
     return any(isinstance(target, ast.Name) and target.id == name

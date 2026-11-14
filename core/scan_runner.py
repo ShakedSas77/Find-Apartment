@@ -114,16 +114,16 @@ def scheduled_scan_pid() -> int | None:
     return int(pid)
 
 
-def run_cli(args: list[str], timeout_s: int = _CLI_TIMEOUT_S) -> tuple[str, str]:
-    """(stdout, stderr) of a project script run to completion with this Python."""
+def run_cli(args: list[str], timeout_s: int = _CLI_TIMEOUT_S) -> tuple[int, str, str]:
+    """(exit code, stdout, stderr) of a project script run to completion with this Python; -1 on timeout."""
     try:
         result = subprocess.run(
             [sys.executable, *args], cwd=PROJECT_DIR, env=CHILD_ENV, capture_output=True,
             text=True, encoding="utf-8", errors="replace", timeout=timeout_s, creationflags=NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
-        return "", f"(stopped after {timeout_s} seconds)"
-    return result.stdout, result.stderr
+        return -1, "", f"(stopped after {timeout_s} seconds)"
+    return result.returncode, result.stdout, result.stderr
 
 
 def _watch_exit(process: subprocess.Popen, on_failure):
