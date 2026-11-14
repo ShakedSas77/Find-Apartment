@@ -173,7 +173,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
     Runs a single LLM parsing attempt: walks the Gemini model chain (up to 2
     models per post, so one malformed post can't burn every model's error
     budget), falling back to Ollama once the chain is exhausted or both
-    per-post attempts fail. Returns a raw dict, before schema validation —
+    per-post attempts fail — or straight to Ollama when LLM_PROVIDER is "ollama". Returns a raw dict, before schema validation —
     validation happens at the analyze_post_with_llm level so it applies
     identically to both paths.
     """
@@ -181,7 +181,7 @@ def _get_llm_raw_result(prompt: str) -> dict | None:
 
     if GEMINI_EXHAUSTED:
         _safe_print("[Local Ollama] ")
-    else:
+    elif config.LLM_PROVIDER == "gemini":  # "ollama": no Gemini key, straight to the local model
         models_tried = 0
         while not GEMINI_EXHAUSTED and models_tried < 2:
             with _gemini_lock:

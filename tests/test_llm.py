@@ -144,3 +144,14 @@ def test_ollama_fallback_uses_the_configured_local_model(monkeypatch):
     llm.analyze_post_with_llm("להשכרה 3 חדרים")
 
     assert used == ["aya-expanse:8b"]
+
+
+def test_ollama_provider_never_calls_gemini(monkeypatch):
+    client = _use_client(monkeypatch, [{"rooms": 3.0}])
+    monkeypatch.setattr(llm.config, "LLM_PROVIDER", "ollama")
+    monkeypatch.setattr(llm, "_ensure_ollama_running", lambda: None)
+    monkeypatch.setattr(llm._ollama_client, "chat", lambda **kwargs: {"message": {"content": '{"rooms": 3.0}'}})
+
+    llm.analyze_post_with_llm("להשכרה 3 חדרים")
+
+    assert client.configs == []

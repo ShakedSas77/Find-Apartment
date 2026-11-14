@@ -6,7 +6,7 @@
 :: HOW TO RUN THIS FILE FROM TERMINAL / CMD:
 ::
 :: 1. Open Terminal/CMD and navigate to project directory:
-::    cd "C:\Users\Shaked Sasporta\Documents\antigravity\find apartment"
+::    cd "<the folder you cloned the repo into>"
 ::
 :: 2. Run Options:
 ::

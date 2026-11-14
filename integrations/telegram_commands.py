@@ -49,7 +49,7 @@ _RUN_MODE_LABELS = {"live": "מלאה", "live_fb": "פייסבוק", "live_yad2"
                     "dry_run": "ניסיון", "dry_run_fb": "ניסיון", "dry_run_yad2": "ניסיון", "dry_run_group": "ניסיון"}
 _RUN_STATUS_ICONS = {"ok": "✅", "running": "⏳", "stopped": "⏹", "checkpoint": "⚠️", "no_groups_scanned": "⚠️",
                      "login_required": "🔑", "crashed": "❌"}
-_DOCTOR_ICONS = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
+_DOCTOR_ICONS = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "OFF": "⚪"}
 
 _PROJECT_DIR = Path(__file__).resolve().parent.parent
 _COMMAND_RE = re.compile(r"^/([a-z0-9_]+)(?:@\w+)?(?:\s|$)")

@@ -1,8 +1,21 @@
 """
 === Apartment Bot Settings ===
 
-Edit the values below to tailor the scan to your needs.
+Edit the values below to tailor the scan to your needs — or run `python setup_wizard.py`, which writes
+your answers to config_local.py (gitignored; it overrides anything here).
 """
+
+# ─── Features ─────────────────────────────────────────────────────────────────
+# What the bot uses. The defaults need nothing but an AI (a free Gemini key, or Ollama): results go to a
+# local Excel file. Everything else is an add-on, switched on here (or by the setup wizard) when wanted.
+# Where results go: "excel" (EXCEL_PATH, no setup) or "sheets" (Google Sheets: SHEET_ID in .env + credentials.json).
+OUTPUT_BACKEND = "excel"
+EXCEL_PATH = "listings.xlsx"
+# Who reads the posts: "gemini" (GEMINI_API_KEY in .env, Ollama only as a fallback) or "ollama" (local, no key).
+LLM_PROVIDER = "gemini"
+# False scans public groups without a Facebook account — Facebook shows logged-out visitors little or
+# nothing, and a group behind its login wall is just marked as needing a login.
+FACEBOOK_LOGIN = True
 
 # ─── API keys ─────────────────────────────────────────────────────────────────
 # Google Sheets – Service Account JSON key (downloaded from Google Cloud Console)
@@ -404,7 +417,7 @@ NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
 # ─── Telegram (optional push + voting) ───────────────────────────────────────────
 # Kill switch — bot runs fine with this False and no Telegram env vars set at all.
 # When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
-TELEGRAM_ENABLED = True
+TELEGRAM_ENABLED = False
 
 # Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
 # Fit-score tiers shown as green/yellow/red on a listing's Telegram message (>= GOOD green, >= OK yellow, else red).

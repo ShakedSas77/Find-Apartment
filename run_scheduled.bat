@@ -1,5 +1,5 @@
 @echo off
-cd /d "C:\Users\Shaked Sasporta\Documents\antigravity\find apartment"
+cd /d "%~dp0"
 if not exist logs mkdir logs
 
 for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format yyyy-MM-dd_HHmm"') do set STAMP=%%T

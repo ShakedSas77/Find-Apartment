@@ -30,19 +30,27 @@ except Exception:
     pass
 
 import config
+import env
 from core import storage
 
-PASS, FAIL, WARN = "PASS", "FAIL", "WARN"
+# OFF: a feature that isn't switched on (config.py / config_local.py) — not a fault, just not set up.
+PASS, FAIL, WARN, OFF = "PASS", "FAIL", "WARN", "OFF"
+
+
+def _off(name: str, setting: str, feature: str):
+    return (name, OFF, f"not enabled ({setting})", f"add it with `python setup_wizard.py --add {feature}`")
 
 
 def _check_env():
-    missing = [name for name in ("GEMINI_API_KEY", "GMAPS_API_KEY", "SHEET_ID") if not os.getenv(name)]
+    missing = env.missing_env()
     if missing:
-        return ("env", FAIL, f"missing: {', '.join(missing)}", "add the missing key(s) to .env")
-    return ("env", PASS, "GEMINI_API_KEY / GMAPS_API_KEY / SHEET_ID present", "")
+        return ("env", FAIL, "; ".join(missing), "run `python setup_wizard.py`")
+    return ("env", PASS, "everything the enabled features need is set", "")
 
 
 def _check_credentials_file():
+    if config.OUTPUT_BACKEND != "sheets":
+        return _off("credentials.json", f'OUTPUT_BACKEND = "{config.OUTPUT_BACKEND}"', "sheets")
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.CREDENTIALS_FILE)
     if not os.path.exists(path):
         return ("credentials.json", FAIL, "missing", "download the service-account key from Google Cloud Console")
@@ -55,6 +63,9 @@ def _check_credentials_file():
 
 
 def _check_chrome_profile():
+    if not config.FACEBOOK_LOGIN:
+        return ("chrome_profile/", OFF, "guest mode (FACEBOOK_LOGIN = False): public groups only, no login",
+                "log in with `python setup_wizard.py --add facebook` to read more groups")
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chrome_profile")
     if not os.path.isdir(path):
         return ("chrome_profile/", WARN, "not created yet", "created automatically on the first `--headful` run (manual FB login)")
@@ -78,7 +89,7 @@ def _check_config_local():
         return ("groups", PASS, f"{active} active of {len(groups)} in the Groups tab (last sync)", "")
     if config.TARGET_URLS == placeholder:
         return ("groups", FAIL, "no groups: Groups tab never synced and TARGET_URLS is the placeholder",
-                "add group links to the sheet's Groups tab, then run `python apartment_bot.py --sync-groups`")
+                "add group links with `python setup_wizard.py --add facebook`, or in the Groups tab of your results")
     return ("groups", PASS, f"{len(config.TARGET_URLS)} group URL(s) in config_local.py (seed the Groups tab with --sync-groups)", "")
 
 
@@ -117,6 +128,8 @@ def _check_last_run():
 
 
 def _check_gemini():
+    if config.LLM_PROVIDER != "gemini":
+        return _off("gemini", f'LLM_PROVIDER = "{config.LLM_PROVIDER}"', "ai")
     key = os.getenv("GEMINI_API_KEY")
     if not key:
         return ("gemini", FAIL, "GEMINI_API_KEY missing", "add it to .env")
@@ -148,10 +161,15 @@ def _check_ollama():
         ok = False
     if ok:
         return ("ollama", PASS, f"{_ollama_base()} reachable", "")
+    if config.LLM_PROVIDER == "ollama":
+        return ("ollama", FAIL, f"{_ollama_base()} unreachable, and it's the only AI (LLM_PROVIDER = \"ollama\")",
+                f"install Ollama from https://ollama.com, then `ollama pull {config.OLLAMA_MODEL}`")
     return ("ollama", WARN, f"{_ollama_base()} unreachable", "start Ollama if you rely on the Gemini-quota fallback (`ollama serve`)")
 
 
 def _check_sheets():
+    if config.OUTPUT_BACKEND != "sheets":
+        return ("google_sheets", OFF, f"results go to {config.EXCEL_PATH}", "add Google Sheets with `python setup_wizard.py --add sheets`")
     sheet_id = os.getenv("SHEET_ID")
     if not sheet_id:
         return ("google_sheets", FAIL, "SHEET_ID missing", "add it to .env")
@@ -169,6 +187,8 @@ def _check_sheets():
 
 
 def _check_gmaps():
+    if not config.GMAPS_ENABLED:
+        return ("google_maps", OFF, "free distance estimate (GMAPS_ENABLED = False)", "add it with `python setup_wizard.py --add maps`")
     if not os.getenv("GMAPS_API_KEY"):
         return ("google_maps", FAIL, "GMAPS_API_KEY missing", "add it to .env")
     return ("google_maps", PASS, "key present (not live-tested — shares the monthly quota)", "")
@@ -176,7 +196,7 @@ def _check_gmaps():
 
 def _check_telegram():
     if not config.TELEGRAM_ENABLED:
-        return ("telegram", WARN, "TELEGRAM_ENABLED=False", "optional — set True + TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID in .env to enable")
+        return _off("telegram", "TELEGRAM_ENABLED = False", "telegram")
     from integrations import telegram_notifier
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
