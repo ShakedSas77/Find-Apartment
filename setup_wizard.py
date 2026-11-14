@@ -67,18 +67,23 @@ def step_search():
     settings = {"MIN_ROOMS": min_rooms, "MAX_ROOMS": max_rooms, "MIN_PRICE": min_price, "MAX_PRICE": max_price,
                 "MAX_WALKING_DISTANCE_KM": max_km}
     print("\nWalking distance is measured to one address: your work, a school, a parent's home...")
-    address = ask("Destination address (street and number, city)", config.DESTINATION_ADDRESS)
-    if address != config.DESTINATION_ADDRESS:
+    # config.py's own value is an example, not a default worth keeping: only a saved address is offered.
+    current = config.DESTINATION_ADDRESS if _is_saved("DESTINATION_ADDRESS") else None
+    while True:
+        address = ask("Destination address (street and number, city)", current)
+        if address == current:
+            break
         found = nominatim_geocode(address)
         if found is None:
-            print("Couldn't find that address on the map - keeping the old one. Try again with the city name.")
-        else:
-            lat, lon, _ = found
-            print(f"Found it at {lat:.5f}, {lon:.5f} (https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=17)")
-            if ask_yes_no("Is that the right place?", True):
-                # The south-of cutoff in config.py belongs to the original Tel Aviv destination.
-                settings.update(DESTINATION_ADDRESS=address, DESTINATION_LAT=lat, DESTINATION_LON=lon,
-                                EXCLUDE_SOUTH_OF_LAT=None)
+            print("Couldn't find that address on the map - try writing it differently, with the city name.")
+            continue
+        lat, lon, _ = found
+        print(f"Found it at {lat:.5f}, {lon:.5f} (https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=17)")
+        if ask_yes_no("Is that the right place?", True):
+            # The south-of cutoff in config.py belongs to the original Tel Aviv destination.
+            settings.update(DESTINATION_ADDRESS=address, DESTINATION_LAT=lat, DESTINATION_LON=lon,
+                            EXCLUDE_SOUTH_OF_LAT=None)
+            break
     save_settings(settings)
 
 
@@ -255,6 +260,15 @@ def save_secrets(values: dict, path: Path = _ENV_FILE):
             lines[index] = new_line
         os.environ[name] = value
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _is_saved(name: str, path: Path = _CONFIG_LOCAL) -> bool:
+    """Whether config_local.py sets `name`, as opposed to config.py's example value."""
+    if not path.exists():
+        return False
+    return any(isinstance(target, ast.Name) and target.id == name
+               for node in ast.parse(path.read_text(encoding="utf-8")).body if isinstance(node, ast.Assign)
+               for target in node.targets)
 
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────

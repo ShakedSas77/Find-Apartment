@@ -1,8 +1,50 @@
 # Facebook Apartment Scraper
 
-Scrapes Facebook apartment listing groups, parses each post with an AI model, computes walking distance to a target address, scores each match for fit, and appends matching listings to Google Sheets. Optionally pushes new matches to Telegram.
+Scrapes Facebook apartment listing groups, parses each post with an AI model, computes walking distance to an address you choose, scores each match for fit, and saves the matching listings to an Excel file (or a Google Sheet). Optionally pushes new matches to Telegram and reads Yad2's alert emails too.
 
-Everything runs on free tiers: Gemini's free API quota (with a local Ollama model as fallback), and a free OpenStreetMap distance estimate when Google Maps is off.
+Everything runs on free tiers: Gemini's free API quota (or a local Ollama model, no account at all), and a free OpenStreetMap distance estimate.
+
+## Quick start (Windows)
+
+1. **Download** the code: the green **Code** button on GitHub → **Download ZIP**, then unzip it (or `git clone` it).
+2. **Double-click `install.bat`.** It installs everything into the folder (a private Python environment and the bot's own browser), then starts the setup wizard. Needs Python 3.11+; if it's missing, the installer says how to get it.
+3. **Answer the wizard** (about 5 minutes):
+   - what you're looking for: rooms, rent, and the address to measure walking distance to;
+   - the AI that reads posts: a free Gemini key (it opens the page for you) or Ollama on your PC;
+   - where results go: `listings.xlsx` in the folder, or a Google Sheet;
+   - Facebook: log in once in the bot's browser window (recommended), or no login;
+   - the Facebook group links to scan.
+4. **Run a scan:** double-click `run_bot.bat`. Open `listings.xlsx` to see the apartments, newest post first, each with a fit score; the **Groups** tab shows each group's status.
+
+Change any answer later with `python setup_wizard.py` (or one step: `python setup_wizard.py --add search`). Close `listings.xlsx` in Excel while a scan runs — Excel locks the file; the bot then keeps the new rows and saves them on its next write.
+
+> **Area:** the bot is tuned for Ramat Gan / Givatayim / Tel Aviv — the AI assumes those cities when a post names none, and city names in addresses are matched for those three. It runs anywhere, but outside that area some addresses come out without a city and their distance is skipped.
+
+### Basic setup vs add-ons
+
+| | Needs | Turn on with |
+|---|---|---|
+| **Basic**: Facebook groups → AI → `listings.xlsx` | a free Gemini key, or Ollama | `install.bat` |
+| Google Sheet instead of Excel (open from any device, share it) | a Google Cloud service account | `python setup_wizard.py --add results` |
+| Telegram: each new apartment on your phone, run scans from the chat | a Telegram bot (2 minutes with @BotFather) | `python setup_wizard.py --add telegram` |
+| Yad2 listings, from Yad2's alert emails | a Gmail app password | `python setup_wizard.py --add yad2` |
+| Real Google walking routes instead of the free estimate | a Google Maps key | `python setup_wizard.py --add maps` |
+| Scans every day by themselves | — | `python setup_wizard.py --add schedule` |
+
+`python doctor.py` checks everything that's turned on and marks the rest ⚪ OFF.
+
+### Facebook without logging in
+
+Choosing "no login" makes the bot read groups like a logged-out visitor, with a plain browser and no account. Facebook usually shows logged-out visitors a login wall and no posts; the bot respects it — the group is marked "פייסבוק דורש התחברות" in the Groups tab and skipped, the dialog is never closed or worked around. Expect few or no listings this way; logging in once (`python setup_wizard.py --add facebook`) is the reliable path. The bot only ever reads — it never posts, comments or messages anyone.
+
+### Troubleshooting
+
+- **"close listings.xlsx"** — Excel has the file open; close it, the next write saves the waiting rows.
+- **"Facebook session is gone" / `login_required`** — log in again: `python setup_wizard.py --add facebook`.
+- **A security check (CAPTCHA) from Facebook** — run `run_bot.bat --headful` and solve it in the window.
+- **Post dates missing, or a warning about an unrecognized date format** — the bot reads Facebook's post times in English ("3 hrs", "Yesterday"); set your Facebook account's language to English (Settings → Language and region).
+- **"setup incomplete"** — a turned-on feature is missing its key; the message lists what, or rerun the wizard.
+- **Something else** — `python doctor.py` shows what's wrong and how to fix it; every run also writes a log to `logs\`.
 
 ## Current Filters
 
@@ -21,7 +63,9 @@ Roommate-related posts are disqualified unless the post also mentions a couple (
 
 Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the sheet, **and is a filter**: a listing farther than `MAX_WALKING_DISTANCE_KM` is rejected — but only once a distance has actually been computed. If the address was too vague to geocode confidently, the listing is still added with a blank distance rather than being wrongly rejected as "too far". See [Distance](#distance) for where the number comes from.
 
-## Google Sheets
+## Results (Excel or Google Sheets)
+
+The same tabs and columns either way: `listings.xlsx` (`OUTPUT_BACKEND = "excel"`, the default) or a Google Sheet (`"sheets"`).
 
 ### Main tab (listings)
 
@@ -60,9 +104,9 @@ The bot fills the remaining columns after every live run: posts scanned, listing
 
 `TARGET_URLS` in `config.py` only seeds the tab the first time it's empty.
 
-## Setup
+## Manual setup
 
-This is a from-scratch guide — nothing here comes pre-configured. You'll need: Python 3.10+ and a Facebook account that's already a member of the groups you want scraped. Playwright brings its own Chromium, so no separate Chrome install is needed.
+`install.bat` and `setup_wizard.py` do all of this for you; this section is the same setup by hand, e.g. on Mac/Linux. You'll need Python 3.11+ and, for the logged-in mode, a Facebook account that's a member of the groups you want scraped. Playwright brings its own Chromium, so no separate Chrome install is needed. Only steps 1, 4 and 6 are needed for the basic setup (Excel results); steps 2-3 are for a Google Sheet.
 
 ### 1. Install dependencies
 
@@ -127,7 +171,7 @@ ALERTS_IMAP_PASSWORD=     # a Gmail app password, not your account password
 ALERTS_IMAP_FOLDER=
 ```
 
-The bot refuses to start if `GEMINI_API_KEY`, `SHEET_ID` or `GMAPS_API_KEY` is missing. `credentials.json` and `.env` are both gitignored — never commit them.
+The bot asks only for what the features you turned on need (`GEMINI_API_KEY` with `LLM_PROVIDER = "gemini"`, `SHEET_ID` with `OUTPUT_BACKEND = "sheets"`, `GMAPS_API_KEY` with `GMAPS_ENABLED`, and so on) and lists anything missing. `credentials.json` and `.env` are both gitignored — never commit them.
 
 ### 6. Configure `config.py`
 
@@ -355,7 +399,7 @@ python clean_data.py
 
 Every run writes its console output to `logs/bot_<timestamp>.log` (each line time-stamped, pruned after `LOG_RETENTION_DAYS`) and is recorded in the local DB's run history — `--stats` lists the last 10 runs, and `doctor.py` fails if no live run has succeeded recently, so a scheduled task that silently stopped shows up.
 
-`run_scheduled.bat` is the entry point for Windows Task Scheduler: uses the venv interpreter, starts Ollama if it isn't already running, and passes the exit code through so Task Scheduler's "Last Run Result" reflects success or failure. `run_hidden.vbs` wraps it to run with no visible console window. The first run still has to be manual and headful to seed `chrome_profile/` with a logged-in session.
+`run_scheduled.bat` is the entry point for Windows Task Scheduler: uses the venv interpreter, starts Ollama if it isn't already running, and passes the exit code through so Task Scheduler's "Last Run Result" reflects success or failure. `run_hidden.vbs` wraps it to run with no visible console window. `python setup_wizard.py --add schedule` creates the daily tasks (one per time you give it); the Facebook login (`--add facebook`) has to happen once before, to seed `chrome_profile/` with a logged-in session.
 
 ## Local Persistence (`bot_data.db`)
 

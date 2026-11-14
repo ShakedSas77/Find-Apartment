@@ -406,8 +406,8 @@ DISTANCE_ESTIMATE_ROUTE_ERROR = 0.14
 DISTANCE_ESTIMATE_LOCATION_ERROR_KM = {"straight_line_estimate": 0.05, "street_estimate": 0.3, "area_estimate": 0.7}
 
 # Required by Nominatim's usage policy (https://operations.osmfoundation.org/policies/nominatim/):
-# identify the app and give a contact method.
-NOMINATIM_USER_AGENT = "apartment-bot/1.0 (contact: ssasporta@gmail.com)"
+# identify the app and give a contact method. Put your own email here in config_local.py if you like.
+NOMINATIM_USER_AGENT = "apartment-bot/1.0 (https://github.com/ShakedSas77/Find-Apartment)"
 
 # ─── Telegram (optional push + voting) ───────────────────────────────────────────
 # Kill switch — bot runs fine with this False and no Telegram env vars set at all.
