@@ -10,34 +10,24 @@ time; `--add <step>` runs one step, e.g. to switch on an add-on later.
 """
 import argparse
 import getpass
-import imaplib
-import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import time
 import webbrowser
 from pathlib import Path
 
-import requests
-from google import genai
-
 import config
-from core import storage
+from core import addon_setup, storage
+from core.errors import LoginRequired
 from core.local_settings import is_saved, save_secrets, save_settings
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
-from core.errors import LoginRequired
 from sources.fb_scraper import list_my_groups, log_in_to_facebook
-from sources.mail_source import _quote_folder
 
 _PROJECT_DIR = Path(__file__).resolve().parent
-_SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
-_TIME_RE = re.compile(r"([01]?\d|2[0-3]):[0-5]\d")
-_TELEGRAM_API ="https://api.telegram.org/bot{token}/{method}"
 _CHAT_WAIT_S = 120
 
 
@@ -102,7 +92,7 @@ def step_ai():
     _open("https://aistudio.google.com/app/apikey")
     while True:
         key = ask_secret("Paste the Gemini key", os.getenv("GEMINI_API_KEY"))
-        if _gemini_key_works(key):
+        if addon_setup.gemini_key_works(key):
             break
         print("That key didn't work - check you copied all of it.")
     save_secrets({"GEMINI_API_KEY": key})
@@ -155,22 +145,25 @@ def step_telegram():
     _open("https://t.me/BotFather")
     while True:
         token = ask_secret("Paste the bot token", os.getenv("TELEGRAM_BOT_TOKEN"))
-        me = _telegram(token, "getMe")
+        me = addon_setup.telegram(token, "getMe")
         if me:
             break
         print("Telegram didn't accept that token - copy the whole line BotFather sent.")
     print(f"2. Open your bot (@{me['username']}) and send it any message. For a group chat: add the bot to")
     print("   the group and send a message there.")
-    chat_id = _wait_for_chat(token)
-    if chat_id is None:
+    print(f"   Waiting up to {_CHAT_WAIT_S // 60} minutes for your message...")
+    chat = addon_setup.find_telegram_chat(token, _CHAT_WAIT_S)
+    if chat is None:
         print("No message arrived - run `python setup_wizard.py --add telegram` to try again.")
         return
-    _telegram(token, "sendMessage", {"chat_id": chat_id, "text": "✅ הבוט מחובר — דירות חדשות יגיעו לכאן"})
-    save_secrets({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": str(chat_id)})
+    print(f"   Got it: {chat['title']}")
+    addon_setup.telegram(token, "sendMessage", {"chat_id": chat["id"], "text": "✅ הבוט מחובר — דירות חדשות יגיעו לכאן"})
+    save_secrets({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": str(chat["id"])})
     save_settings({"TELEGRAM_ENABLED": True})
     print("Connected - check the chat for a test message.")
     if ask_yes_no("Also answer chat commands (/scan, /status...) whenever this PC is on?", True):
-        _add_listener_to_startup()
+        addon_setup.add_listener_to_startup()
+        print("The chat listener runs now and starts with Windows. Send /help in the chat.")
 
 
 def step_yad2():
@@ -183,7 +176,7 @@ def step_yad2():
     folder = ask("Gmail label with the Yad2 emails", os.getenv("ALERTS_IMAP_FOLDER") or "INBOX")
     while True:
         password = ask_secret("App password (16 letters)", os.getenv("ALERTS_IMAP_PASSWORD")).replace(" ", "")
-        problem = _mailbox_problem(user, password, folder)
+        problem = addon_setup.mailbox_problem(user, password, folder)
         if not problem:
             break
         print(f"Couldn't read the mailbox: {problem}")
@@ -206,15 +199,9 @@ def step_maps():
 def step_schedule():
     print("Windows can run a scan by itself every day (when the PC is on).")
     times = ask("At what times? (24h, comma separated)", "11:00, 20:00")
-    vbs = _PROJECT_DIR / "run_hidden.vbs"
     for at in [t.strip() for t in times.split(",") if t.strip()]:
-        if not _TIME_RE.fullmatch(at):
-            print(f"  '{at}' isn't a time like 20:00 - skipped.")
-            continue
-        name = f"ApartmentBot {at.replace(':', '')}"
-        result = subprocess.run(["schtasks", "/Create", "/F", "/SC", "DAILY", "/ST", at.zfill(5), "/TN", name,
-                                 "/TR", f'wscript.exe "{vbs}"'], capture_output=True, text=True)
-        print(f"  {name}: {'scheduled' if result.returncode == 0 else result.stderr.strip()}")
+        problem = addon_setup.schedule_scan(at)
+        print(f"  {at}: {problem or 'scheduled'}")
     print("Pause or resume them from Telegram (/pause, /resume), or in Windows' Task Scheduler.")
 
 
@@ -308,20 +295,11 @@ def _open(url: str):
     webbrowser.open(url)
 
 
-def _gemini_key_works(key: str) -> bool:
-    try:
-        return any(True for _ in genai.Client(api_key=key).models.list())
-    except Exception:
-        return False
-
-
 def _set_up_ollama():
-    exe = shutil.which("ollama") or str(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/Ollama/ollama.exe")
-    while not Path(exe).exists() and not shutil.which("ollama"):
+    while not (exe := addon_setup.ollama_exe()):
         print("Ollama isn't installed. Download and install it, then press Enter.")
         _open("https://ollama.com/download/windows")
         input("Press Enter once Ollama is installed... ")
-        exe = shutil.which("ollama") or exe
     print(f"Downloading the AI model ({config.OLLAMA_MODEL}, a few GB - this takes a while once)...")
     subprocess.run([exe, "pull", config.OLLAMA_MODEL])
 
@@ -335,69 +313,24 @@ def _set_up_google_sheet():
     while True:
         source = Path(ask("Path of the downloaded JSON key file", target if target.exists() else None).strip('"'))
         try:
-            email = json.loads(source.read_text(encoding="utf-8"))["client_email"]
+            email = addon_setup.service_account_email(source.read_text(encoding="utf-8"))
+        except OSError:
+            email = None
+        if email:
             break
-        except (OSError, ValueError, KeyError):
-            print("  That isn't a service-account key file - it should be the .json Google downloaded.")
+        print("  That isn't a service-account key file - it should be the .json Google downloaded.")
     if source.resolve() != target.resolve():
         shutil.copyfile(source, target)
     print(f"2. Create a Google Sheet and share it (Editor) with: {email}")
-    while True:
-        match = _SHEET_ID_RE.search(ask("3. Paste the sheet's link"))
-        if match:
-            break
+    while not (sheet_id := addon_setup.sheet_id_from_link(ask("3. Paste the sheet's link"))):
         print("  That isn't a Google Sheets link (docs.google.com/spreadsheets/d/...).")
-    save_secrets({"SHEET_ID": match.group(1)})
+    save_secrets({"SHEET_ID": sheet_id})
     save_settings({"OUTPUT_BACKEND": "sheets"})
     try:
         title = open_spreadsheet().sheet1.title
         print(f"Connected to the sheet (first tab: {title}).")
     except Exception as e:
         print(f"Couldn't open the sheet yet ({e}) - check it's shared with {email}, then run doctor.py.")
-
-
-def _telegram(token: str, method: str, payload: dict | None = None):
-    try:
-        data = requests.post(_TELEGRAM_API.format(token=token, method=method), json=payload or {}, timeout=40).json()
-    except (requests.RequestException, ValueError):
-        return None
-    return data.get("result") if data.get("ok") else None
-
-
-def _wait_for_chat(token: str) -> int | None:
-    print(f"   Waiting up to {_CHAT_WAIT_S // 60} minutes for your message...")
-    deadline = time.time() + _CHAT_WAIT_S
-    while time.time() < deadline:
-        for update in _telegram(token, "getUpdates", {"timeout": 20}) or []:
-            chat = (update.get("message") or update.get("my_chat_member") or {}).get("chat")
-            if chat:
-                print(f"   Got it: {chat.get('title') or chat.get('first_name') or chat['id']}")
-                return chat["id"]
-    return None
-
-
-def _add_listener_to_startup():
-    startup = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/Startup"
-    shortcut = startup / "Apartment bot Telegram listener.lnk"
-    vbs = _PROJECT_DIR / "run_listener_hidden.vbs"
-    script = (f"$s = (New-Object -ComObject WScript.Shell).CreateShortcut('{shortcut}'); "
-              f"$s.TargetPath = 'wscript.exe'; $s.Arguments = '\"{vbs}\"'; "
-              f"$s.WorkingDirectory = '{_PROJECT_DIR}'; $s.Save()")
-    subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True)
-    subprocess.Popen(["wscript.exe", str(vbs)], cwd=_PROJECT_DIR)
-    print("The chat listener runs now and starts with Windows. Send /help in the chat.")
-
-
-def _mailbox_problem(user: str, password: str, folder: str) -> str | None:
-    try:
-        with imaplib.IMAP4_SSL(config.ALERTS_IMAP_HOST) as mailbox:
-            mailbox.login(user, password)
-            status, _ = mailbox.select(_quote_folder(folder), readonly=True)
-            return None if status == "OK" else f"no label named '{folder}'"
-    except imaplib.IMAP4.error as e:
-        return str(e)
-    except OSError as e:
-        return f"network: {e}"
 
 
 if __name__ == "__main__":
