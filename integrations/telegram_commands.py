@@ -216,15 +216,15 @@ def format_problem_groups(groups: list[dict], overview: dict[str, dict]) -> str:
     Active groups that need a hand: not joined, no posts found, never scanned, or at least
     GROUP_YIELD_MIN_HISTORY posts with no match (worth pausing in the Groups tab).
     """
-    sections = {"not_member": [], "no_posts": [], "no_matches": [], "unscanned": []}
+    sections = {"not_member": [], "needs_login": [], "no_posts": [], "no_matches": [], "unscanned": []}
     for group in groups:
         if not group["active"]:
             continue
         seen = overview.get(group["url"], {})
         link = f'<a href="{html.escape(group["url"], quote=True)}">' \
                f'{html.escape(group["name"] or seen.get("name") or group_id(group["url"]))}</a>'
-        if seen.get("status") == "not_member":
-            sections["not_member"].append(link)
+        if seen.get("status") in ("not_member", "needs_login"):
+            sections[seen["status"]].append(link)
         elif seen.get("status") == "no_posts":
             sections["no_posts"].append(link)
         elif not seen.get("last_scanned"):
@@ -233,6 +233,7 @@ def format_problem_groups(groups: list[dict], overview: dict[str, dict]) -> str:
             sections["no_matches"].append(f"{link} ({seen['posts']:,} פוסטים)")
     titles = {
         "not_member": "🚪 לא חבר/ה בקבוצה — להצטרף או להשהות",
+        "needs_login": "🔑 פייסבוק דורש התחברות (מצב אורח)",
         "no_posts": "📭 לא נמצאו פוסטים",
         "no_matches": "🥱 הרבה פוסטים, אף התאמה — כדאי להשהות",
         "unscanned": "⏳ ממתינות לסריקה ראשונה",

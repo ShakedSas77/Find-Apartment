@@ -26,7 +26,8 @@ _COL = {name: i for i, name in enumerate(HEADERS)}
 _INACTIVE_VALUES = {"לא", "no", "false", "0", "x"}
 # The latest scan outcome (storage.set_group_status), as the user should read it.
 _STATUS_TEXT = {"ok": "תקין", "not_member": "לא חבר/ה בקבוצה — יש להצטרף בפייסבוק", "no_posts": "לא נמצאו פוסטים",
-                "pending": "בקשת הצטרפות נשלחה — ממתינה לאישור"}
+                "pending": "בקשת הצטרפות נשלחה — ממתינה לאישור",
+                "needs_login": "פייסבוק דורש התחברות כדי לקרוא את הקבוצה"}
 _GROUP_ID_RE = re.compile(r"[A-Za-z0-9._-]+")
 _TITLE_SUFFIX_RE = re.compile(r"\s*\|\s*Facebook\s*$")
 

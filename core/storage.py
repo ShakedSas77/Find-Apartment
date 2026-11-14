@@ -867,7 +867,8 @@ def get_group_overview() -> dict[str, dict]:
 
 
 def set_group_status(group_url: str, status: str):
-    """The latest scan outcome for a group: "ok", "not_member" (FB shows a Join button and no posts) or "no_posts"."""
+    """The latest scan outcome for a group: "ok", "not_member" (FB shows a Join button and no posts), "pending"
+    (join requested), "no_posts", or "needs_login" (guest mode met Facebook's login wall)."""
     with _lock, _connect() as conn:
         conn.execute(
             "INSERT INTO group_status (group_url, status, updated_at) VALUES (?, ?, ?) "

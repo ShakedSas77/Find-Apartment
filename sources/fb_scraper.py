@@ -29,7 +29,7 @@ from config import (
     MAX_CONCURRENT_GROUPS, GMAPS_MONTHLY_CAP, MAX_POST_AGE_DAYS,
     PRUNE_DEAD_LINKS_ENABLED, DEAD_LINK_CHECK_INTERVAL_HOURS, TELEGRAM_ENABLED, SHEET_HEADERS, BROWSER_LOCALE, ALERT_RETRY_MAX_AGE_HOURS,
     GRAPHQL_CAPTURE_ENABLED, ALERTS_SCAN_ENABLED, YAD2_TAB_NAME, PROGRESS_TICK_S,
-    SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS,
+    SEE_MORE_SETTLE_POLL_MS, SEE_MORE_SETTLE_MAX_MS, SEE_MORE_RETRY_DELAY_MS, FACEBOOK_LOGIN,
 )
 from sources.browser import _CHROME_LAUNCH_ARGS, _apply_stealth, _normalize_user_agent, _is_visible, _dismiss_popups
 from core.util import _safe_print, _checkpoint_lock, _resume_event, _sheet_lock, timed, get_phase_seconds
@@ -320,6 +320,10 @@ def _harvest_new_articles(page, harvested: dict, effective_cutoff: datetime) -> 
 _JOIN_GROUP_RE = re.compile(r"^\s*(?:\+\s*)?(?:Join group|Join Group|הצטרפות לקבוצה|הצטרף לקבוצה)\s*$")
 # Shown instead of Join once a request to join is waiting for an admin's approval.
 _JOIN_PENDING_RE = re.compile(r"^\s*(?:Cancel request|ביטול בקשה|בטל בקשה)\s*$")
+
+def _shows_login_wall(page) -> bool:
+    # Facebook's login form (page or dialog) has the email and password fields.
+    return _is_visible(page.locator('input[name="email"], input[name="pass"]'))
 
 def _blocked_membership(page) -> str | None:
     # "not_member" / "pending" (join requested) when the group shows that button and no posts at all,
@@ -612,8 +616,17 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
             _safe_print(f"    WARNING: [{group_label}] Navigation interrupted by Facebook. Checking for security checkpoints...")
 
         page.wait_for_timeout(3000)
-        _handle_checkpoint_if_present(page, target_url, group_label, headless)
-        _dismiss_popups(page)
+        if not FACEBOOK_LOGIN:
+            # Guest mode reads only what Facebook shows a logged-out visitor. Its login wall is
+            # respected, never closed or worked around: the group is reported as needing a login.
+            # (Before the checkpoint handler, which reads the same login form as a lost session.)
+            if _shows_login_wall(page):
+                storage.set_group_status(target_url, "needs_login")
+                _safe_print(f"    [{group_label}] Facebook asks to log in to see this group - skipped (guest mode).")
+                return stats
+        else:
+            _handle_checkpoint_if_present(page, target_url, group_label, headless)
+            _dismiss_popups(page)
 
         # Captures the group's real display name so a no-city address can later be
         # resolved to a candidate city (see _resolve_ambiguous_city) — page.title()
@@ -662,6 +675,9 @@ def _scan_group_page(page, target_url: str, group_label: str, sheet, seen_urls, 
         # is visible there instead of silently yielding nothing run after run.
         if harvested:
             storage.set_group_status(target_url, "ok")
+        elif not FACEBOOK_LOGIN and _shows_login_wall(page):
+            storage.set_group_status(target_url, "needs_login")
+            _safe_print(f"    [{group_label}] Facebook asked to log in before any post showed - skipped (guest mode).")
         elif _is_visible(page.get_by_role("button", name=_JOIN_GROUP_RE)):
             storage.set_group_status(target_url, "not_member")
             _safe_print(f"    WARNING: [{group_label}] not a member of this group — join it on Facebook so its posts can be read.")
@@ -889,6 +905,9 @@ def _scan_facebook_groups(shuffled_urls: list[str], sheet, seen_urls, headless: 
                           run_message, save_pace: bool, check_dead_links: bool):
     # The pace and the daily dead-link check belong to full scans: one group's pace isn't the
     # whole scan's, and a quick one-group scan shouldn't spend minutes checking every listing link.
+    if not FACEBOOK_LOGIN:
+        _scan_groups_as_guest(shuffled_urls, sheet, seen_urls, headless, live, totals, run_message)
+        return
     profile_dir = os.path.join(os.getcwd(), "chrome_profile")
     storage_state_path = os.path.join(profile_dir, "_session_state.json")
     sequential_mode = MAX_CONCURRENT_GROUPS == 1
@@ -931,6 +950,22 @@ def _scan_facebook_groups(shuffled_urls: list[str], sheet, seen_urls, headless: 
                 _save_scan_pace(progress, totals)
         finally:
             progress.stop()
+
+def _scan_groups_as_guest(shuffled_urls: list[str], sheet, seen_urls, headless: bool, live: bool, totals: dict,
+                          run_message):
+    # FACEBOOK_LOGIN = False: a plain browser with no profile, no account and no stealth patches, one
+    # group at a time — a visitor reading public pages, nothing that would pass for a logged-in user.
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless, args=_CHROME_LAUNCH_ARGS)
+        try:
+            page = browser.new_context(locale=BROWSER_LOCALE, viewport={"width": 1366, "height": 1600}).new_page()
+            progress = _ScanProgress(len(shuffled_urls), totals, run_message)
+            try:
+                _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals, progress=progress)
+            finally:
+                progress.stop()
+        finally:
+            browser.close()
 
 def _new_totals(total_groups: int) -> dict:
     # The one definition of the run-totals shape: run_scraper's return value, which

@@ -14,7 +14,7 @@ from sources import fb_scraper
 from sources.fb_scraper import (
     _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _load_scan_pace, _save_scan_pace, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
     _blocked_membership, _new_totals, _progress_line, _read_post_text,
-    _scan_groups_sequentially, _scope_group_urls, _tally, _update_old_streak, _yield_scaled_scroll_cap,
+    _scan_group_page, _scan_groups_sequentially, _scope_group_urls, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
 
 _CUTOFF = datetime(2026, 10, 1, 12, 0)
@@ -334,3 +334,51 @@ def test_a_one_group_run_accepts_any_link_shape_of_a_listed_group(db):
 def test_a_one_group_run_refuses_a_group_not_in_the_groups_tab(db):
     with pytest.raises(ValueError):
         _scope_group_urls(["https://www.facebook.com/groups/123"], "fb", "https://www.facebook.com/groups/999")
+
+
+class _FakeGuestPage:
+    """A logged-out view of a group: Facebook's login form on top. Records every click."""
+    url = "https://www.facebook.com/groups/123"
+
+    def __init__(self):
+        self.clicks = []
+
+    def goto(self, url, wait_until, timeout):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def locator(self, selector):
+        page = self
+
+        class _Element:
+            first = property(lambda element: element)
+
+            def is_visible(self):
+                return 'name="email"' in selector
+
+            def click(self, timeout=None):
+                page.clicks.append(selector)
+
+        return _Element()
+
+
+@pytest.fixture
+def guest_mode(monkeypatch, db):
+    monkeypatch.setattr(fb_scraper, "FACEBOOK_LOGIN", False)
+    monkeypatch.setattr(fb_scraper, "GRAPHQL_CAPTURE_ENABLED", False)
+
+
+def test_guest_mode_marks_a_group_behind_the_login_wall_as_needing_a_login(guest_mode):
+    _scan_group_page(_FakeGuestPage(), "https://www.facebook.com/groups/123", "g", None, set(), headless=True)
+
+    assert storage.get_group_overview()["https://www.facebook.com/groups/123"]["status"] == "needs_login"
+
+
+def test_guest_mode_never_closes_the_login_dialog(guest_mode):
+    page = _FakeGuestPage()
+
+    _scan_group_page(page, "https://www.facebook.com/groups/123", "g", None, set(), headless=True)
+
+    assert page.clicks == []
