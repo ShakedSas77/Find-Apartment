@@ -574,6 +574,27 @@ _CITY_DISPLAY_RES = [
     (re.compile(r'(?:ב|ל)?תל[\s-]?אביב(?:[\s-]?יפו)?|(?:ב|ל)?ת["״]א\b|(?:ב|ל)?\bתא\b'), "תל אביב"),
 ]
 
+# No-AI mode (LLM_PROVIDER = "none"): only a street the post names after a street word, so a
+# guess is never made. A second word joins the name unless it's clearly the text going on.
+_RULES_STREET_RE = re.compile(r'(?:ב?רחוב|ב?רח[\'’׳]|ב?שדרות|ב?שד[\'’׳])\s+([א-ת][א-ת"״\'’׳-]*)'
+                              r'(?:\s+([א-ת][א-ת"״\'’׳-]*))?(?:\s+(\d{1,3})\b)?')
+_RULES_NOT_STREET_WORDS = {"קומה", "דירה", "ליד", "פינת", "מול", "קרוב", "בין", "עם", "חדרים", "חד", "מרפסת",
+                           "משופצת", "כניסה", "מחיר", "שכירות", "להשכרה", "עד", "של", "גם", "אצלנו"}
+
+
+def street_from_text(text: str) -> str:
+    """'...דירה ברחוב ביאליק 30 ברמת גן...' -> 'ביאליק 30, רמת גן'; '' when the post names no street."""
+    match = _RULES_STREET_RE.search(BIDI_RE.sub("", text or ""))
+    if not match:
+        return ""
+    first, second, number = match.groups()
+    if second and (second in _RULES_NOT_STREET_WORDS or second[0] in "בלו"):
+        second, number = None, None
+    street = " ".join(part for part in (first, second, number) if part)
+    city = next((canonical for city_re, canonical in _CITY_DISPLAY_RES if city_re.search(text)), "")
+    return f"{street}, {city}" if city else street
+
+
 _NEIGHBORHOOD_DISPLAY_RE = re.compile(r'^(?:ב)?שכונ(?:ת|ה)\s+(.+)$')
 
 _CORNER_DISPLAY_RE = re.compile(r'^(.+?)\s+(?:על\s+)?פינת\s+(.+)$')

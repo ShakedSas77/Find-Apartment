@@ -10,7 +10,7 @@ import threading
 from datetime import date, timedelta
 
 import config
-from core import storage
+from core import llm, storage
 import core.evaluate as evaluate
 
 
@@ -333,3 +333,14 @@ def test_an_estimate_far_over_the_limit_is_rejected(monkeypatch):
 
 def test_a_google_distance_just_over_the_limit_is_rejected(monkeypatch):
     assert _verdict_at_distance(monkeypatch, config.MAX_WALKING_DISTANCE_KM + 0.3, "google_maps") == storage.VERDICT_REJECTED_DISTANCE
+
+
+def test_a_post_read_without_ai_is_added_with_the_rules_price_and_rooms(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "bot_data.db")
+    storage.init_db()
+    monkeypatch.setattr(config, "LLM_PROVIDER", "none")
+    text = "להשכרה ברחוב ביאליק 30 ברמת גן, 3 חדרים, 6,000 ₪ לחודש"
+
+    verdict, fields = evaluate._evaluate_post_data(llm.analyze_post_with_llm(text), text)
+
+    assert (verdict, fields["price_val"], fields["rooms_val"]) == (storage.VERDICT_ADDED, 6000.0, 3.0)

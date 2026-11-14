@@ -33,7 +33,7 @@ from config import (
 )
 from prompts import get_apartment_prompt_improved
 from core.util import _safe_print, _with_retries
-from core.normalize import _clean_post_for_llm
+from core.normalize import _clean_post_for_llm, street_from_text
 
 
 class ApartmentData(BaseModel):
@@ -286,6 +286,10 @@ def analyze_post_with_llm(text: str) -> dict | None:
     validation failure both count as one attempt; failure on both -> None
     (verdict parse_failed for the caller).
     """
+    if config.LLM_PROVIDER == "none":
+        # No AI set up: rules read only the street; _evaluate_post_data's regex fallback finds price and rooms.
+        _last_model.name = "rules"
+        return ApartmentData(address=street_from_text(text) or None).model_dump()
     _last_model.name = None
     prompt = get_apartment_prompt_improved(_clean_post_for_llm(text))
     for attempt in range(2):

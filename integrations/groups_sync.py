@@ -84,14 +84,32 @@ def add_groups(spreadsheet, links: list[str]) -> list[str]:
     already listed; a group already there, or a link that isn't a group, is skipped. Returns the
     URLs added. Used by setup_wizard.py.
     """
+    added = []
+
+    def append_new(groups):
+        known = {g["url"] for g in groups}
+        added.extend(url for url in dict.fromkeys(canonical_group_url(link) for link in links) if url and url not in known)
+        return groups + [{"url": url, "name": "", "cities": "", "active": True, "notes": ""} for url in added]
+
+    _edit_groups(spreadsheet, append_new)
+    return added
+
+
+def set_group_active(spreadsheet, url: str, active: bool):
+    """Pauses (active=False writes "לא" in פעיל) or resumes the group with this canonical URL."""
+    _edit_groups(spreadsheet, lambda groups: [dict(g, active=active) if g["url"] == url else g for g in groups])
+
+
+def remove_group(spreadsheet, url: str):
+    """Drops the group's row from the Groups tab. Its posts and stats stay in the local DB."""
+    _edit_groups(spreadsheet, lambda groups: [g for g in groups if g["url"] != url])
+
+
+def _edit_groups(spreadsheet, change):
     worksheet = _groups_worksheet(spreadsheet)
-    groups = parse_group_rows(_with_retries(worksheet.get_all_values)) or storage.get_groups()
-    known = {g["url"] for g in groups}
-    added = [url for url in dict.fromkeys(canonical_group_url(link) for link in links) if url and url not in known]
-    groups += [{"url": url, "name": "", "cities": "", "active": True, "notes": ""} for url in added]
+    groups = change(parse_group_rows(_with_retries(worksheet.get_all_values)) or storage.get_groups())
     storage.replace_groups(groups)
     _write_tab(worksheet, groups, storage.get_group_overview())
-    return added
 
 
 def parse_group_rows(values: list[list[str]]) -> list[dict]:

@@ -155,3 +155,12 @@ def test_ollama_provider_never_calls_gemini(monkeypatch):
     llm.analyze_post_with_llm("להשכרה 3 חדרים")
 
     assert client.configs == []
+
+
+def test_no_ai_mode_reads_a_named_street_without_any_model(monkeypatch):
+    client = _use_client(monkeypatch, [])
+    monkeypatch.setattr(llm.config, "LLM_PROVIDER", "none")
+
+    data = llm.analyze_post_with_llm("להשכרה ברחוב ביאליק 30 ברמת גן, 3 חדרים, 6,000 ₪")
+
+    assert (data["address"], client.configs) == ("ביאליק 30, רמת גן", [])

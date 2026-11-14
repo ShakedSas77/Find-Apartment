@@ -11,7 +11,8 @@ your answers to config_local.py (gitignored; it overrides anything here).
 # Where results go: "excel" (EXCEL_PATH, no setup) or "sheets" (Google Sheets: SHEET_ID in .env + credentials.json).
 OUTPUT_BACKEND = "excel"
 EXCEL_PATH = "listings.xlsx"
-# Who reads the posts: "gemini" (GEMINI_API_KEY in .env, Ollama only as a fallback) or "ollama" (local, no key).
+# Who reads the posts: "gemini" (GEMINI_API_KEY in .env, Ollama only as a fallback), "ollama" (local, no
+# key), or "none" (no AI at all: price, rooms and a named street are read by rules - less accurate).
 LLM_PROVIDER = "gemini"
 # False scans public groups without a Facebook account — Facebook shows logged-out visitors little or
 # nothing, and a group behind its login wall is just marked as needing a login.

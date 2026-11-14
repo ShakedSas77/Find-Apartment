@@ -9,7 +9,6 @@ time; `--add <step>` runs one step, e.g. to switch on an add-on later.
     python setup_wizard.py --add telegram  # one step: search ai results facebook telegram yad2 maps schedule
 """
 import argparse
-import ast
 import getpass
 import imaplib
 import json
@@ -27,6 +26,7 @@ from google import genai
 
 import config
 from core import storage
+from core.local_settings import is_saved, save_secrets, save_settings
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
@@ -34,8 +34,6 @@ from sources.fb_scraper import log_in_to_facebook
 from sources.mail_source import _quote_folder
 
 _PROJECT_DIR = Path(__file__).resolve().parent
-_CONFIG_LOCAL = _PROJECT_DIR / "config_local.py"
-_ENV_FILE = _PROJECT_DIR / ".env"
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _TIME_RE = re.compile(r"([01]?\d|2[0-3]):[0-5]\d")
 _TELEGRAM_API ="https://api.telegram.org/bot{token}/{method}"
@@ -71,7 +69,7 @@ def step_search():
                 "MAX_WALKING_DISTANCE_KM": max_km}
     print("\nWalking distance is measured to one address: your work, a school, a parent's home...")
     # config.py's own value is an example, not a default worth keeping: only a saved address is offered.
-    current = config.DESTINATION_ADDRESS if _is_saved("DESTINATION_ADDRESS") else None
+    current = config.DESTINATION_ADDRESS if is_saved("DESTINATION_ADDRESS") else None
     while True:
         address = ask("Destination address (street and number, city)", current)
         if address == current:
@@ -226,52 +224,6 @@ STEPS = {
     "maps": ("Google Maps walking routes (add-on)", step_maps),
     "schedule": ("Daily automatic scans (add-on)", step_schedule),
 }
-
-
-# ─── Writing the answers ──────────────────────────────────────────────────────
-
-def save_settings(values: dict, path: Path = _CONFIG_LOCAL):
-    """Sets each NAME = value in config_local.py: an existing assignment (even one spanning several lines)
-    is replaced in place, a new one appended; everything else in the file is kept."""
-    text = path.read_text(encoding="utf-8") if path.exists() else (
-        '"""Your settings (written by setup_wizard.py; gitignored). Anything here overrides config.py."""\n')
-    lines = text.splitlines()
-    spans = {target.id: (node.lineno, node.end_lineno)
-             for node in ast.parse(text).body if isinstance(node, ast.Assign)
-             for target in node.targets if isinstance(target, ast.Name)}
-    for name, value in sorted(values.items(), key=lambda item: -spans.get(item[0], (0, 0))[0]):
-        line = f"{name} = {value!r}"
-        if name in spans:
-            start, end = spans[name]
-            lines[start - 1:end] = [line]
-        else:
-            lines.append(line)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    for name, value in values.items():
-        setattr(config, name, value)
-
-
-def save_secrets(values: dict, path: Path = _ENV_FILE):
-    """Sets each NAME=value line in .env, replacing an existing one and keeping every other line."""
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    for name, value in values.items():
-        new_line = f"{name}={value}"
-        index = next((i for i, line in enumerate(lines) if line.split("=", 1)[0].strip() == name), None)
-        if index is None:
-            lines.append(new_line)
-        else:
-            lines[index] = new_line
-        os.environ[name] = value
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _is_saved(name: str, path: Path = _CONFIG_LOCAL) -> bool:
-    """Whether config_local.py sets `name`, as opposed to config.py's example value."""
-    if not path.exists():
-        return False
-    return any(isinstance(target, ast.Name) and target.id == name
-               for node in ast.parse(path.read_text(encoding="utf-8")).body if isinstance(node, ast.Assign)
-               for target in node.targets)
 
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────

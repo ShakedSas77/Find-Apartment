@@ -16,6 +16,7 @@ from core.normalize import (
     _normalize_address_key,
     _first_mobile_phone,
     resolve_entry_date,
+    street_from_text,
 )
 from core.dedupe import (
     _listing_dedupe_key,
@@ -277,3 +278,19 @@ def test_an_english_posts_transliterated_street_is_kept():
     text = "3 room apartment near Rothschild Boulevard, Chlenov 4, 5400 including all the bills"
 
     assert _reject_hallucinated_address("צ'לנוב 4", text) == "צ'לנוב 4"
+
+
+def test_rules_read_a_street_number_and_city():
+    assert street_from_text("דירה ברחוב ביאליק 30 ברמת גן, 3 חדרים") == "ביאליק 30, רמת גן"
+
+
+def test_rules_keep_a_two_word_street_name():
+    assert street_from_text("להשכרה ברח׳ אחד העם 12 גבעתיים") == "אחד העם 12, גבעתיים"
+
+
+def test_rules_stop_the_street_name_before_the_text_goes_on():
+    assert street_from_text("רחוב הרצל קומה 3") == "הרצל"
+
+
+def test_rules_return_nothing_when_no_street_is_named():
+    assert street_from_text("דירה יפה 3 חדרים ליד הפארק") == ""

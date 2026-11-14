@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from core import storage
+from core import scan_runner
 from integrations import telegram_commands
 from integrations.telegram_commands import (
     format_cli_output, format_doctor, format_group_picker, format_new_listings, format_problem_groups, format_stats,
@@ -32,14 +33,14 @@ class _FakeProcess:
 @pytest.fixture(autouse=True)
 def db(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "bot_data.db")
-    monkeypatch.setattr(telegram_commands, "_scan_process", None)
+    monkeypatch.setattr(scan_runner, "_scan_process", None)
     storage.init_db()
 
 
 @pytest.fixture
 def launched(monkeypatch):
     commands = []
-    monkeypatch.setattr(telegram_commands.subprocess, "Popen",
+    monkeypatch.setattr(scan_runner.subprocess, "Popen",
                         lambda args, **kwargs: commands.append(args) or _FakeProcess())
     return commands
 
@@ -67,8 +68,8 @@ def _group(gid, name="", active=True):
 @pytest.fixture
 def killed(monkeypatch):
     commands = []
-    monkeypatch.setattr(telegram_commands.sys, "platform", "win32")
-    monkeypatch.setattr(telegram_commands.subprocess, "run", lambda args, **kwargs: commands.append(args))
+    monkeypatch.setattr(scan_runner.sys, "platform", "win32")
+    monkeypatch.setattr(scan_runner.subprocess, "run", lambda args, **kwargs: commands.append(args))
     return commands
 
 

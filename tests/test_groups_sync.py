@@ -204,3 +204,27 @@ def test_add_groups_skips_a_group_already_listed_under_another_link_shape(db):
     worksheet = FakeWorksheet([groups_sync.HEADERS, [_G1]])
 
     assert groups_sync.add_groups(FakeSpreadsheet(worksheet), [_G1 + "/?ref=share"]) == []
+
+
+def test_pausing_a_group_writes_no_in_its_active_column(db):
+    worksheet = FakeWorksheet([groups_sync.HEADERS, [_G1], [_G2]])
+
+    groups_sync.set_group_active(FakeSpreadsheet(worksheet), _G2, False)
+
+    assert worksheet.written[2][groups_sync.HEADERS.index("פעיל")] == "לא"
+
+
+def test_removing_a_group_drops_its_row(db):
+    worksheet = FakeWorksheet([groups_sync.HEADERS, [_G1], [_G2]])
+
+    groups_sync.remove_group(FakeSpreadsheet(worksheet), _G1)
+
+    assert [row[0] for row in worksheet.written[1:]] == [_G2]
+
+
+def test_added_per_day_counts_only_added_listings(db):
+    storage.record_post("https://x/1", _G1, "text", storage.VERDICT_ADDED)
+    storage.record_post("https://x/2", _G1, "text", storage.VERDICT_ADDED)
+    storage.record_post("https://x/3", _G1, "text", storage.VERDICT_REJECTED_PRICE)
+
+    assert list(storage.get_added_per_day(7).values()) == [2]

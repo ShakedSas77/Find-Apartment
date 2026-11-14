@@ -10,17 +10,13 @@ button.
 """
 import html
 import json
-import os
 import re
-import subprocess
-import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 
 from config import GROUP_YIELD_MIN_HISTORY
-from core import storage
+from core import scan_runner, storage
 from integrations import telegram_notifier
 
 COMMANDS = {
@@ -51,29 +47,16 @@ _RUN_STATUS_ICONS = {"ok": "✅", "running": "⏳", "stopped": "⏹", "checkpoin
                      "login_required": "🔑", "crashed": "❌"}
 _DOCTOR_ICONS = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "OFF": "⚪"}
 
-_PROJECT_DIR = Path(__file__).resolve().parent.parent
 _COMMAND_RE = re.compile(r"^/([a-z0-9_]+)(?:@\w+)?(?:\s|$)")
 # Telegram caps a message at 4096 characters; the rest is room for the <pre> wrapper and the title.
 _OUTPUT_LIMIT = 3500
-_CLI_TIMEOUT_S = 300
 # getUpdates hands over whatever arrived while the listener was down; an old /scan must not fire hours later.
 _STALE_COMMAND_S = 300
-# A run row still "running" after this long was killed without closing it, not a scan in progress.
-_RUNNING_ROW_MAX_AGE = timedelta(hours=2)
-# The scan rewrites its progress every PROGRESS_TICK_S (30s); older than this, it's from a scan that died.
-_PROGRESS_MAX_AGE = timedelta(minutes=3)
 _NEW_LISTINGS_HOURS = 24
 _NEW_LISTINGS_MAX = 15
 # Telegram's callback_data limit is 64 bytes; "sg:" plus a numeric group id fits, a long vanity slug may not.
 _CALLBACK_DATA_MAX_BYTES = 64
 _GROUP_BUTTON_MAX_CHARS = 40
-# The child prints Hebrew and ₪; with stdout not a console, Windows Python would default to cp1252 and crash.
-_CHILD_ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-_scan_lock = threading.Lock()
-_scan_process: subprocess.Popen | None = None
-_stop_requested = False
 
 
 def handle_message(message: dict, allowed_chat_id: str, send):
@@ -114,7 +97,8 @@ def run_command(command: str, send):
     elif command == "stop":
         _stop_scan(send)
     elif command == "status":
-        send(format_status(_running_since(), _last_finished_run(), _fresh_progress(), _paused_since()))
+        send(format_status(scan_runner.running_since(), scan_runner.last_finished_run(), scan_runner.fresh_progress(),
+                           scan_runner.paused_since()))
     elif command == "new":
         since = (datetime.now() - timedelta(hours=_NEW_LISTINGS_HOURS)).isoformat(timespec="seconds")
         send(format_new_listings(storage.get_run_activity(since)["added"]))
@@ -136,7 +120,7 @@ def run_command(command: str, send):
     elif command == "sync_groups":
         threading.Thread(target=_run_sync_groups, args=(send,), daemon=True).start()
     else:
-        send(format_help(), menu_keyboard(bool(_paused_since())))
+        send(format_help(), menu_keyboard(bool(scan_runner.paused_since())))
 
 
 def parse_command(text: str) -> str | None:
@@ -295,109 +279,21 @@ def _run_line(run: dict) -> str:
 
 
 def _start_scan(send, args: list[str], label: str):
-    global _scan_process, _stop_requested
-    with _scan_lock:
-        running_since = _running_since()
-        if running_since:
-            send(f"⏳ סריקה כבר רצה (התחילה {running_since})")
-            return
-        _stop_requested = False
-        _scan_process = subprocess.Popen(
-            [sys.executable, "-u", "apartment_bot.py", *args], cwd=_PROJECT_DIR, env=_CHILD_ENV,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=_NO_WINDOW,
-        )
-        process = _scan_process
+    running = scan_runner.start_scan(
+        args, on_failure=lambda code: send(f"❌ הסריקה נכשלה (קוד {code}) — פרטים בקובץ הלוג בתיקייה logs"))
+    if running:
+        send(f"⏳ סריקה כבר רצה (התחילה {running})")
+        return
     send(f"▶️ מפעיל {label} — הודעת ההתחלה עם ההתקדמות תגיע בעוד רגע")
-    threading.Thread(target=_report_scan_exit, args=(process, send), daemon=True).start()
-
-
-def _report_scan_exit(process: subprocess.Popen, send):
-    # A clean or checkpoint finish already sends its own run-finished message; this covers what
-    # doesn't, e.g. a lost Facebook login (exit 1) failing before the run-started alert.
-    code = process.wait()
-    if code not in (0, 2) and not _stop_requested:
-        send(f"❌ הסריקה נכשלה (קוד {code}) — פרטים בקובץ הלוג בתיקייה logs")
 
 
 def _stop_scan(send):
-    global _stop_requested
-    with _scan_lock:
-        process = _scan_process if _scan_process is not None and _scan_process.poll() is None else None
-        pid = process.pid if process else _scheduled_scan_pid()
-        if pid is None:
-            send("אין סריקה פעילה")
-            return
-        _stop_requested = True
-        _kill_process_tree(pid)
-        if process:
-            process.wait()
-        _close_running_rows()
-    send("⏹ הסריקה נעצרה")
-
-
-def _scheduled_scan_pid() -> int | None:
-    # A scan this listener didn't start (the Task Scheduler's) is known only by the pid apartment_bot.py
-    # recorded with its run id; it counts only while that run's row is still a live "running" one, so a
-    # stale pid (reused by an unrelated process since) is never killed.
-    runs = storage.get_recent_runs(1)
-    recorded = storage.get_bot_state(storage.SCAN_PID_KEY) or ""
-    run_id, _, pid = recorded.partition(":")
-    if not runs or not pid.isdigit() or str(runs[0]["id"]) != run_id:
-        return None
-    started = datetime.fromisoformat(runs[0]["started_at"])
-    if runs[0]["status"] != "running" or datetime.now() - started >= _RUNNING_ROW_MAX_AGE:
-        return None
-    return int(pid)
-
-
-def _kill_process_tree(pid: int):
-    # Playwright's driver and Chromium are child processes; killing only Python would leave them
-    # holding chrome_profile's lock, and the next scan would fail to launch.
-    if sys.platform == "win32":
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], capture_output=True)
-    else:
-        os.kill(pid, 9)
-
-
-def _close_running_rows():
-    # A killed scan never reaches finish_run(); left "running", its row would read as a scan in
-    # progress for the next _RUNNING_ROW_MAX_AGE.
-    for run in storage.get_recent_runs(5):
-        if run["status"] == "running":
-            storage.finish_run(run["id"], "stopped", {}, 0, 0)
-
-
-def _running_since() -> str | None:
-    # A scan started from here, or one the Task Scheduler started (seen only through its run row).
-    if _scan_process is not None and _scan_process.poll() is None:
-        return "מהבוט"
-    for run in storage.get_recent_runs(1):
-        started = datetime.fromisoformat(run["started_at"])
-        if run["status"] == "running" and datetime.now() - started < _RUNNING_ROW_MAX_AGE:
-            return f"{started:%H:%M}"
-    return None
-
-
-def _fresh_progress() -> str | None:
-    try:
-        progress = json.loads(storage.get_bot_state(storage.SCAN_PROGRESS_KEY) or "{}")
-        updated = datetime.fromisoformat(progress["updated"])
-    except (ValueError, KeyError):
-        return None
-    return progress.get("text") if datetime.now() - updated < _PROGRESS_MAX_AGE else None
-
-
-def _paused_since() -> str | None:
-    return storage.get_bot_state(storage.SCANS_PAUSED_KEY) or None
-
-
-def _last_finished_run() -> dict | None:
-    return next((run for run in storage.get_recent_runs(10) if run["status"] != "running"), None)
+    send("⏹ הסריקה נעצרה" if scan_runner.stop_scan() else "אין סריקה פעילה")
 
 
 def _run_doctor(send):
     send("⏳ בודק את כל השירותים...")
-    stdout, stderr = _run_cli(["doctor.py", "--json"])
+    stdout, stderr = scan_runner.run_cli(["doctor.py", "--json"])
     try:
         send(format_doctor(json.loads(stdout)))
     except ValueError:
@@ -406,17 +302,5 @@ def _run_doctor(send):
 
 def _run_sync_groups(send):
     send("⏳ מסנכרן את לשונית Groups...")
-    stdout, stderr = _run_cli(["apartment_bot.py", "--sync-groups"])
+    stdout, stderr = scan_runner.run_cli(["apartment_bot.py", "--sync-groups"])
     send(format_cli_output("sync_groups", (stdout + stderr).strip() or "(אין פלט)"))
-
-
-def _run_cli(args: list[str]) -> tuple[str, str]:
-    """(stdout, stderr) of a project script run with the listener's Python."""
-    try:
-        result = subprocess.run(
-            [sys.executable, *args], cwd=_PROJECT_DIR, env=_CHILD_ENV, capture_output=True,
-            text=True, encoding="utf-8", errors="replace", timeout=_CLI_TIMEOUT_S, creationflags=_NO_WINDOW,
-        )
-    except subprocess.TimeoutExpired:
-        return "", f"(נעצר אחרי {_CLI_TIMEOUT_S} שניות)"
-    return result.stdout, result.stderr

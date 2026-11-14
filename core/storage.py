@@ -806,6 +806,17 @@ def get_run_activity(since: str) -> dict:
     }
 
 
+def get_added_per_day(days: int) -> dict[str, int]:
+    """'YYYY-MM-DD' -> listings added that day, over the last `days` days (days with none are absent)."""
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT substr(last_processed, 1, 10) AS day, COUNT(*) AS n FROM posts "
+            "WHERE verdict = ? AND last_processed >= ? GROUP BY day ORDER BY day", (VERDICT_ADDED, cutoff),
+        ).fetchall()
+    return {row["day"]: row["n"] for row in rows}
+
+
 def get_recent_prefiltered(days: int) -> list[dict]:
     """Posts rejected by a content pre-filter rule in the last `days` days, with their stored text —
     the input for --stats' suspicious-rejects audit."""

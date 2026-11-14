@@ -150,6 +150,8 @@ def _ollama_base() -> str:
 
 
 def _check_ollama():
+    if config.LLM_PROVIDER == "none":
+        return _off("ollama", 'LLM_PROVIDER = "none"', "ai")
     try:
         ok = requests.get(f"{_ollama_base()}/api/tags", timeout=6).status_code == 200
     except Exception:
