@@ -317,7 +317,7 @@ def _offer_add_ons():
 
 
 def _finish():
-    print("\n--- Checking everything ---")
+    print("\n--- Checking everything ---", flush=True)
     subprocess.run([sys.executable, "doctor.py"])
     print("\nSetup done. Run a scan any time by double-clicking run_bot.bat (or `python apartment_bot.py`).")
     if ask_yes_no("Run the first scan now?", True):

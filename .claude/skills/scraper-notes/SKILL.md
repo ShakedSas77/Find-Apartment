@@ -9,6 +9,12 @@ description: >
 > Moved verbatim from `CLAUDE.md` (2026-11-07). Keep project-wide rules in `CLAUDE.md`;
 > deep notes for these modules live here.
 
+## Guest mode (FACEBOOK_LOGIN = False)
+
+- `_scan_groups_as_guest()`: a plain `chromium.launch()` + `new_context()` — no `chrome_profile/`, no stealth patches, no login, one group at a time via `_scan_groups_sequentially`; no dead-link check, no scan-pace save.
+- Facebook's login wall is respected, never worked around: `_scan_group_page` checks `_shows_login_wall()` (email/password inputs visible) **before** `_handle_checkpoint_if_present` — which would read the same form as a lost session and abort every group — and `_dismiss_popups` is never called in guest mode (its Close click would dismiss the login dialog). A walled group gets status `needs_login` and is skipped; so does one that renders no posts with the form showing after the scroll.
+- Verified 2026-11-14 on 3 of the owner's groups: Facebook walled all three, so in practice guest mode yields little; the README says so.
+
 ## Concurrency
 
 - **`MAX_CONCURRENT_GROUPS > 1` (default, 6)**: groups scan in parallel via `ThreadPoolExecutor(max_workers=MAX_CONCURRENT_GROUPS)`. Each worker thread (`_scan_group`) launches its *own* `browser`+`context` (cookies injected from `storage_state_path`, exported once from the login phase) — multiple simultaneous browser instances from one FB account, higher checkpoint/ban risk than the real profile's own fingerprint.

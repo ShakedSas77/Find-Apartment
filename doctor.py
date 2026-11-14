@@ -50,7 +50,7 @@ def _check_env():
 
 def _check_credentials_file():
     if config.OUTPUT_BACKEND != "sheets":
-        return _off("credentials.json", f'OUTPUT_BACKEND = "{config.OUTPUT_BACKEND}"', "sheets")
+        return _off("credentials.json", f'OUTPUT_BACKEND = "{config.OUTPUT_BACKEND}"', "results")
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), config.CREDENTIALS_FILE)
     if not os.path.exists(path):
         return ("credentials.json", FAIL, "missing", "download the service-account key from Google Cloud Console")
@@ -164,7 +164,7 @@ def _check_ollama():
 
 def _check_sheets():
     if config.OUTPUT_BACKEND != "sheets":
-        return ("google_sheets", OFF, f"results go to {config.EXCEL_PATH}", "add Google Sheets with `python setup_wizard.py --add sheets`")
+        return ("google_sheets", OFF, f"results go to {config.EXCEL_PATH}", "add Google Sheets with `python setup_wizard.py --add results`")
     sheet_id = os.getenv("SHEET_ID")
     if not sheet_id:
         return ("google_sheets", FAIL, "SHEET_ID missing", "add it to .env")

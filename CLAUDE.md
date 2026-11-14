@@ -5,7 +5,13 @@ Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.5 Flash
 ## Run Commands
 
 ```bash
-# First run — headful required for manual FB login
+# New install (Windows): venv + libraries + browser, then the setup wizard
+install.bat
+# Setup wizard: writes config_local.py + .env; --add <step> for one step
+# (search ai results facebook telegram yad2 maps schedule)
+python setup_wizard.py
+
+# First run without the wizard — headful required for manual FB login
 python apartment_bot.py --headful
 
 # Subsequent runs — headless + live is the default (--headless/--live still
@@ -63,11 +69,11 @@ run_listener_hidden.vbs
 Layout (reorganized 2026-11-07 — keep new modules in the matching folder):
 
 ```
-apartment_bot.py bot_listener.py doctor.py backup_db.py clean_data.py   entry points (run these)
+apartment_bot.py bot_listener.py doctor.py setup_wizard.py backup_db.py clean_data.py   entry points (run these)
 config.py config_local.py env.py prompts.py                            settings, secrets access, LLM prompt
 core/          pipeline + shared logic: evaluate, llm, normalize, dedupe, scoring, storage, run_log, llm_eval, util, errors
 sources/       where listings come from: fb_scraper, browser, graphql_capture, mail_source
-integrations/  external services: sheets, groups_sync, maps, distance_fallback, telegram_notifier
+integrations/  external services: sheets, local_workbook, groups_sync, maps, distance_fallback, telegram_notifier
 tests/         pytest suite; tests/fixtures/test_posts/ = labelled LLM fixtures
 docs/archive/  past plans, kept for history
 run_*.bat run_hidden.vbs                                               launchers (Task Scheduler points here — keep at root)
@@ -80,13 +86,15 @@ run_*.bat run_hidden.vbs                                               launchers
 | `core/evaluate.py` | Source-agnostic listing pipeline: `process_candidate_listing()` (LLM parse → `_evaluate_post_data` → `_build_row` → queue), `_content_prefilter()` |
 | `core/llm.py` | Gemini/Ollama dual-path orchestration: `analyze_post_with_llm()`, `ApartmentData` schema, `get_gemini_client()`, `GEMINI_EXHAUSTED` |
 | `integrations/maps.py` | Distance/geocoding: `get_walking_distance()`, `_validate_address_with_geocoding()`, `_format_address_display()`, `get_gmaps_client()` |
-| `integrations/sheets.py` | Google Sheets I/O: `setup_google_sheet()`, `dedupe_and_sort_sheet()`, row-rewrite helpers |
+| `integrations/sheets.py` | Results I/O: `open_output()` (listings tab + seen URLs; `open_spreadsheet()` picks the backend from `config.OUTPUT_BACKEND` at call time), `dedupe_and_sort_sheet()`, row-rewrite helpers |
+| `integrations/local_workbook.py` | `OUTPUT_BACKEND = "excel"` (the public default): `LocalWorkbook`/`LocalWorksheet`, an openpyxl stand-in for the slice of gspread the bot calls, so every sheet code path writes `EXCEL_PATH` unchanged. Saves after each write; a save blocked by Excel holding the file (PermissionError) is retried, then left in memory with a WARNING and saved by the next write. Numeric strings become numbers and the formula-guard `'` is dropped under USER_ENTERED, like Sheets. `bot_listener.py` reopens it per tap (a long-held copy would save stale rows over a scan's) |
+| `setup_wizard.py` | First-run setup (`install.bat` ends with it), re-runnable, `--add <step>`: search criteria (destination geocoded via Nominatim and confirmed; config.py's example address is never offered as a default), AI (Gemini key checked, or Ollama installed + model pulled), results (Excel, or Google Sheets: service-account JSON copied, sheet link parsed), Facebook (`fb_scraper.log_in_to_facebook()` or guest mode; links into the Groups tab via `groups_sync.add_groups()`), add-ons Telegram (chat id from getUpdates, test message, Startup listener shortcut), Yad2 (read-only IMAP check), Maps, schedule (`schtasks` per time). `save_settings()` rewrites only the assignments it sets in `config_local.py` (located with `ast`, multi-line ones included), `save_secrets()` only its lines in `.env` |
 | `core/normalize.py` | Pure text/domain normalization: dates, floor, fees, parking, address formatting, `BIDI_RE`, `_sheet_safe_cell` |
 | `core/dedupe.py` | Cross-post dedup: `_text_dedup_hash()`, `_listing_dedupe_key()` |
 | `sources/browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — used by `sources/fb_scraper.py` |
 | `core/util.py` / `core/errors.py` | Shared low-level helpers (`_safe_print`, `_with_retries`, locks) and signal exceptions (`GmapsQuotaHalted`, `HeadlessCheckpointAbort`) — dependency-free, importable from anywhere without a cycle |
-| `env.py` | `.env` access with no import-time validation (`require_env()` is called explicitly from `apartment_bot.py`'s `__main__`, not at import) — this is what makes every other module importable/testable without credentials |
-| `config.py` | All tunables: URLs, price/room filters, sheet ID, destination, negative keywords |
+| `env.py` | `.env` access with no import-time validation (`require_env()` is called explicitly from `apartment_bot.py`'s `__main__`, not at import) — this is what makes every other module importable/testable without credentials. `missing_env()` asks only for what the enabled features need (Gemini key for `LLM_PROVIDER = "gemini"`, `SHEET_ID` + `credentials.json` for `OUTPUT_BACKEND = "sheets"`, Maps key for `GMAPS_ENABLED`, IMAP login for `ALERTS_SCAN_ENABLED`, Telegram vars for `TELEGRAM_ENABLED`) |
+| `config.py` | All tunables: feature switches first (`OUTPUT_BACKEND` excel/sheets, `LLM_PROVIDER` gemini/ollama, `FACEBOOK_LOGIN`; Telegram, Yad2 emails and Google Maps default off), price/room filters, destination, negative keywords. Public defaults suit a new user; personal values go in gitignored `config_local.py` (the wizard writes it) |
 | `prompts.py` | `get_apartment_prompt_improved(text)` — dispatches to `get_apartment_prompt_english()` or `get_apartment_prompt_hebrew()` per `config.PROMPT_LANGUAGE` |
 | `core/storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
 | `core/scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
@@ -102,12 +110,12 @@ run_*.bat run_hidden.vbs                                               launchers
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
 | `credentials.json` | Google Service Account key (gitignored) |
-| `.env` | `GEMINI_API_KEY`, `GMAPS_API_KEY`, `SHEET_ID` (required); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) ; `ALERTS_IMAP_USER`/`ALERTS_IMAP_PASSWORD` (a Gmail **app password**)/`ALERTS_IMAP_FOLDER` (optional, for `sources/mail_source.py`) — all gitignored |
+| `.env` | Only what enabled features need: `GEMINI_API_KEY` (gemini), `SHEET_ID` (sheets), `GMAPS_API_KEY` (maps); `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` (optional, only if `TELEGRAM_ENABLED=True`) ; `ALERTS_IMAP_USER`/`ALERTS_IMAP_PASSWORD` (a Gmail **app password**)/`ALERTS_IMAP_FOLDER` (optional, for `sources/mail_source.py`) — all gitignored |
 | `chrome_profile/` | Playwright persistent context — holds FB login session cookie |
 
 ## Data Flow
 
-1. `setup_google_sheet()` — loads seen URLs from sheet for dedupe
+1. `open_output()` — opens the Google Sheet or `listings.xlsx`, loads seen URLs for dedupe
 2. Playwright launches persistent Chromium; user logs into FB manually on first run
 3. Groups are then scanned, shuffled order for anti-bot — either in parallel (`MAX_CONCURRENT_GROUPS > 1`: worker threads, each running `_scan_group()` on its own `context.new_page()` tab) or sequentially (`MAX_CONCURRENT_GROUPS == 1`: one page, inside the same login context — see the `scraper-notes` skill)
 4. Per group (`_scan_group_page`): scroll, expand "קרא עוד"/"See more", collect `role="article"` elements
