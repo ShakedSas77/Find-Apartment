@@ -60,15 +60,10 @@ GEMINI_MODELS = [
 OLLAMA_MODEL = "aya-expanse:8b"
 
 # ─── Target locations ────────────────────────────────────────────────────────────
-# Facebook groups to scan — placeholder examples, replace with groups you're a member of
-# (each group's URL is in the browser address bar when it's open). See README for details.
-# Real group URLs go in config_local.py (gitignored) instead of here — the repo is
-# public, and TARGET_URLS reveals which groups/areas you're monitoring.
-TARGET_URLS = [
-    "https://www.facebook.com/groups/000000000000001",
-    "https://www.facebook.com/groups/000000000000002",
-    "https://www.facebook.com/groups/000000000000003",
-]
+# Facebook groups to scan live in the Groups tab of your results (add them with
+# `python setup_wizard.py --add facebook`, or paste links there). TARGET_URLS only seeds an empty
+# Groups tab; real group URLs belong in config_local.py (gitignored), never here — the repo is public.
+TARGET_URLS = []
 
 # ─── Locations ────────────────────────────────────────────────────────────────
 # Display only, on the startup banner — not used for filtering.
@@ -266,9 +261,9 @@ GRAPHQL_CAPTURE_ENABLED = True
 # Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP
 # by mail_source.py. Credentials live in .env (ALERTS_IMAP_USER/PASSWORD/FOLDER).
 ALERTS_IMAP_HOST = "imap.gmail.com"
-# Every live/dry scan reads Yad2's daily digest emails first (no browser, no LLM — the email
-# already states price/rooms/street). Off, or no ALERTS_IMAP_* in .env, skips it.
-ALERTS_SCAN_ENABLED = True
+# On, every live/dry scan reads Yad2's daily digest emails first (no browser, no LLM — the email
+# already states price/rooms/street); needs ALERTS_IMAP_* in .env (`python setup_wizard.py --add yad2`).
+ALERTS_SCAN_ENABLED = False
 # Yad2 listings get their own tab (same columns as the main one), created on the first live run.
 YAD2_TAB_NAME = "Yad2"
 # How far back each run looks for alert emails. Already-seen listings are skipped by URL, so a

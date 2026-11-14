@@ -13,9 +13,10 @@ import sys
 import gspread
 from google.oauth2.service_account import Credentials
 
+import config
 import env
 from core import storage
-from config import CREDENTIALS_FILE, EXCEL_PATH, OUTPUT_BACKEND, SHEET_HEADERS
+from config import CREDENTIALS_FILE, SHEET_HEADERS
 from core.util import _with_retries
 from core.normalize import _sheet_safe_cell, _is_recent_post_date, _post_date_sort_key
 from core.dedupe import _listing_key
@@ -37,7 +38,7 @@ def open_output():
     try:
         sheet = open_spreadsheet().sheet1
     except Exception as e:
-        print(f"    ERROR: opening the results ({OUTPUT_BACKEND}): {e}")
+        print(f"    ERROR: opening the results ({config.OUTPUT_BACKEND}): {e}")
         sys.exit(1)
 
     try:
@@ -45,10 +46,10 @@ def open_output():
         headers = sheet.row_values(1)
 
         if not headers:
-            print("Missing column headers in Google Sheet. Adding them to row 1...")
+            print("Missing column headers in the results sheet. Adding them to row 1...")
             sheet.insert_row(SHEET_HEADERS, 1)
         elif len(headers) != len(SHEET_HEADERS) or headers[0] != "לינק למודעה":
-            print("Outdated column headers in Google Sheet. Updating row 1...")
+            print("Outdated column headers in the results sheet. Updating row 1...")
             if headers and headers[0] == "לינק למודעה":
                 sheet.delete_rows(1)
             sheet.insert_row(SHEET_HEADERS, 1)
@@ -64,10 +65,11 @@ def open_output():
         sys.exit(1)
 
 def open_spreadsheet():
-    """The results workbook: a gspread Spreadsheet, or a LocalWorkbook with the same methods."""
-    if OUTPUT_BACKEND == "excel":
-        print(f"\nOpening {EXCEL_PATH} and reading existing data...")
-        return LocalWorkbook(EXCEL_PATH)
+    """The results workbook: a gspread Spreadsheet, or a LocalWorkbook with the same methods. Reads config
+    at call time, so setup_wizard.py can switch the backend before it writes the Groups tab."""
+    if config.OUTPUT_BACKEND == "excel":
+        print(f"\nOpening {config.EXCEL_PATH} and reading existing data...")
+        return LocalWorkbook(config.EXCEL_PATH)
     print("\nConnecting to Google Sheets and reading existing data...")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)

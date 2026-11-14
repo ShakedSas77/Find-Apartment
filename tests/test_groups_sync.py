@@ -190,3 +190,17 @@ def test_a_regular_sync_keeps_the_tab_order():
     groups_sync.sync_groups(FakeSpreadsheet(tab), write=True)
 
     assert [row[0] for row in tab.written[1:]] == [_G1, _G2]
+
+
+def test_add_groups_appends_a_new_group_after_the_listed_ones(db):
+    worksheet = FakeWorksheet([groups_sync.HEADERS, [_G1]])
+
+    groups_sync.add_groups(FakeSpreadsheet(worksheet), ["https://m.facebook.com/groups/222/?ref=share"])
+
+    assert [row[0] for row in worksheet.written[1:]] == [_G1, _G2]
+
+
+def test_add_groups_skips_a_group_already_listed_under_another_link_shape(db):
+    worksheet = FakeWorksheet([groups_sync.HEADERS, [_G1]])
+
+    assert groups_sync.add_groups(FakeSpreadsheet(worksheet), [_G1 + "/?ref=share"]) == []

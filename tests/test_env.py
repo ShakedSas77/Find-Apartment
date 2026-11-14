@@ -18,6 +18,9 @@ def basic_setup(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "LLM_PROVIDER", "ollama")
     monkeypatch.setattr(config, "GMAPS_ENABLED", False)
     monkeypatch.setattr(config, "TELEGRAM_ENABLED", False)
+    monkeypatch.setattr(config, "ALERTS_SCAN_ENABLED", False)
+    monkeypatch.delenv("ALERTS_IMAP_USER", raising=False)
+    monkeypatch.delenv("ALERTS_IMAP_PASSWORD", raising=False)
     monkeypatch.setattr(config, "CREDENTIALS_FILE", str(tmp_path / "credentials.json"))
 
 
@@ -41,6 +44,12 @@ def test_telegram_needs_its_token_and_chat(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_ENABLED", True)
 
     assert env.missing_env()[0].startswith("TELEGRAM_BOT_TOKEN")
+
+
+def test_yad2_emails_need_the_mailbox_login(monkeypatch):
+    monkeypatch.setattr(config, "ALERTS_SCAN_ENABLED", True)
+
+    assert env.missing_env()[0].startswith("ALERTS_IMAP_USER")
 
 
 def test_google_maps_key_is_needed_only_when_maps_is_on(monkeypatch):

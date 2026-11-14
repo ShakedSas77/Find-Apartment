@@ -1013,6 +1013,20 @@ def _launch_login_context(p, profile_dir: str, headless: bool):
         **persistent_kwargs
     )
 
+def log_in_to_facebook():
+    """
+    Opens the bot's browser profile (chrome_profile/) for a one-time manual Facebook login, and closes
+    it once the feed shows — setup_wizard.py's Facebook step. Scans then reuse the saved session.
+    """
+    with sync_playwright() as p:
+        context = _launch_login_context(p, os.path.join(os.getcwd(), "chrome_profile"), headless=False)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            _apply_stealth(page)
+            _ensure_logged_in(page, headless=False)
+        finally:
+            _close_context(context)
+
 def _ensure_logged_in(page, headless: bool):
     print("Opening Facebook...")
     page.goto("https://www.facebook.com", wait_until="domcontentloaded")

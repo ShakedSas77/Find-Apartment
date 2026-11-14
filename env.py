@@ -47,6 +47,9 @@ def missing_env() -> list[str]:
             missing.append(f'{config.CREDENTIALS_FILE} (OUTPUT_BACKEND = "sheets"): the Google service-account key')
     if config.GMAPS_ENABLED and not os.getenv("GMAPS_API_KEY"):
         missing.append("GMAPS_API_KEY in .env (GMAPS_ENABLED = True), or GMAPS_ENABLED = False for the free estimate")
+    if config.ALERTS_SCAN_ENABLED and not all(get_alerts_imap_credentials()[:2]):
+        missing.append("ALERTS_IMAP_USER and ALERTS_IMAP_PASSWORD in .env (ALERTS_SCAN_ENABLED = True), "
+                       "or ALERTS_SCAN_ENABLED = False")
     if config.TELEGRAM_ENABLED and not (os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHAT_ID")):
         missing.append("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env (TELEGRAM_ENABLED = True), "
                        "or TELEGRAM_ENABLED = False")

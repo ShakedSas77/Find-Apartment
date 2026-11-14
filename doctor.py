@@ -73,11 +73,6 @@ def _check_chrome_profile():
 
 
 def _check_config_local():
-    placeholder = [
-        "https://www.facebook.com/groups/000000000000001",
-        "https://www.facebook.com/groups/000000000000002",
-        "https://www.facebook.com/groups/000000000000003",
-    ]
     # The sheet's Groups tab (mirrored in the DB's groups table) is the group list; TARGET_URLS only seeds it.
     try:
         storage.init_db()
@@ -87,8 +82,8 @@ def _check_config_local():
     if groups:
         active = sum(g["active"] for g in groups)
         return ("groups", PASS, f"{active} active of {len(groups)} in the Groups tab (last sync)", "")
-    if config.TARGET_URLS == placeholder:
-        return ("groups", FAIL, "no groups: Groups tab never synced and TARGET_URLS is the placeholder",
+    if not config.TARGET_URLS:
+        return ("groups", FAIL, "no Facebook groups to scan yet",
                 "add group links with `python setup_wizard.py --add facebook`, or in the Groups tab of your results")
     return ("groups", PASS, f"{len(config.TARGET_URLS)} group URL(s) in config_local.py (seed the Groups tab with --sync-groups)", "")
 

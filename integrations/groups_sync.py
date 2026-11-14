@@ -78,6 +78,22 @@ def canonical_group_url(raw: str) -> str | None:
     return f"https://www.facebook.com/groups/{group_id}" if _GROUP_ID_RE.fullmatch(group_id) else None
 
 
+def add_groups(spreadsheet, links: list[str]) -> list[str]:
+    """
+    Appends the groups in `links` (any link shape) to the Groups tab as active rows, after the ones
+    already listed; a group already there, or a link that isn't a group, is skipped. Returns the
+    URLs added. Used by setup_wizard.py.
+    """
+    worksheet = _groups_worksheet(spreadsheet)
+    groups = parse_group_rows(_with_retries(worksheet.get_all_values)) or storage.get_groups()
+    known = {g["url"] for g in groups}
+    added = [url for url in dict.fromkeys(canonical_group_url(link) for link in links) if url and url not in known]
+    groups += [{"url": url, "name": "", "cities": "", "active": True, "notes": ""} for url in added]
+    storage.replace_groups(groups)
+    _write_tab(worksheet, groups, storage.get_group_overview())
+    return added
+
+
 def parse_group_rows(values: list[list[str]]) -> list[dict]:
     """
     Sheet rows (header first) -> groups. Rows without a usable link are skipped. Duplicates — the same
