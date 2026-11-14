@@ -286,8 +286,10 @@ def ask(question: str, default=None) -> str:
 def ask_secret(question: str, current: str | None) -> str:
     # Typed text stays hidden; Enter keeps the saved value.
     suffix = " [Enter keeps the saved one]" if current else ""
+    # Windows' getpass reads the console itself and would hang on piped answers (a scripted setup).
+    read = getpass.getpass if sys.stdin.isatty() else input
     while True:
-        answer = getpass.getpass(f"{question}{suffix} (hidden while you paste): ").strip()
+        answer = read(f"{question}{suffix} (hidden while you paste): ").strip()
         if answer or current:
             return answer or current
 
