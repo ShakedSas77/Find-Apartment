@@ -4,39 +4,54 @@ Scrapes Facebook apartment listing groups, parses each post with an AI model, co
 
 Everything runs on free tiers: Gemini's free API quota (or a local Ollama model, no account at all), and a free OpenStreetMap distance estimate.
 
-📘 **New here? Read the [User Guide](docs/user-guide.md)** — the full setup, step by step, plus how to use the results and every add-on.
+📘 **New here? Read the [User Guide](docs/user-guide.md)** — the setup step by step, the app's pages, and every add-on.
 
 ## Quick start (Windows)
 
-**Required setup** (~15 minutes, [step-by-step guide](docs/user-guide.md#part-1--basic-setup-required)):
+**Setup** (~10 minutes, no account or key needed — [step by step](docs/user-guide.md#part-1--setup-required-10-minutes)):
 
 1. **Python 3.11+** with "Add python.exe to PATH" ticked ([guide](docs/user-guide.md#step-1-install-python)).
 2. **Download** the code: green **Code** button → **Download ZIP** → unzip (or `git clone`).
-3. **Double-click `install.bat`.** It installs everything inside the folder, then starts the setup wizard ([guide](docs/user-guide.md#step-3-run-the-installer)), which asks:
-   - what you're looking for — rooms, rent, and the address to measure walking distance to ([guide](docs/user-guide.md#step-4-what-youre-looking-for));
-   - the AI that reads posts — a free Gemini key, or Ollama offline ([guide](docs/user-guide.md#step-5-the-ai-that-reads-posts));
-   - where results go — `listings.xlsx`, or a Google Sheet ([guide](docs/user-guide.md#step-6-where-results-go));
-   - Facebook — log in once in the bot's own browser, and paste your group links ([guide](docs/user-guide.md#step-7-facebook-login-and-groups)).
-4. **Run a scan:** double-click `run_bot.bat`, then open `listings.xlsx` ([reading the results](docs/user-guide.md#reading-the-results)).
+3. **Double-click `install.bat`.** It installs everything inside the folder and opens the bot's app in your browser on a setup page ([guide](docs/user-guide.md#step-3-run-the-installer)):
+   - where you walk to — found on a map to confirm ([guide](docs/user-guide.md#step-4-where-you-walk-to));
+   - budget and size ([guide](docs/user-guide.md#step-5-budget-and-size));
+   - who reads the posts — no AI (zero setup), a free Gemini key, or Ollama offline ([guide](docs/user-guide.md#step-6-who-reads-the-posts));
+   - Facebook — one login in the bot's own browser window, which closes by itself ([guide](docs/user-guide.md#step-7-facebook));
+   - your groups — tick them from the groups your account has joined, or paste links ([guide](docs/user-guide.md#step-8-your-groups)).
+4. **Scan** with **▶️ סריקה מלאה** in the app's side panel. Next time, open the app with **`open_app.bat`**.
 
-**Optional add-ons** — each independent, add any later with one command ([all add-ons](docs/user-guide.md#part-3--add-ons-optional-each-on-its-own)):
+**The app** ([guide](docs/user-guide.md#part-2--using-the-app)) — for this PC only, in Hebrew:
 
-| Add-on | What you get | Needs | Command | Guide |
-|---|---|---|---|---|
-| Telegram | each new apartment on your phone; run scans from the chat | the Telegram app | `python setup_wizard.py --add telegram` | [A](docs/user-guide.md#a-telegram-alerts-and-chat-commands) |
-| Daily scans | scans run by themselves at set times | — | `python setup_wizard.py --add schedule` | [B](docs/user-guide.md#b-daily-automatic-scans) |
-| Yad2 emails | Yad2 listings too, from its saved-search emails | Gmail + an app password | `python setup_wizard.py --add yad2` | [C](docs/user-guide.md#c-yad2-email-alerts) |
-| Google Sheet | results in a Google Sheet instead of Excel | a free Google Cloud service account | `python setup_wizard.py --add results` | [D](docs/user-guide.md#d-google-sheet-instead-of-excel) |
-| Google Maps | real walking routes instead of the free estimate | a Google Maps key (card required, stays in free credit) | `python setup_wizard.py --add maps` | [E](docs/user-guide.md#e-google-maps-walking-routes) |
+| Page | What's there |
+|---|---|
+| דירות (Results) | every apartment found: filters, sorting, fit score, links to the post and Google Maps, and your own tracking — interested / contacted / visited / not relevant, plus a note |
+| מפה (Map) | the apartments on a map, coloured by fit score, around your destination; extra filters for score and post age; click one for its details |
+| קבוצות (Groups) | the groups scanned, their status and yield; pause, remove, add |
+| הגדרות (Settings) | the setup answers, and every add-on below |
+| סטטיסטיקה (Stats) | totals, apartments per day, the last scans, per-group yield, a health check |
+| כלים (Tools) | each scan's log, and one-click backup / cleanup / re-check / recompute |
+| side panel | full / Facebook-only / Yad2-only / one-group scans, stop, live progress, pause the daily scans |
 
-(Run the commands from a Command Prompt in the bot's folder, with `venv\Scripts\python` in place of `python`.) `python doctor.py` checks everything turned on and marks the rest ⚪ OFF; [troubleshooting](docs/user-guide.md#troubleshooting) covers the common problems.
+**Optional add-ons** — each independent, set up from **Settings → תוספים** ([all add-ons](docs/user-guide.md#part-3--add-ons-optional-each-on-its-own)):
+
+| Add-on | What you get | Needs | Guide |
+|---|---|---|---|
+| Telegram | each new apartment on your phone; scans and status from the chat | the Telegram app | [A](docs/user-guide.md#a-telegram-alerts-and-chat-commands) |
+| Daily scans | scans run by themselves at set times | — | [B](docs/user-guide.md#b-daily-automatic-scans) |
+| Yad2 emails | Yad2 listings too, from its saved-search emails | Gmail + an app password | [C](docs/user-guide.md#c-yad2-email-alerts) |
+| Google Sheet | results in a Google Sheet instead of `listings.xlsx` | a free Google Cloud service account | [D](docs/user-guide.md#d-google-sheet-instead-of-excel) |
+| Google Maps | real walking routes instead of the free estimate | a Google Maps key (card required, stays in free credit) | [E](docs/user-guide.md#e-google-maps-walking-routes) |
+
+Everything can also be done from a console: `venv\Scripts\python setup_wizard.py` (or `--add <telegram|schedule|yad2|results|maps>`), `run_bot.bat` for a scan, `python doctor.py` for the health check. [Troubleshooting](docs/user-guide.md#troubleshooting) covers the common problems.
 
 Good to know:
 
-- **Area:** tuned for Ramat Gan / Givatayim / Tel Aviv — the AI assumes those cities when a post names none. It runs anywhere, but outside that area some addresses come out without a distance.
+- **No-AI mode** reads price, rooms and a named street with simple rules: on real posts it found about 9 in 10 of the apartments the AI found, without entry dates and other details.
+- **Area:** tuned for Ramat Gan / Givatayim / Tel Aviv — posts that name no city are assumed to be there. It runs anywhere, but outside that area some addresses come out without a distance.
 - **Facebook in English:** the bot reads post times like "3 hrs"; set Facebook's language to English.
 - **No-login mode** reads groups as a logged-out visitor and stops at Facebook's login wall (never closing or working around it) — the group is marked "פייסבוק דורש התחברות". Expect little; logging in once is the reliable path.
 - **Read-only:** the bot never posts, comments or messages anyone on Facebook, and opens the Yad2 mailbox read-only.
+- **Phone:** the app stays on your PC so nobody else can reach it; use Telegram on the phone.
 
 ## Current Filters
 

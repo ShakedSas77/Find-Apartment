@@ -5,11 +5,17 @@ Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.5 Flash
 ## Run Commands
 
 ```bash
-# New install (Windows): venv + libraries + browser, then the setup wizard
+# New install (Windows): venv + libraries + browser, then opens the web app on its first-run setup
 install.bat
-# Setup wizard: writes config_local.py + .env; --add <step> for one step
+# The web app (localhost only): setup, results, map, groups, settings + add-ons, stats, tools
+open_app.bat
+# = streamlit run webapp/app.py --server.address 127.0.0.1 --browser.gatherUsageStats false
+# Console alternative: writes config_local.py + .env; --add <step> for one step
 # (search ai results facebook telegram yad2 maps schedule)
 python setup_wizard.py
+# What the web app runs for Facebook: one-time login (window closes itself), and the joined groups as JSON
+python apartment_bot.py --login
+python apartment_bot.py --list-my-groups
 
 # First run without the wizard — headful required for manual FB login
 python apartment_bot.py --headful
@@ -70,8 +76,10 @@ Layout (reorganized 2026-11-07 — keep new modules in the matching folder):
 
 ```
 apartment_bot.py bot_listener.py doctor.py setup_wizard.py backup_db.py clean_data.py   entry points (run these)
+webapp/        the Streamlit web app: app.py (navigation), views.py (pages), components.py (shared sections), data.py (no Streamlit)
 config.py config_local.py env.py prompts.py                            settings, secrets access, LLM prompt
-core/          pipeline + shared logic: evaluate, llm, normalize, dedupe, scoring, storage, run_log, llm_eval, util, errors
+core/          pipeline + shared logic: evaluate, llm, normalize, dedupe, scoring, storage, run_log, llm_eval, util, errors,
+               scan_runner, local_settings, addon_setup
 sources/       where listings come from: fb_scraper, browser, graphql_capture, mail_source
 integrations/  external services: sheets, local_workbook, groups_sync, maps, distance_fallback, telegram_notifier
 tests/         pytest suite; tests/fixtures/test_posts/ = labelled LLM fixtures
@@ -81,10 +89,14 @@ run_*.bat run_hidden.vbs                                               launchers
 
 | File | Purpose |
 |---|---|
-| `apartment_bot.py` | CLI entrypoint only: `--stats`/`--reparse-rejected`/`--replay`/`--prune`/`--recompute-scores`/`--backfill-ratings`/`__main__` dispatch to `run_scraper()`. As of the Phase 0-9 extraction (2026-07-26), the scraping/LLM/Sheets logic that used to all live here has moved to the modules below — see each for what it owns. |
+| `apartment_bot.py` | CLI entrypoint only: `--stats`/`--reparse-rejected`/`--replay`/`--prune`/`--recompute-scores`/`--backfill-ratings`/`__main__` dispatch to `run_scraper()`; `--login` / `--list-my-groups` (handled before the key check, since setup runs them first) call `fb_scraper.log_in_to_facebook()` / `list_my_groups()`. As of the Phase 0-9 extraction (2026-07-26), the scraping/LLM/Sheets logic that used to all live here has moved to the modules below — see each for what it owns. |
 | `sources/fb_scraper.py` | Playwright/FB-DOM-specific: checkpoint/CAPTCHA handling, dead-link pruning, post-URL canonicalization, article selectors, "See more" expansion, `_scan_group_page`/`_scan_group`, `run_scraper()` |
 | `core/evaluate.py` | Source-agnostic listing pipeline: `process_candidate_listing()` (LLM parse → `_evaluate_post_data` → `_build_row` → queue), `_content_prefilter()` |
-| `core/llm.py` | Gemini/Ollama dual-path orchestration: `analyze_post_with_llm()`, `ApartmentData` schema, `get_gemini_client()`, `GEMINI_EXHAUSTED` |
+| `core/llm.py` | Gemini/Ollama dual-path orchestration: `analyze_post_with_llm()`, `ApartmentData` schema, `get_gemini_client()`, `GEMINI_EXHAUSTED`. `LLM_PROVIDER = "none"` (no-AI mode) makes no model call: it returns an empty `ApartmentData` with only `core.normalize.street_from_text()`'s street (a name after רחוב/רח'/שדרות, + number, + a named city), and `_evaluate_post_data`'s regex second chance fills price and rooms (measured 2026-11-14 on 361 stored posts: 160 of the AI's 179 matches, 2 false matches) |
+| `core/scan_runner.py` | Starting/stopping/watching scans from another process (Telegram commands, web app): `start_scan(args, on_failure)`, `stop_scan()` (ours, or the scheduled one by `SCAN_PID_KEY`), `running_since()`, `fresh_progress()`, `paused_since()`, `last_finished_run()`, `run_cli()` -> (code, stdout, stderr) |
+| `core/local_settings.py` | `save_settings()` (ast-located assignment rewrite in `config_local.py`, also applied to the running `config`), `save_secrets()` (`.env` lines, also `os.environ`), `is_saved()`; paths resolved at call time so tests can redirect them |
+| `core/addon_setup.py` | Non-UI checks behind the AI and add-ons, shared by the wizard and the web app: Gemini key check, Ollama lookup, Telegram API call / chat discovery, listener Startup shortcut, Yad2 mailbox check (read-only), Task Scheduler `ApartmentBot HHMM` tasks (create/list/delete), service-account email, sheet id from a link |
+| `webapp/` | Streamlit app, localhost only (`open_app.bat`; RTL Hebrew via injected CSS, code blocks kept LTR). Setup page until `data.setup_missing()` is empty (saved destination, an AI that needs no missing key, at least one group); then Results (filters, sort, editable tracking status + note -> `storage.listing_tracking`), Map (pydeck: listings placed from the address cache's lat/lon, colour by score, destination + walking-radius circle, click -> card), Groups (pause/remove/add incl. `--list-my-groups` picker), Settings (setup sections + every add-on via `core.addon_setup`), Stats (incl. `doctor.py --json`), Tools (scan logs from `runs.log_path`, maintenance CLI buttons). Sidebar scan panel uses `core.scan_runner`; a 5s fragment refreshes progress. Writes are disabled while a scan runs (the scan rewrites the results file at its end). Listings are cached 60s (`st.cache_data`). Tests: `tests/test_webapp.py` with `streamlit.testing.v1.AppTest` |
 | `integrations/maps.py` | Distance/geocoding: `get_walking_distance()`, `_validate_address_with_geocoding()`, `_format_address_display()`, `get_gmaps_client()` |
 | `integrations/sheets.py` | Results I/O: `open_output()` (listings tab + seen URLs; `open_spreadsheet()` picks the backend from `config.OUTPUT_BACKEND` at call time), `dedupe_and_sort_sheet()`, row-rewrite helpers |
 | `integrations/local_workbook.py` | `OUTPUT_BACKEND = "excel"` (the public default): `LocalWorkbook`/`LocalWorksheet`, an openpyxl stand-in for the slice of gspread the bot calls, so every sheet code path writes `EXCEL_PATH` unchanged. Saves after each write; a save blocked by Excel holding the file (PermissionError) is retried, then left in memory with a WARNING and saved by the next write. Numeric strings become numbers and the formula-guard `'` is dropped under USER_ENTERED, like Sheets. `bot_listener.py` reopens it per tap (a long-held copy would save stale rows over a scan's) |
