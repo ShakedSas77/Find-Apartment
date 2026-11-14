@@ -4,47 +4,39 @@ Scrapes Facebook apartment listing groups, parses each post with an AI model, co
 
 Everything runs on free tiers: Gemini's free API quota (or a local Ollama model, no account at all), and a free OpenStreetMap distance estimate.
 
+📘 **New here? Read the [User Guide](docs/user-guide.md)** — the full setup, step by step, plus how to use the results and every add-on.
+
 ## Quick start (Windows)
 
-1. **Download** the code: the green **Code** button on GitHub → **Download ZIP**, then unzip it (or `git clone` it).
-2. **Double-click `install.bat`.** It installs everything into the folder (a private Python environment and the bot's own browser), then starts the setup wizard. Needs Python 3.11+; if it's missing, the installer says how to get it.
-3. **Answer the wizard** (about 5 minutes):
-   - what you're looking for: rooms, rent, and the address to measure walking distance to;
-   - the AI that reads posts: a free Gemini key (it opens the page for you) or Ollama on your PC;
-   - where results go: `listings.xlsx` in the folder, or a Google Sheet;
-   - Facebook: log in once in the bot's browser window (recommended), or no login;
-   - the Facebook group links to scan.
-4. **Run a scan:** double-click `run_bot.bat`. Open `listings.xlsx` to see the apartments, newest post first, each with a fit score; the **Groups** tab shows each group's status.
+**Required setup** (~15 minutes, [step-by-step guide](docs/user-guide.md#part-1--basic-setup-required)):
 
-Change any answer later with `python setup_wizard.py` (or one step: `python setup_wizard.py --add search`). Close `listings.xlsx` in Excel while a scan runs — Excel locks the file; the bot then keeps the new rows and saves them on its next write.
+1. **Python 3.11+** with "Add python.exe to PATH" ticked ([guide](docs/user-guide.md#step-1-install-python)).
+2. **Download** the code: green **Code** button → **Download ZIP** → unzip (or `git clone`).
+3. **Double-click `install.bat`.** It installs everything inside the folder, then starts the setup wizard ([guide](docs/user-guide.md#step-3-run-the-installer)), which asks:
+   - what you're looking for — rooms, rent, and the address to measure walking distance to ([guide](docs/user-guide.md#step-4-what-youre-looking-for));
+   - the AI that reads posts — a free Gemini key, or Ollama offline ([guide](docs/user-guide.md#step-5-the-ai-that-reads-posts));
+   - where results go — `listings.xlsx`, or a Google Sheet ([guide](docs/user-guide.md#step-6-where-results-go));
+   - Facebook — log in once in the bot's own browser, and paste your group links ([guide](docs/user-guide.md#step-7-facebook-login-and-groups)).
+4. **Run a scan:** double-click `run_bot.bat`, then open `listings.xlsx` ([reading the results](docs/user-guide.md#reading-the-results)).
 
-> **Area:** the bot is tuned for Ramat Gan / Givatayim / Tel Aviv — the AI assumes those cities when a post names none, and city names in addresses are matched for those three. It runs anywhere, but outside that area some addresses come out without a city and their distance is skipped.
+**Optional add-ons** — each independent, add any later with one command ([all add-ons](docs/user-guide.md#part-3--add-ons-optional-each-on-its-own)):
 
-### Basic setup vs add-ons
+| Add-on | What you get | Needs | Command | Guide |
+|---|---|---|---|---|
+| Telegram | each new apartment on your phone; run scans from the chat | the Telegram app | `python setup_wizard.py --add telegram` | [A](docs/user-guide.md#a-telegram-alerts-and-chat-commands) |
+| Daily scans | scans run by themselves at set times | — | `python setup_wizard.py --add schedule` | [B](docs/user-guide.md#b-daily-automatic-scans) |
+| Yad2 emails | Yad2 listings too, from its saved-search emails | Gmail + an app password | `python setup_wizard.py --add yad2` | [C](docs/user-guide.md#c-yad2-email-alerts) |
+| Google Sheet | results in a Google Sheet instead of Excel | a free Google Cloud service account | `python setup_wizard.py --add results` | [D](docs/user-guide.md#d-google-sheet-instead-of-excel) |
+| Google Maps | real walking routes instead of the free estimate | a Google Maps key (card required, stays in free credit) | `python setup_wizard.py --add maps` | [E](docs/user-guide.md#e-google-maps-walking-routes) |
 
-| | Needs | Turn on with |
-|---|---|---|
-| **Basic**: Facebook groups → AI → `listings.xlsx` | a free Gemini key, or Ollama | `install.bat` |
-| Google Sheet instead of Excel (open from any device, share it) | a Google Cloud service account | `python setup_wizard.py --add results` |
-| Telegram: each new apartment on your phone, run scans from the chat | a Telegram bot (2 minutes with @BotFather) | `python setup_wizard.py --add telegram` |
-| Yad2 listings, from Yad2's alert emails | a Gmail app password | `python setup_wizard.py --add yad2` |
-| Real Google walking routes instead of the free estimate | a Google Maps key | `python setup_wizard.py --add maps` |
-| Scans every day by themselves | — | `python setup_wizard.py --add schedule` |
+(Run the commands from a Command Prompt in the bot's folder, with `venv\Scripts\python` in place of `python`.) `python doctor.py` checks everything turned on and marks the rest ⚪ OFF; [troubleshooting](docs/user-guide.md#troubleshooting) covers the common problems.
 
-`python doctor.py` checks everything that's turned on and marks the rest ⚪ OFF.
+Good to know:
 
-### Facebook without logging in
-
-Choosing "no login" makes the bot read groups like a logged-out visitor, with a plain browser and no account. Facebook usually shows logged-out visitors a login wall and no posts; the bot respects it — the group is marked "פייסבוק דורש התחברות" in the Groups tab and skipped, the dialog is never closed or worked around. Expect few or no listings this way; logging in once (`python setup_wizard.py --add facebook`) is the reliable path. The bot only ever reads — it never posts, comments or messages anyone.
-
-### Troubleshooting
-
-- **"close listings.xlsx"** — Excel has the file open; close it, the next write saves the waiting rows.
-- **"Facebook session is gone" / `login_required`** — log in again: `python setup_wizard.py --add facebook`.
-- **A security check (CAPTCHA) from Facebook** — run `run_bot.bat --headful` and solve it in the window.
-- **Post dates missing, or a warning about an unrecognized date format** — the bot reads Facebook's post times in English ("3 hrs", "Yesterday"); set your Facebook account's language to English (Settings → Language and region).
-- **"setup incomplete"** — a turned-on feature is missing its key; the message lists what, or rerun the wizard.
-- **Something else** — `python doctor.py` shows what's wrong and how to fix it; every run also writes a log to `logs\`.
+- **Area:** tuned for Ramat Gan / Givatayim / Tel Aviv — the AI assumes those cities when a post names none. It runs anywhere, but outside that area some addresses come out without a distance.
+- **Facebook in English:** the bot reads post times like "3 hrs"; set Facebook's language to English.
+- **No-login mode** reads groups as a logged-out visitor and stops at Facebook's login wall (never closing or working around it) — the group is marked "פייסבוק דורש התחברות". Expect little; logging in once is the reliable path.
+- **Read-only:** the bot never posts, comments or messages anyone on Facebook, and opens the Yad2 mailbox read-only.
 
 ## Current Filters
 
