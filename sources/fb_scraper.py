@@ -46,7 +46,7 @@ from sources.graphql_capture import GraphqlPostCapture, compare_with_dom
 from sources.mail_source import scan_alert_emails
 from core import run_log
 from integrations.sheets import (
-    setup_google_sheet, dedupe_and_sort_sheet, open_listings_tab, _rewrite_sheet_data_rows,
+    open_output, dedupe_and_sort_sheet, open_listings_tab, _rewrite_sheet_data_rows,
     _fields_from_sheet_row, _SCORE_COL_INDEX,
 )
 
@@ -825,7 +825,7 @@ def run_scraper(headless: bool = False, live: bool = False, source: str | None =
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
     run_started = time.perf_counter()
     run_started_at = datetime.now()
-    sheet, seen_urls = setup_google_sheet()
+    sheet, seen_urls = open_output()
     _print_gmaps_quota_status()
 
     # The sheet's Groups tab decides which groups to scan (groups_sync.py); a dry run only reads it.

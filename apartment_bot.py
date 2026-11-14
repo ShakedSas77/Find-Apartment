@@ -20,7 +20,7 @@ from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
     _content_prefilter, _extract_price_candidates,
 )
-from integrations.sheets import setup_google_sheet, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
+from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
 from sources.fb_scraper import run_scraper
 from sources.mail_source import dump_alert_emails
 from core.run_log import start_run_log
@@ -40,7 +40,7 @@ def reparse_rejected_posts():
     still writes real matches to the sheet via the normal (non-Playwright) Sheets/Maps
     API clients.
     """
-    sheet, seen_urls = setup_google_sheet()
+    sheet, seen_urls = open_output()
     candidates = storage.get_reparse_candidates()
     print(f"\nRe-parsing {len(candidates)} rejected/failed post(s) from local DB (no browser)...")
 
@@ -237,7 +237,7 @@ def recompute_sheet_scores():
     (as in the entry-date curve redesign) and old rows are left holding scores
     from the previous version. No browser, no Maps/Gemini calls.
     """
-    sheet, _ = setup_google_sheet()
+    sheet, _ = open_output()
     data = sheet.get_all_values()
     rows = data[1:]
     if not rows:
@@ -277,7 +277,7 @@ def backfill_ratings():
     if not TELEGRAM_ENABLED:
         print("TELEGRAM_ENABLED is False in config.py — nothing to send.")
         return
-    sheet, _ = setup_google_sheet()
+    sheet, _ = open_output()
     data = sheet.get_all_values()
     rows = data[1:]
     if not rows:
@@ -307,7 +307,7 @@ def prune_data():
     older than MAX_POST_AGE_DAYS. Runs automatically at the end of every
     scheduled scan too (run_scraper()) — this flag is for running it standalone.
     """
-    sheet, _ = setup_google_sheet()
+    sheet, _ = open_output()
     print(f"\nPruning rows/records older than {MAX_POST_AGE_DAYS} days...")
     duplicates_removed, stale_removed, kept = dedupe_and_sort_sheet(sheet)
     print(f"Removed {duplicates_removed} duplicate repost(s) and {stale_removed} stale row(s). Sheet now has {kept} listings.")
@@ -384,7 +384,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args.sync_groups:
-        sheet, _ = setup_google_sheet()
+        sheet, _ = open_output()
         active = sync_groups(sheet.spreadsheet, write=True, sort_by_yield=True)
         print(f"Groups tab synced and sorted by match rate: {len(active)} active group(s) of {len(storage.get_groups())}.")
         sys.exit(0)

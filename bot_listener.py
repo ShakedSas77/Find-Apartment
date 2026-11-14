@@ -21,19 +21,17 @@ A separate long-lived process — not part of the scrape.
 
 import os
 
-import gspread
 import requests
 from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
 
 import config
 from core import storage
 from integrations import telegram_commands, telegram_notifier
+from integrations.sheets import open_spreadsheet
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SHEET_ID = os.getenv("SHEET_ID")
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
 _POLL_TIMEOUT_SECONDS = 30
@@ -58,9 +56,7 @@ def _call(method: str, payload: dict) -> dict | list | None:
 
 
 def _open_sheet():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(config.CREDENTIALS_FILE, scopes=scopes)
-    return gspread.authorize(creds).open_by_key(SHEET_ID).sheet1
+    return open_spreadsheet().sheet1
 
 
 def _find_row(sheet, url: str) -> tuple[int, list] | None:
@@ -198,7 +194,9 @@ def run():
         print("ERROR: TELEGRAM_BOT_TOKEN not set in .env")
         return
     storage.init_db()
-    sheet = _open_sheet()
+    # A local Excel file is rewritten by every scan; a copy held open here would save stale rows back
+    # over a scan's, so it's reopened per tap instead.
+    sheet = _open_sheet() if config.OUTPUT_BACKEND == "sheets" else None
     offset = storage.get_telegram_offset()
     # Fills the "/" menu in the Telegram chat with the commands below.
     _call("setMyCommands", {"commands": [{"command": name, "description": text}
@@ -212,7 +210,7 @@ def run():
             offset = update["update_id"] + 1
             cq = update.get("callback_query")
             if cq:
-                _handle_callback_query(cq, sheet)
+                _handle_callback_query(cq, sheet or _open_sheet())
             message = update.get("message")
             if message:
                 telegram_commands.handle_message(message, TELEGRAM_CHAT_ID, _send_to_chat)

@@ -1,7 +1,8 @@
 """
-=== Google Sheets I/O ===
+=== Results sheet I/O (Google Sheets, or a local Excel file) ===
 
-setup_google_sheet() (connect + dedupe/write bootstrap),
+open_output() (connect + dedupe/write bootstrap; OUTPUT_BACKEND picks the Google Sheet or
+integrations.local_workbook's Excel stand-in),
 open_listings_tab() (another tab with the same columns, e.g. Yad2) and
 dedupe_and_sort_sheet() (end-of-run cross-post dedupe + stale-row prune +
 sort) are the public entry points. Everything else here is the shared
@@ -14,11 +15,12 @@ from google.oauth2.service_account import Credentials
 
 import env
 from core import storage
-from config import CREDENTIALS_FILE, SHEET_HEADERS
+from config import CREDENTIALS_FILE, EXCEL_PATH, OUTPUT_BACKEND, SHEET_HEADERS
 from core.util import _with_retries
 from core.normalize import _sheet_safe_cell, _is_recent_post_date, _post_date_sort_key
 from core.dedupe import _listing_key
 from integrations.distance_fallback import error_km_from_label
+from integrations.local_workbook import LocalWorkbook
 
 _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 5
 _COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
@@ -26,17 +28,17 @@ _COL_DIST_ACCURACY = SHEET_HEADERS.index("דיוק מרחק")
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 
-def setup_google_sheet():
+def open_output():
     """
-    Connects to Google Sheets, checks existing data,
-    and creates headers if the sheet is empty.
-    Returns the sheet object and a set of already seen URLs.
+    Opens the results (the Google Sheet, or the local Excel file, per OUTPUT_BACKEND), checks
+    existing data, and creates headers if the listings tab is empty.
+    Returns the listings tab and a set of already seen URLs.
     """
-    print("\nConnecting to Google Sheets and reading existing data...")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sheet = gc.open_by_key(env.get_sheet_id()).sheet1
+    try:
+        sheet = open_spreadsheet().sheet1
+    except Exception as e:
+        print(f"    ERROR: opening the results ({OUTPUT_BACKEND}): {e}")
+        sys.exit(1)
 
     try:
         # Check headers via row 1 only — avoids pulling the whole sheet into memory
@@ -57,9 +59,19 @@ def setup_google_sheet():
         print(f"    Found {len(seen_urls)} existing apartments in the sheet. Will skip them.")
         return sheet, seen_urls
     except Exception as e:
-        print(f"    ERROR: reading Google Sheet: {e}")
+        print(f"    ERROR: reading the results sheet: {e}")
         print("    Aborting: cannot dedupe or write results without the sheet.")
         sys.exit(1)
+
+def open_spreadsheet():
+    """The results workbook: a gspread Spreadsheet, or a LocalWorkbook with the same methods."""
+    if OUTPUT_BACKEND == "excel":
+        print(f"\nOpening {EXCEL_PATH} and reading existing data...")
+        return LocalWorkbook(EXCEL_PATH)
+    print("\nConnecting to Google Sheets and reading existing data...")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    return gspread.authorize(creds).open_by_key(env.get_sheet_id())
 
 def open_listings_tab(spreadsheet, title: str, create: bool = True):
     """

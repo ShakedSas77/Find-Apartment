@@ -1,7 +1,7 @@
 """
 Wipes local state so the next bot run starts fresh:
 - deletes bot_data.db (SQLite cache: verdicts, raw text, Maps usage)
-- clears all data rows in the Google Sheet, keeping the header row
+- clears all data rows in the results (Google Sheet or local Excel file), keeping the header row
 
 Run manually whenever you want a clean slate (e.g. after a filter/prompt change
 you want to test without stale cached verdicts skipping posts).
@@ -9,16 +9,8 @@ you want to test without stale cached verdicts skipping posts).
 import os
 import sys
 
-import gspread
-from google.oauth2.service_account import Credentials
-from dotenv import load_dotenv
-
-from config import CREDENTIALS_FILE
 from core.storage import DB_PATH
-
-load_dotenv()
-
-SHEET_ID = os.getenv("SHEET_ID")
+from integrations.sheets import open_spreadsheet
 
 
 def clean_db():
@@ -30,13 +22,7 @@ def clean_db():
 
 
 def clean_sheet():
-    if not SHEET_ID:
-        print("ERROR: SHEET_ID missing from .env — skipping sheet clean.")
-        return
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-    gc = gspread.authorize(creds)
-    sheet = gc.open_by_key(SHEET_ID).sheet1
+    sheet = open_spreadsheet().sheet1
 
     row_count = len(sheet.get_all_values())
     if row_count <= 1:
