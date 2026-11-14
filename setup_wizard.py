@@ -26,6 +26,7 @@ import requests
 from google import genai
 
 import config
+from core import storage
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
@@ -45,6 +46,7 @@ def main(argv=None):
     parser.add_argument("--add", choices=list(STEPS), help="run only this step")
     args = parser.parse_args(argv)
     os.chdir(_PROJECT_DIR)
+    storage.init_db()  # a fresh install has no bot_data.db yet, and the Groups step records groups in it
     print("=== Apartment bot setup ===  (Enter keeps the value in [brackets]; Ctrl+C quits, saved answers stay)\n")
     steps = [args.add] if args.add else ["search", "ai", "results", "facebook"]
     for name in steps:
