@@ -110,7 +110,22 @@ def _handle_rating(cq: dict, parts: list[str]):
     })
 
 
+def _handle_command_button(cq: dict):
+    # Same rule as a typed command: only the configured chat is obeyed.
+    if str(cq.get("message", {}).get("chat", {}).get("id")) != str(TELEGRAM_CHAT_ID):
+        return
+    # getUpdates replays taps made while the listener was down, and a tap carries no time of its own.
+    # Telegram refuses to answer an old tap ("query is too old"), so a refused answer means a stale
+    # tap, and an old "scan" button must not start a scan hours later.
+    if _call("answerCallbackQuery", {"callback_query_id": cq.get("id")}) is None:
+        return
+    telegram_commands.handle_button(cq.get("data", ""), _send_to_chat)
+
+
 def _handle_callback_query(cq: dict, sheet):
+    if cq.get("data", "").split(":")[0] in ("cmd", "sg"):
+        _handle_command_button(cq)
+        return
     parts = cq.get("data", "").split(":")
     if parts and parts[0] == "rate" and len(parts) == 4:
         _handle_rating(cq, parts)
@@ -171,8 +186,11 @@ def _handle_callback_query(cq: dict, sheet):
     _call("answerCallbackQuery", {"callback_query_id": cq.get("id")})
 
 
-def _send_to_chat(text: str):
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"})
+def _send_to_chat(text: str, reply_markup: dict | None = None):
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    _call("sendMessage", payload)
 
 
 def run():

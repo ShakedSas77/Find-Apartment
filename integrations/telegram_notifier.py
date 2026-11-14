@@ -298,16 +298,19 @@ def send_run_started(info: dict) -> str | None:
     """
     if not _configured():
         return None
-    result = _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_started(info), "parse_mode": "HTML"})
+    result = _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_started(info), "parse_mode": "HTML",
+                                   "reply_markup": RUN_STARTED_KEYBOARD})
     return str(result["message_id"]) if result else None
 
 
-def update_run_progress(message_id: str, info: dict, progress_text: str):
-    """Rewrites the run-started message with progress_text (format_run_progress()) under it."""
+def update_run_progress(message_id: str, info: dict, progress_text: str, finished: bool = False):
+    """Rewrites the run-started message with progress_text (format_run_progress()) under it. The stop
+    button stays until the groups are done: an edit without reply_markup would drop it."""
     if not _configured():
         return
     text = _format_run_started(info) + "\n\n" + progress_text
-    _call("editMessageText", {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id, "text": text, "parse_mode": "HTML"})
+    _call("editMessageText", {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id, "text": text, "parse_mode": "HTML",
+                              "reply_markup": {"inline_keyboard": []} if finished else RUN_STARTED_KEYBOARD})
 
 
 def format_run_progress(done: int, total: int, added: int, left_s: float | None) -> str:
@@ -329,9 +332,15 @@ def send_run_finished(stats: dict):
     if not _configured():
         return
     _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": _format_run_finished(stats),
-                          "parse_mode": "HTML", "disable_web_page_preview": True})
+                          "parse_mode": "HTML", "disable_web_page_preview": True,
+                          "reply_markup": RUN_FINISHED_KEYBOARD})
 
 
+# Buttons on the run messages. A "cmd:<name>" tap runs that chat command (bot_listener.py ->
+# telegram_commands.handle_button).
+RUN_STARTED_KEYBOARD = {"inline_keyboard": [[{"text": "⏹ עצירת הסריקה", "callback_data": "cmd:stop"}]]}
+RUN_FINISHED_KEYBOARD = {"inline_keyboard": [[{"text": "▶️ סריקה נוספת", "callback_data": "cmd:scan"},
+                                              {"text": "🆕 נוספו ב-24 שעות", "callback_data": "cmd:new"}]]}
 # How a rejected post is named in the run-finished breakdown.
 _REJECTION_LABELS = {
     storage.VERDICT_REJECTED_PRICE: "מחיר",
@@ -351,12 +360,17 @@ _RUN_PROGRESS_BAR_WIDTH = 12
 def _format_run_started(info: dict) -> str:
     """
     info: groups (count), new_groups (never scanned before), alerts (Yad2 emails read too),
-    previous (storage.get_last_successful_live_run() row, or None), now (datetime).
+    scope (a partial scan's label, None for a full one), previous (storage.get_last_successful_live_run()
+    row, or None), now (datetime).
     """
-    groups_line = f"🔎 {info['groups']} קבוצות פייסבוק"
-    if info.get("new_groups"):
-        groups_line += f" · {info['new_groups']} חדשות (סריקה ראשונה, ארוכה יותר)"
-    lines = [f"▶️ <b>סריקה התחילה</b> · {info['now']:%H:%M}", groups_line]
+    lines = [f"▶️ <b>סריקה התחילה</b> · {info['now']:%H:%M}"]
+    if info.get("scope"):
+        lines.append(f"📌 {_escape(info['scope'])}")
+    if info["groups"]:
+        groups_line = f"🔎 {info['groups']} קבוצות פייסבוק"
+        if info.get("new_groups"):
+            groups_line += f" · {info['new_groups']} חדשות (סריקה ראשונה, ארוכה יותר)"
+        lines.append(groups_line)
     if info.get("alerts"):
         lines.append("📧 + התראות יד2 מהמייל")
     lines.append(f"🎯 {config.MIN_ROOMS:g}–{config.MAX_ROOMS:g} חדרים · ₪{config.MIN_PRICE:,}–{config.MAX_PRICE:,}"
@@ -372,11 +386,12 @@ def _format_run_finished(stats: dict) -> str:
     """
     stats: the console summary numbers (groups_scanned, total, posts_seen, prefiltered, llm_parsed,
     added, gmaps_calls, checkpoint_skipped, errors, warnings) plus duration_s, activity
-    (storage.get_run_activity()) and not_member_groups (count).
+    (storage.get_run_activity()), not_member_groups (count) and scope (a partial scan's label, or None).
     """
     activity = stats.get("activity") or {"verdicts": {}, "models": {}, "added": []}
     added = activity["added"]
-    lines = [f"✅ <b>סריקה הסתיימה</b> · {_ago(timedelta(seconds=stats.get('duration_s', 0)))}"]
+    scope = f" ({_escape(stats['scope'])})" if stats.get("scope") else ""
+    lines = [f"✅ <b>סריקה הסתיימה</b>{scope} · {_ago(timedelta(seconds=stats.get('duration_s', 0)))}"]
 
     if added:
         yad2 = sum(1 for listing in added if "yad2.co.il" in listing["url"])
@@ -388,7 +403,8 @@ def _format_run_finished(stats: dict) -> str:
     else:
         lines.append("🏠 אין דירות חדשות הפעם")
 
-    lines.append(f"🔎 {stats['groups_scanned']}/{stats['total']} קבוצות · {stats['posts_seen']:,} פוסטים · "
+    groups = f"{stats['groups_scanned']}/{stats['total']} קבוצות · " if stats["total"] else ""
+    lines.append(f"🔎 {groups}{stats['posts_seen']:,} פוסטים · "
                  f"{stats['prefiltered']:,} סוננו מראש · {stats['llm_parsed']} נשלחו ל-AI")
     rejections = sorted(((activity["verdicts"].get(verdict, 0), label) for verdict, label in _REJECTION_LABELS.items()),
                         reverse=True)

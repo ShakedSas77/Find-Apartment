@@ -338,3 +338,54 @@ def test_an_estimated_distance_is_marked_with_its_error():
     message = telegram_notifier._format_listing_message(dict(_FULL_FIELDS, distance_text="1.2", distance_error_km=0.3), 70)
 
     assert "~1.2 ק\"מ הליכה (הערכה, ±0.3)" in message
+
+
+def test_run_started_names_a_partial_scan():
+    text = telegram_notifier._format_run_started({"groups": 1, "new_groups": 0, "alerts": False, "now": _NOW,
+                                                  "previous": None, "scope": "קבוצה אחת: דירות בגבעתיים"})
+
+    assert "קבוצה אחת: דירות בגבעתיים" in text
+
+
+def test_a_yad2_only_run_started_has_no_facebook_groups_line():
+    text = telegram_notifier._format_run_started({"groups": 0, "new_groups": 0, "alerts": True, "now": _NOW,
+                                                  "previous": None, "scope": "התראות יד2 בלבד"})
+
+    assert "קבוצות פייסבוק" not in text
+
+
+def test_run_started_carries_the_stop_button(monkeypatch):
+    sent = {}
+    _send_through_fake_api(monkeypatch, sent)
+
+    telegram_notifier.send_run_started({"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW, "previous": None})
+
+    assert sent["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == "cmd:stop"
+
+
+def test_a_progress_edit_keeps_the_stop_button(monkeypatch):
+    sent = {}
+    _send_through_fake_api(monkeypatch, sent)
+
+    telegram_notifier.update_run_progress("77", {"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW,
+                                                 "previous": None}, "⏳ 27/54")
+
+    assert sent["reply_markup"] == telegram_notifier.RUN_STARTED_KEYBOARD
+
+
+def test_the_last_progress_edit_removes_the_stop_button(monkeypatch):
+    sent = {}
+    _send_through_fake_api(monkeypatch, sent)
+
+    telegram_notifier.update_run_progress("77", {"groups": 54, "new_groups": 0, "alerts": False, "now": _NOW,
+                                                 "previous": None}, "✔️ 54/54", finished=True)
+
+    assert sent["reply_markup"] == {"inline_keyboard": []}
+
+
+def test_a_yad2_only_run_finished_shows_no_group_counts():
+    assert "0/0 קבוצות" not in _finished(groups_scanned=0, total=0, scope="התראות יד2 בלבד")
+
+
+def test_run_finished_names_a_partial_scan():
+    assert "סריקה הסתיימה</b> (פייסבוק בלבד)" in _finished(scope="פייסבוק בלבד")

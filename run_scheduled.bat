@@ -12,7 +12,7 @@ if errorlevel 1 (
     timeout /t 5 /nobreak >nul
 )
 
-"venv\Scripts\python.exe" -u apartment_bot.py --headless --live >> "%LOGFILE%" 2>&1
+"venv\Scripts\python.exe" -u apartment_bot.py --headless --live --scheduled >> "%LOGFILE%" 2>&1
 set EXITCODE=%ERRORLEVEL%
 echo Exit code: %EXITCODE% >> "%LOGFILE%"
 

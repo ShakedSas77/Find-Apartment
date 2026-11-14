@@ -8,6 +8,7 @@ core.evaluate.process_candidate_listing. Checkpoint/CAPTCHA handling, dead-
 link pruning, article selectors, and the "See more" expansion logic are all
 FB-DOM-specific and live here rather than in a shared module.
 """
+import json
 import os
 import random
 import re
@@ -40,7 +41,7 @@ from core.normalize import (
 from core.dedupe import _text_dedup_hash
 from core.evaluate import process_candidate_listing, _content_prefilter, flush_pending_listings
 from backup_db import backup_if_stale
-from integrations.groups_sync import sync_groups, TAB_NAME as GROUPS_TAB_NAME
+from integrations.groups_sync import canonical_group_url, sync_groups, TAB_NAME as GROUPS_TAB_NAME
 from sources.graphql_capture import GraphqlPostCapture, compare_with_dom
 from sources.mail_source import scan_alert_emails
 from core import run_log
@@ -812,12 +813,13 @@ def _resend_owed_alerts(sheet) -> int:
     print(f"Re-sent {sent}/{len(owed)} owed Telegram alert(s) from earlier runs.")
     return sent
 
-def run_scraper(headless: bool = False, live: bool = False):
+def run_scraper(headless: bool = False, live: bool = False, source: str | None = None, group: str | None = None):
     """
-    One full scrape: pick the active groups from the sheet's Groups tab, log in, scan every group
+    One scrape: pick the active groups from the sheet's Groups tab, log in, scan every group
     (sequentially in the real profile, or in parallel worker browsers), then do the end-of-run
-    upkeep. Returns the run's totals; apartment_bot.py turns them into the exit code. Raises
-    LoginRequired when Facebook's session is gone and can't be restored.
+    upkeep. source "fb" skips the Yad2 alert emails, "yad2" reads only them (no browser); group
+    scans just that one group from the tab. Returns the run's totals; apartment_bot.py turns them
+    into the exit code. Raises LoginRequired when Facebook's session is gone and can't be restored.
     """
     if not live:
         print("DRY RUN: classifying and printing only — no sheet writes, no dedupe/prune. Rerun without --dry-run to commit.")
@@ -826,25 +828,69 @@ def run_scraper(headless: bool = False, live: bool = False):
     sheet, seen_urls = setup_google_sheet()
     _print_gmaps_quota_status()
 
-    profile_dir = os.path.join(os.getcwd(), "chrome_profile")
-    storage_state_path = os.path.join(profile_dir, "_session_state.json")
-
     # The sheet's Groups tab decides which groups to scan (groups_sync.py); a dry run only reads it.
-    group_urls = sync_groups(sheet.spreadsheet, write=live)
-    print(f"Groups to scan: {len(group_urls)} active in the '{GROUPS_TAB_NAME}' tab.")
+    group_urls = _scope_group_urls(sync_groups(sheet.spreadsheet, write=live), source, group)
+    print(f"Groups to scan: {len(group_urls)}.")
+    is_full_scan = source is None and group is None
+    scope = _scope_label(source, group)
     shuffled_urls = random.sample(group_urls, len(group_urls))
     totals = _new_totals(len(shuffled_urls))
     run_message = None  # (message_id, info) of the run-started message, which the progress bar edits
     if live and TELEGRAM_ENABLED:
         try:
-            info = _run_started_info(group_urls, run_started_at)
+            info = _run_started_info(group_urls, run_started_at, alerts=ALERTS_SCAN_ENABLED and source != "fb",
+                                     scope=scope)
             message_id = telegram_notifier.send_run_started(info)
             run_message = (message_id, info) if message_id else None
         except Exception as e:
             print(f"WARNING: Telegram run-started alert failed: {e}")
         _resend_owed_alerts(sheet)
-    if ALERTS_SCAN_ENABLED:
+    if ALERTS_SCAN_ENABLED and source != "fb":
         _scan_alert_emails(sheet, live, totals)
+    if group_urls:
+        _scan_facebook_groups(shuffled_urls, sheet, seen_urls, headless, live, totals, run_message,
+                              save_pace=is_full_scan, check_dead_links=is_full_scan)
+
+    gmaps_calls_this_month = storage.get_gmaps_usage()
+    _print_run_summary(totals, gmaps_calls_this_month)
+    if live:
+        _end_of_run_upkeep(sheet)
+    else:
+        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (rerun without --dry-run to commit).")
+    if live and TELEGRAM_ENABLED:
+        _notify_run_finished(totals, gmaps_calls_this_month, group_urls, run_started_at,
+                             time.perf_counter() - run_started, scope)
+
+    phases = ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(get_phase_seconds().items()))
+    print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
+    return totals
+
+def _scope_group_urls(group_urls: list[str], source: str | None, group: str | None) -> list[str]:
+    """The groups a run scans: all active ones, none for a Yad2-only run, or just `group` (any link
+    shape; it must be a row of the Groups tab, paused rows included)."""
+    if source == "yad2":
+        return []
+    if group is None:
+        return group_urls
+    wanted = canonical_group_url(group)
+    if wanted not in set(group_urls) | {g["url"] for g in storage.get_groups()}:
+        raise ValueError(f"{group} is not in the '{GROUPS_TAB_NAME}' tab")
+    return [wanted]
+
+def _scope_label(source: str | None, group: str | None) -> str | None:
+    """How the run messages name a partial scan; None for a full one."""
+    if group:
+        url = canonical_group_url(group)
+        name = next((g["name"] for g in storage.get_groups() if g["url"] == url and g["name"]), "")
+        return f"קבוצה אחת: {name or url}"
+    return {"fb": "פייסבוק בלבד", "yad2": "התראות יד2 בלבד"}.get(source)
+
+def _scan_facebook_groups(shuffled_urls: list[str], sheet, seen_urls, headless: bool, live: bool, totals: dict,
+                          run_message, save_pace: bool, check_dead_links: bool):
+    # The pace and the daily dead-link check belong to full scans: one group's pace isn't the
+    # whole scan's, and a quick one-group scan shouldn't spend minutes checking every listing link.
+    profile_dir = os.path.join(os.getcwd(), "chrome_profile")
+    storage_state_path = os.path.join(profile_dir, "_session_state.json")
     sequential_mode = MAX_CONCURRENT_GROUPS == 1
 
     # --- Login phase: single persistent-context tab, sequential ---
@@ -855,7 +901,7 @@ def run_scraper(headless: bool = False, live: bool = False):
             _apply_stealth(page)
             _ensure_logged_in(page, headless)
 
-            if PRUNE_DEAD_LINKS_ENABLED and _dead_link_check_due(datetime.now()):
+            if check_dead_links and PRUNE_DEAD_LINKS_ENABLED and _dead_link_check_due(datetime.now()):
                 _prune_dead_links(page, sheet, headless, live)
                 if live:
                     storage.set_bot_state(_DEAD_LINKS_CHECKED_KEY, datetime.now().isoformat(timespec="seconds"))
@@ -865,7 +911,8 @@ def run_scraper(headless: bool = False, live: bool = False):
                 try:
                     _scan_groups_sequentially(page, shuffled_urls, sheet, seen_urls, headless, live, totals,
                                               progress=progress)
-                    _save_scan_pace(progress, totals)
+                    if save_pace:
+                        _save_scan_pace(progress, totals)
                 finally:
                     progress.stop()
             else:
@@ -880,23 +927,10 @@ def run_scraper(headless: bool = False, live: bool = False):
         try:
             _scan_groups_in_parallel(shuffled_urls, sheet, seen_urls, storage_state_path, headless,
                                      real_user_agent, real_locale, live, totals, progress=progress)
-            _save_scan_pace(progress, totals)
+            if save_pace:
+                _save_scan_pace(progress, totals)
         finally:
             progress.stop()
-
-    gmaps_calls_this_month = storage.get_gmaps_usage()
-    _print_run_summary(totals, gmaps_calls_this_month)
-    if live:
-        _end_of_run_upkeep(sheet)
-    else:
-        print("DRY RUN: skipping sheet dedupe/sort and DB pruning (rerun without --dry-run to commit).")
-    if live and TELEGRAM_ENABLED:
-        _notify_run_finished(totals, gmaps_calls_this_month, group_urls, run_started_at,
-                             time.perf_counter() - run_started)
-
-    phases = ", ".join(f"{name} {seconds:.0f}s" for name, seconds in sorted(get_phase_seconds().items()))
-    print(f"Timing: {time.perf_counter() - run_started:.0f}s wall; cumulative across group threads: {phases or 'none'}.")
-    return totals
 
 def _new_totals(total_groups: int) -> dict:
     # The one definition of the run-totals shape: run_scraper's return value, which
@@ -1076,15 +1110,17 @@ class _ScanProgress:
             if line != self._last_console:
                 self._last_console = line
                 _safe_print(line)
-            if not self.run_message:
-                return
             progress_text = telegram_notifier.format_run_progress(self.done, self.total, added, left_s)
-            if progress_text == self._last_telegram:
+            finished = self.done >= self.total
+            # Every tick, changed or not: /status (telegram_commands) trusts only a fresh entry.
+            storage.set_bot_state(storage.SCAN_PROGRESS_KEY, json.dumps(
+                {"text": progress_text, "updated": datetime.now().isoformat(timespec="seconds")}, ensure_ascii=False))
+            if not self.run_message or progress_text == self._last_telegram:
                 return
             self._last_telegram = progress_text
         message_id, info = self.run_message
         try:
-            telegram_notifier.update_run_progress(message_id, info, progress_text)
+            telegram_notifier.update_run_progress(message_id, info, progress_text, finished)
         except Exception as e:
             _safe_print(f"WARNING: Telegram progress update failed: {e}")
 
@@ -1185,22 +1221,24 @@ def _end_of_run_upkeep(sheet):
     except Exception as e:
         print(f"WARNING: DB backup failed: {e}")
 
-def _run_started_info(group_urls: list[str], now: datetime) -> dict:
+def _run_started_info(group_urls: list[str], now: datetime, alerts: bool, scope: str | None) -> dict:
     overview = storage.get_group_overview()
     return {
         "groups": len(group_urls),
         "new_groups": sum(1 for url in group_urls if not overview.get(url, {}).get("posts")),
-        "alerts": ALERTS_SCAN_ENABLED,
+        "alerts": alerts,
+        "scope": scope,
         "previous": storage.get_last_successful_live_run(),
         "now": now,
     }
 
 def _notify_run_finished(totals: dict, gmaps_calls_this_month: int, group_urls: list[str],
-                         run_started_at: datetime, duration_s: float):
+                         run_started_at: datetime, duration_s: float, scope: str | None):
     try:
         overview = storage.get_group_overview()
         telegram_notifier.send_run_finished({
             "duration_s": duration_s,
+            "scope": scope,
             "activity": storage.get_run_activity(run_started_at.isoformat()),
             "not_member_groups": sum(1 for url in group_urls if overview.get(url, {}).get("status") == "not_member"),
             "groups_scanned": totals["groups_scanned"],

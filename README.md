@@ -200,6 +200,8 @@ If the Facebook session is gone in headless mode, the run stops right away and i
 
 **Exit codes:** `0` OK, `1` crashed / login required / no group scanned, `2` a checkpoint skipped groups.
 
+**Partial scans:** `--source fb` scans only the Facebook groups, `--source yad2` reads only the Yad2 alert emails (no browser), and `--group <link>` scans one group from the Groups tab. They're recorded as their own run type, so "the previous scan" in the Telegram messages and doctor's last-run check still mean a full scan. The Task Scheduler launcher passes `--scheduled`, which makes the run exit at once while scheduled scans are paused (`/pause`).
+
 **Dry run (`--dry-run`):** still scrolls, calls the LLM, and computes distance (a real trial against live Facebook) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts are still cached locally, so a dry run can't cost a duplicate LLM call later.
 
 **Other flags:**
@@ -298,19 +300,27 @@ Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOK
 
 The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts. The run-started message turns into a live progress bar while groups scan (`⏳ ▓▓▓▓░░░░ 23/54 קבוצות · 4 נוספו · עוד ~15 דק'`); the time left blends the previous run's pace with this run's, trusting this run's more as groups finish.
 
-**Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>\run_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu):
+**Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>\run_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu). `/help` (or `/start`) shows them all as buttons, so nothing needs typing:
 
 | Command | What it does |
 |---|---|
-| `/scan` | Starts a full live scan in the background; the run-started message with its progress bar follows. Refused while a scan is already running. |
-| `/stop` | Stops a scan started with `/scan` (not one started by the Task Scheduler). |
-| `/status` | Whether a scan is running, and how the last one ended. |
-| `/stats` | The `--stats` output. |
-| `/doctor` | The `doctor.py` health check. |
+| `/scan` | Starts a full live scan (Facebook + Yad2) in the background; the run-started message with its progress bar follows. Refused while a scan is already running. |
+| `/scan_fb` | Scans the Facebook groups only. |
+| `/scan_yad2` | Reads the Yad2 alert emails only — no browser, done in seconds. |
+| `/scan_group` | Lists the active groups as buttons; tap one to scan just that group. |
+| `/stop` | Stops the running scan — one started from the chat or by the Task Scheduler. |
+| `/status` | Whether a scan is running and how far it got, how the last one ended, and whether scheduled scans are paused. |
+| `/new` | The listings added in the last 24 hours, newest first. |
+| `/groups` | Active groups that need a hand: not joined, no posts found, not scanned yet, or 300+ posts with no match (worth pausing). |
+| `/pause` / `/resume` | Pauses / resumes the Task Scheduler's scans (e.g. while away, or once you've signed a lease); scans from the chat still work. |
+| `/stats` | Listings added (total and this week), posts in the DB, active groups, and the last 5 runs. |
+| `/doctor` | The `doctor.py` health check, one ✅/⚠️/❌ line per service. |
 | `/sync_groups` | Syncs the Groups tab and sorts it by match rate (`--sync-groups`). |
-| `/help` | Lists the commands. |
+| `/help` | The command menu. |
 
-Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old.
+The run-started message has a ⏹ button that stops the scan, and the run-finished message has buttons for another scan and for `/new`.
+
+Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old, and so is an old button tap.
 
 Messages sent before the vote buttons were removed still carry ⭐/🗑 buttons; `python bot_listener.py` (a separate long-running process) still handles taps on those: 2 down-votes delete the row, 2 up-votes send a 🔥 highlight, each up-vote bumps the fit score.
 
