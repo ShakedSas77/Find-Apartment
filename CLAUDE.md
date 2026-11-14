@@ -24,6 +24,11 @@ python apartment_bot.py --eval
 # Save recent saved-search alert emails as text (read-only IMAP, no browser, no writes)
 python apartment_bot.py --mail-dump
 
+# Partial scans: only the Facebook groups, only the Yad2 alert emails (no browser), or one group from the Groups tab
+python apartment_bot.py --source fb
+python apartment_bot.py --source yad2
+python apartment_bot.py --group https://www.facebook.com/groups/<id>
+
 # Dry run (--dry-run): classifies and prints only — no sheet writes,
 # no verdict recorded for matches, no dedupe/prune. Safe way to try a
 # prompt/filter/config change against real Facebook before committing.
@@ -47,7 +52,7 @@ python backup_db.py
 
 # Telegram listener (only relevant if TELEGRAM_ENABLED=True) — separate
 # long-running process, not part of the scrape: vote taps + chat commands
-# (/scan /stop /status /stats /doctor /sync_groups /help)
+# (/scan /scan_fb /scan_yad2 /scan_group /stop /status /new /groups /pause /resume /stats /doctor /sync_groups /help)
 python bot_listener.py
 # hidden + auto-restart, logs to logs/listener.log (Startup-folder shortcut points at the .vbs)
 run_listener_hidden.vbs
@@ -92,7 +97,7 @@ run_*.bat run_hidden.vbs                                               launchers
 | `integrations/distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used whenever Google is off (the default) or over `GMAPS_MONTHLY_CAP`; tiers by match precision (house/street/neighbourhood) and gives each estimate a ± (`estimate_error_km`), shown in the sheet's `דיוק מרחק` column and the Telegram alert |
 | `integrations/telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
 | `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps (records them, updates the tally shown on the message) and chat commands (`integrations/telegram_commands.py`) |
-| `integrations/telegram_commands.py` | Chat commands from the configured chat only, fixed whitelist (`COMMANDS`), no free-form arguments: `/scan` launches `apartment_bot.py` as a background process (refused while one runs — ours, or a Task Scheduler run seen through its `running` row under 2h old), `/stop` kills the process tree of a scan started from the chat and marks its run row `stopped`, `/status`, and `/stats` `/doctor` `/sync_groups` run the CLI and reply with its output in `<pre>`. Commands older than 5 min (sent while the listener was down) are ignored |
+| `integrations/telegram_commands.py` | Chat commands from the configured chat only, fixed whitelist (`COMMANDS`), no free-form arguments, also reachable as inline buttons (`/help` menu, `cmd:<name>` callback data; `handle_button`): `/scan` `/scan_fb` `/scan_yad2` launch `apartment_bot.py` (`--source`) as a background process (refused while one runs — ours, or a Task Scheduler run seen through its `running` row under 2h old), `/scan_group` lists the active groups as buttons (`sg:<group id>` → `--group <url from the groups mirror>`), `/stop` kills the scan's process tree — ours, or the scheduled one by the pid `apartment_bot.py` records with its run id (`storage.SCAN_PID_KEY`) — and marks its run row `stopped`, `/status` (with the live progress line the scan writes to `SCAN_PROGRESS_KEY` every tick), `/new` (last 24h), `/groups` (needs-a-hand list), `/pause` `/resume` (`SCANS_PAUSED_KEY`; `run_scheduled.bat` passes `--scheduled`, which exits while paused), `/stats` (Hebrew, from storage), `/doctor` (`doctor.py --json`, Hebrew), `/sync_groups` (CLI output in `<pre>`). Commands older than 5 min (sent while the listener was down) are ignored; a button tap Telegram refuses to answer (too old) is ignored too |
 | `doctor.py` | Dependency health check (env, credentials.json, Sheets, Gemini, Ollama, Telegram) — run manually or `--alert` to DM on failure. Never calls Geocoding/Distance Matrix (shares `GMAPS_MONTHLY_CAP`'s counter) |
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |

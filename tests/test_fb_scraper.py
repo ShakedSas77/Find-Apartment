@@ -14,7 +14,7 @@ from sources import fb_scraper
 from sources.fb_scraper import (
     _DEAD_LINKS_CHECKED_KEY, _ScanProgress, _load_scan_pace, _save_scan_pace, _dead_link_check_due, _ensure_logged_in, _estimate_seconds_left,
     _blocked_membership, _new_totals, _progress_line, _read_post_text,
-    _scan_groups_sequentially, _tally, _update_old_streak, _yield_scaled_scroll_cap,
+    _scan_groups_sequentially, _scope_group_urls, _tally, _update_old_streak, _yield_scaled_scroll_cap,
 )
 
 _CUTOFF = datetime(2026, 10, 1, 12, 0)
@@ -235,7 +235,7 @@ def test_progress_line_shows_the_bar_counts_and_time_left():
     assert line == "[############------------] 12/24 groups | 3 added | 5 min elapsed | ~5 min left"
 
 
-def test_a_crashed_group_still_moves_the_progress_bar(monkeypatch):
+def test_a_crashed_group_still_moves_the_progress_bar(monkeypatch, db):
     def crash(*args):
         raise RuntimeError("page crashed")
     monkeypatch.setattr(fb_scraper.time, "sleep", lambda s: None)
@@ -319,3 +319,18 @@ def test_a_scan_cut_short_by_a_checkpoint_does_not_save_its_pace(db):
     _save_scan_pace(SimpleNamespace(done=54, total=54, done_elapsed_s=60), totals)
 
     assert _load_scan_pace() is None
+
+
+def test_a_yad2_only_run_scans_no_facebook_group():
+    assert _scope_group_urls(["https://www.facebook.com/groups/1"], "yad2", None) == []
+
+
+def test_a_one_group_run_accepts_any_link_shape_of_a_listed_group(db):
+    active = ["https://www.facebook.com/groups/123"]
+
+    assert _scope_group_urls(active, "fb", "https://m.facebook.com/groups/123/?ref=share") == active
+
+
+def test_a_one_group_run_refuses_a_group_not_in_the_groups_tab(db):
+    with pytest.raises(ValueError):
+        _scope_group_urls(["https://www.facebook.com/groups/123"], "fb", "https://www.facebook.com/groups/999")

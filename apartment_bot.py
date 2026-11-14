@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -347,6 +348,12 @@ if __name__ == "__main__":
                          help="With --eval: score this local Ollama model instead of the Gemini chain (e.g. aya-expanse:8b)")
     parser.add_argument("--mail-dump", action="store_true",
                          help="Save recent saved-search alert emails (read-only IMAP) as text files in ALERTS_DUMP_DIR, then exit")
+    parser.add_argument("--source", choices=["fb", "yad2"],
+                         help="Scan only the Facebook groups (fb) or only the Yad2 alert emails (yad2). Default: both")
+    parser.add_argument("--group", metavar="URL",
+                         help="Scan only this Facebook group (a link from the Groups tab); implies --source fb")
+    parser.add_argument("--scheduled", action="store_true",
+                         help="Set by the Task Scheduler launcher: skip the run while scheduled scans are paused (/pause in Telegram)")
     args = parser.parse_args()
 
     env.require_env()
@@ -391,6 +398,11 @@ if __name__ == "__main__":
         print(f"Saved {written} alert email(s) from the last {ALERTS_LOOKBACK_DAYS} day(s) to {ALERTS_DUMP_DIR}/.")
         sys.exit(0)
 
+    paused_since = storage.get_bot_state(storage.SCANS_PAUSED_KEY)
+    if args.scheduled and paused_since:
+        print(f"Scheduled scans are paused since {paused_since[:16]} (/resume in Telegram) - skipping this run.")
+        sys.exit(0)
+
     run_log = start_run_log("logs", LOG_RETENTION_DAYS)
     print("\n=======================================================")
     print("  Apartment Search Bot - Real-time updates")
@@ -401,9 +413,18 @@ if __name__ == "__main__":
     print(f"  Distance to: {DESTINATION_ADDRESS}")
     print("=======================================================")
 
-    run_id = storage.start_run("live" if args.live else "dry_run", str(run_log.path))
+    source = "fb" if args.group else args.source
+    # A partial scan gets its own mode, so "the previous run" and doctor's staleness check
+    # (get_last_successful_live_run) keep meaning a full scan.
+    mode = "live" if args.live else "dry_run"
+    if args.group:
+        mode += "_group"
+    elif source:
+        mode += f"_{source}"
+    run_id = storage.start_run(mode, str(run_log.path))
+    storage.set_bot_state(storage.SCAN_PID_KEY, f"{run_id}:{os.getpid()}")
     try:
-        result = run_scraper(headless=args.headless, live=args.live)
+        result = run_scraper(headless=args.headless, live=args.live, source=source, group=args.group)
     except LoginRequired as e:
         print(f"ERROR: {e}")
         storage.finish_run(run_id, "login_required", {}, run_log.warnings, run_log.errors)
@@ -417,7 +438,7 @@ if __name__ == "__main__":
 
     if result["checkpoint_skipped"] > 0:
         status, exit_code = "checkpoint", 2
-    elif result["groups_scanned"] == 0:
+    elif result["groups_scanned"] == 0 and result["total"] > 0:
         status, exit_code = "no_groups_scanned", 1
     else:
         status, exit_code = "ok", 0

@@ -685,6 +685,12 @@ def get_ratings_with_listing_data() -> list[dict]:
     return [dict(row) for row in rows]
 
 
+# bot_state keys shared between the scan process, the Telegram listener and doctor.py.
+SCANS_PAUSED_KEY = "scheduled_scans_paused_since"  # ISO time, "" = not paused
+SCAN_PID_KEY = "scan_pid"  # "<run id>:<pid>" of the scan in progress, so /stop can end a scheduled one
+SCAN_PROGRESS_KEY = "scan_progress"  # JSON {text, updated} — the progress line /status shows
+
+
 def get_bot_state(key: str) -> str | None:
     with _lock, _connect() as conn:
         row = conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()

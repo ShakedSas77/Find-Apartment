@@ -25,7 +25,7 @@ Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the shee
 
 ### Main tab (listings)
 
-17 Hebrew columns:
+18 Hebrew columns:
 
 - Listing URL
 - Price
@@ -44,8 +44,9 @@ Walking distance to your `DESTINATION_ADDRESS` is computed and shown in the shee
 - Scan timestamp (when the bot found the post)
 - Fit score (0-100, see [Fit Score](#fit-score) below)
 - Total monthly cost (rent + arnona/2 + vaad/2, plus the agent fee spread over 24 months for agent listings)
+- Distance accuracy — `Google` for a real walking route, `הערכה ±0.4` for a free estimate (see [Distance](#distance) below)
 
-Headers are auto-inserted on first run if the sheet is empty. Duplicate URLs are skipped automatically.
+Headers are auto-inserted on first run if the sheet is empty, and updated when a column is added. Duplicate URLs are skipped automatically.
 
 ### Groups tab (which groups to scan)
 
@@ -55,7 +56,7 @@ A tab named **Groups** decides which Facebook groups get scanned. To add a group
 - **Active** — write "לא" to pause a group; blank means active.
 - **Notes** — free text, ignored by the bot.
 
-The bot fills the remaining columns after every live run: posts scanned, listings added, match rate, last added, last scan, and a status (OK / not a member of the group / no posts found / waiting for first scan). A group listed twice under different link shapes is merged into its first row and the copy is dropped. The tab is mirrored into the local DB, so a run still works if the sheet can't be reached.
+The bot fills the remaining columns after every live run: posts scanned, listings added, match rate, last added, last scan, and a status (OK / not a member of the group / no posts found / waiting for first scan). `--sync-groups` (or `/sync_groups` from Telegram) also sorts the rows by match rate, best first, with never-scanned groups last; the syncs during a scan keep your order. A group listed twice under different link shapes is merged into its first row and the copy is dropped. The tab is mirrored into the local DB, so a run still works if the sheet can't be reached.
 
 `TARGET_URLS` in `config.py` only seeds the tab the first time it's empty.
 
@@ -199,6 +200,8 @@ If the Facebook session is gone in headless mode, the run stops right away and i
 
 **Exit codes:** `0` OK, `1` crashed / login required / no group scanned, `2` a checkpoint skipped groups.
 
+**Partial scans:** `--source fb` scans only the Facebook groups, `--source yad2` reads only the Yad2 alert emails (no browser), and `--group <link>` scans one group from the Groups tab. They're recorded as their own run type, so "the previous scan" in the Telegram messages and doctor's last-run check still mean a full scan. The Task Scheduler launcher passes `--scheduled`, which makes the run exit at once while scheduled scans are paused (`/pause`).
+
 **Dry run (`--dry-run`):** still scrolls, calls the LLM, and computes distance (a real trial against live Facebook) but never writes to the sheet or records a match — a would-be match just prints (`DRY RUN: ... would queue`). Non-match verdicts are still cached locally, so a dry run can't cost a duplicate LLM call later.
 
 **Other flags:**
@@ -293,23 +296,31 @@ Results are cached per address; a failed lookup is retried on the next run rathe
 
 ## Telegram (optional)
 
-Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match is pushed to your chat with a 🟢/🟡/🔴 score tier, the total monthly cost, and buttons to open the post, open the address in Google Maps (when the street is known), and message the poster on WhatsApp (when the post has a mobile number — the bot itself never messages anyone). A Telegram outage never breaks a scrape: the match is already in the sheet, and the alert is re-sent on the next run (within 48 hours).
+Off by default (`TELEGRAM_ENABLED = False`). When enabled, set `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env`, and every live match is pushed to your chat with a 🟢/🟡/🔴 score tier, the total monthly cost, and buttons to open the post, open the address in Google Maps (when the street is known), and message the poster on WhatsApp (when the post has a mobile number — the bot itself never messages anyone). Each alert names its source (`📰 מקור: פייסבוק` / `יד2`), and a free distance estimate is marked as one: `🚶 ~1.2 ק"מ הליכה (הערכה, ±0.4)`. A Telegram outage never breaks a scrape: the match is already in the sheet, and the alert is re-sent on the next run (within 48 hours).
 
-The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts.
+The bot also sends a run-started / run-finished summary on every live run, including the run's error and warning counts. The run-started message turns into a live progress bar while groups scan (`⏳ ▓▓▓▓░░░░ 23/54 קבוצות · 4 נוספו · עוד ~15 דק'`); the time left blends the previous run's pace with this run's, trusting this run's more as groups finish.
 
-**Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>\run_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu):
+**Commands from the chat.** While `python bot_listener.py` is running (to start it hidden at every Windows login, put a shortcut to `wscript.exe "<repo>\run_listener_hidden.vbs"` in the Startup folder — `run_listener.bat` logs to `logs\listener.log` and restarts the listener a minute after it exits; run only one listener at a time, two pollers make Telegram reject both with 409 Conflict), the chat accepts commands (also listed in Telegram's `/` menu). `/help` (or `/start`) shows them all as buttons, so nothing needs typing:
 
 | Command | What it does |
 |---|---|
-| `/scan` | Starts a full live scan in the background; the run-started message with its progress bar follows. Refused while a scan is already running. |
-| `/stop` | Stops a scan started with `/scan` (not one started by the Task Scheduler). |
-| `/status` | Whether a scan is running, and how the last one ended. |
-| `/stats` | The `--stats` output. |
-| `/doctor` | The `doctor.py` health check. |
+| `/scan` | Starts a full live scan (Facebook + Yad2) in the background; the run-started message with its progress bar follows. Refused while a scan is already running. |
+| `/scan_fb` | Scans the Facebook groups only. |
+| `/scan_yad2` | Reads the Yad2 alert emails only — no browser, done in seconds. |
+| `/scan_group` | Lists the active groups as buttons; tap one to scan just that group. |
+| `/stop` | Stops the running scan — one started from the chat or by the Task Scheduler. |
+| `/status` | Whether a scan is running and how far it got, how the last one ended, and whether scheduled scans are paused. |
+| `/new` | The listings added in the last 24 hours, newest first. |
+| `/groups` | Active groups that need a hand: not joined, no posts found, not scanned yet, or 300+ posts with no match (worth pausing). |
+| `/pause` / `/resume` | Pauses / resumes the Task Scheduler's scans (e.g. while away, or once you've signed a lease); scans from the chat still work. |
+| `/stats` | Listings added (total and this week), posts in the DB, active groups, and the last 5 runs. |
+| `/doctor` | The `doctor.py` health check, one ✅/⚠️/❌ line per service. |
 | `/sync_groups` | Syncs the Groups tab and sorts it by match rate (`--sync-groups`). |
-| `/help` | Lists the commands. |
+| `/help` | The command menu. |
 
-Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old.
+The run-started message has a ⏹ button that stops the scan, and the run-finished message has buttons for another scan and for `/new`.
+
+Only the chat set in `TELEGRAM_CHAT_ID` is obeyed, so everyone in that chat can run them. A command sent while the listener was down is ignored once it's over 5 minutes old, and so is an old button tap.
 
 Messages sent before the vote buttons were removed still carry ⭐/🗑 buttons; `python bot_listener.py` (a separate long-running process) still handles taps on those: 2 down-votes delete the row, 2 up-votes send a 🔥 highlight, each up-vote bumps the fit score.
 

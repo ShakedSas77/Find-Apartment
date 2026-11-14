@@ -6,6 +6,7 @@ fix whatever's broken, instead of finding out mid-scheduled-run.
 
     python doctor.py            # PASS/FAIL/WARN table + remediation
     python doctor.py --alert    # also DM a Telegram alert if anything FAILs
+    python doctor.py --json     # the results as JSON rows (the Telegram /doctor command reads these)
 
 Deliberately does NOT call Google Geocoding or Distance Matrix — both share
 GMAPS_MONTHLY_CAP's counter (see apartment_bot.py get_walking_distance), and a
@@ -106,6 +107,10 @@ def _check_last_run():
         return ("last run", WARN, "no successful live run recorded yet", "run `python apartment_bot.py` once")
     age_hours = (datetime.now() - datetime.fromisoformat(last["started_at"])).total_seconds() / 3600
     detail = f"last successful live run {last['started_at'][:16]} ({age_hours:.0f}h ago), added {last['added'] or 0}"
+    paused_since = storage.get_bot_state(storage.SCANS_PAUSED_KEY)
+    if paused_since:
+        # Paused on purpose (/pause in Telegram): no scheduled run is expected, so an old last run isn't a fault.
+        return ("last run", WARN, f"{detail}; scheduled scans paused since {paused_since[:16]}", "/resume in Telegram")
     if age_hours > config.RUN_STALE_HOURS:
         return ("last run", FAIL, detail, "check Task Scheduler's 'Last Run Result' for the scheduled task, and the newest logs/bot_*.log")
     return ("last run", PASS, detail, "")
@@ -197,6 +202,10 @@ def main(argv=None) -> int:
     alert = "--alert" in argv
 
     results = [check() for check in _CHECKS]
+
+    if "--json" in argv:
+        print(json.dumps(results, ensure_ascii=False))
+        return 1 if any(status == FAIL for _, status, _, _ in results) else 0
 
     print("=== doctor ===")
     any_fail = False
