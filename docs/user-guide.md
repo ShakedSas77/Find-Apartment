@@ -172,7 +172,10 @@ Every apartment found, newest post first by default.
 - **Track each apartment** right in the table: the **מעקב** column — ⭐ מעניינת (interested),
   📞 פניתי (contacted), 👀 ראיתי (visited), ❌ לא רלוונטית (not relevant) — and a free **הערה** (note).
   Changes save by themselves.
-- **פתיחה** opens the post; **🗺** opens the address in Google Maps.
+- **🏡** opens the apartment's own page (click the cell, then click again); **פתיחה** opens the post; **🗺**
+  opens the address in Google Maps.
+- **שינוי מחיר** shows when the same flat was posted before at another price (↓ 300 ₪ = cheaper now),
+  and **פרסומים** how many times it was posted.
 - **🔄 רענון** reloads after a scan; **📂 פתיחת הקובץ ב-Excel** opens the results file.
 
 | Column | Meaning |
@@ -197,6 +200,26 @@ a **gold dot** for your destination and a circle showing roughly how far you sai
 - The line under the filters says how many apartments couldn't be placed (no address, or one the map
   couldn't find) — they're still on the Results page.
 
+## Apartment page (כרטיס דירה)
+
+Everything about one apartment: pick it at the top, or open it with 🏡 on Results or **כרטיס מלא** on the map.
+
+- **Price, total cost, rooms, walk and score**, with the price change since it was first posted.
+- **Buttons** to open the post, Google Maps, WhatsApp to the poster (when the post has a mobile number),
+  and **⚖️ להשוואה** (add to compare).
+- **Tracking:** status and note, with **שמירה**.
+- **למה הציון הזה** — the fit score split into its parts (price, location and distance, entry date,
+  floor/elevator/safe room, rooms, parking, a preferred-neighbourhood bonus), each out of its maximum.
+- **Details**, a small map with your destination, and **פורסמה N פעמים** — every earlier post of the
+  same flat with its date and price (posts the same day at the same price are one line). Without a house
+  number the page warns that some may be another flat on the same street.
+- **המודעה המלאה** — the post's full text, kept for 14 days after it was found.
+
+## Compare (השוואה)
+
+Pick 2-4 apartments (or add them from their pages with ⚖️). They appear side by side, one column each,
+with the best price, total cost, walk and score in each row marked green.
+
 ## Groups (קבוצות)
 
 The groups the bot scans, with how many posts it read and apartments it found in each.
@@ -217,7 +240,14 @@ The groups the bot scans, with how many posts it read and apartments it found in
 ## Settings (הגדרות)
 
 The setup sections again — destination, budget, AI, Facebook — plus where results are saved and every
-add-on (Part 3). Changes apply from the next scan. While a scan runs, settings and groups can't be
+add-on (Part 3). **🔧 סינון מתקדם** (advanced filters), one item per line:
+
+- areas to reject (a post naming one is skipped),
+- words to reject (e.g. סאבלט, סטודיו, or מחפש/ת for people looking for a flat),
+- preferred neighbourhoods (a bonus in the fit score),
+- how old a post may be, how far ahead the entry date may be, and whether to keep listings with no price.
+
+These are set for Ramat Gan / Givatayim / Tel Aviv out of the box; change them for your area. Changes apply from the next scan. While a scan runs, settings and groups can't be
 changed (the scan rewrites the results file when it ends); the page says so.
 
 ## Stats (סטטיסטיקה)

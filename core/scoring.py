@@ -174,6 +174,12 @@ def _focus_bonus(fields: dict) -> float:
 
 
 def compute_fit_score(fields: dict) -> int:
+    return min(100, round(sum(score_breakdown(fields).values())))
+
+
+def score_breakdown(fields: dict) -> dict[str, float]:
+    """The fit score's parts: price, location, entry_date, amenities, rooms, parking, focus (each
+    out of its SCORE_WEIGHT_*, focus a bonus); compute_fit_score is their sum, capped at 100."""
     price_val = fields.get("price_val") or 0
     if price_val and fields.get("is_agent"):
         # One-time broker's fee (~one month's rent) amortized over a year of
@@ -182,17 +188,15 @@ def compute_fit_score(fields: dict) -> int:
         effective_price = price_val + price_val / AGENT_FEE_AMORTIZE_MONTHS
     else:
         effective_price = price_val
-
-    total = (
-        _price_score(effective_price)
-        + _location_score(fields)
-        + _entry_date_score(fields.get("entry_date"))
-        + _amenities_score(fields)
-        + _rooms_score(fields.get("rooms_val"))
-        + _parking_score(fields.get("parking"))
-        + _focus_bonus(fields)
-    )
-    return min(100, round(total))
+    return {
+        "price": _price_score(effective_price),
+        "location": _location_score(fields),
+        "entry_date": _entry_date_score(fields.get("entry_date")),
+        "amenities": _amenities_score(fields),
+        "rooms": _rooms_score(fields.get("rooms_val")),
+        "parking": _parking_score(fields.get("parking")),
+        "focus": _focus_bonus(fields),
+    }
 
 
 def _monthly_fee(bimonthly_raw, default_monthly: float) -> float:

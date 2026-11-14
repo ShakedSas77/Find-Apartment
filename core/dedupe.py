@@ -87,6 +87,12 @@ def _listing_dedupe_key(address: str, rooms, price) -> tuple | None:
         price_key = str(price)
     return (address_key, rooms_key, price_key)
 
+def apartment_key(address: str, rooms) -> tuple | None:
+    """The same flat whatever its price: _listing_dedupe_key without the price, so a repost at a new
+    price is matched to its earlier posts (the web app's price history). None for a weak address."""
+    key = _listing_dedupe_key(address, rooms, 0)
+    return key[:2] if key else None
+
 def _listing_key(row: list, db_data: dict[str, dict] | None = None) -> tuple:
     """
     Keys a row by address+rooms+price sourced from the bot's own original

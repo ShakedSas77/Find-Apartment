@@ -2,15 +2,17 @@
 Tests for the web app: its data helpers directly, and the pages through Streamlit's AppTest (the app
 runs in-process, so it sees this test's temp database, Excel file and settings file).
 """
+import re
 from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
 import config
-from core import local_settings, storage
+from core import local_settings, scoring, storage
+from integrations import sheets
 from integrations.local_workbook import LocalWorkbook
-from webapp import data
+from webapp import components, data
 
 _APP = str(Path(__file__).resolve().parent.parent / "webapp" / "app.py")
 _G1 = "https://www.facebook.com/groups/111"
@@ -212,3 +214,64 @@ def test_the_tools_page_shows_the_last_runs_log(basic_user):
 def _tools_page():
     from webapp import views
     views.tools_page()
+
+
+def test_advanced_keywords_become_one_pattern_matching_each_word():
+    settings = components.advanced_settings("", "סאבלט\nסטודיו", "", 14, 60, False)
+
+    assert re.search(settings["NEGATIVE_KEYWORDS"], "דירת סטודיו להשכרה")
+
+
+def test_an_empty_keyword_list_rejects_no_post():
+    settings = components.advanced_settings("", "", "", 14, 60, False)
+
+    assert re.search(settings["NEGATIVE_KEYWORDS"], "דירה יפה") is None
+
+
+def test_a_flat_posted_again_at_a_lower_price_shows_the_drop():
+    posts = [{"url": "https://f/1", "address": "ביאליק 30, רמת גן", "rooms_val": 3.0, "price_val": 6300, "first_seen": "2026-11-01", "verdict": "added"},
+             {"url": "https://f/2", "address": "ביאליק 30, רמת גן", "rooms_val": 3.0, "price_val": 6000, "first_seen": "2026-11-08", "verdict": "added"}]
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/2", 6000, 3, "", "ביאליק 30, רמת גן")])])
+
+    assert data.with_history(frame, data.history_by_flat(posts))[data.PRICE_CHANGE].iloc[0] == -300
+
+
+def test_the_score_breakdown_adds_up_to_the_formulas_score():
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1", 6000, 3, "1.2", "ביאליק 30, רמת גן")])])
+    row = frame.iloc[0]
+
+    parts = data.score_parts(row)
+
+    assert round(sum(points for _, points, _ in parts)) == scoring.compute_fit_score(
+        sheets._fields_from_sheet_row([str(v) if v == v else "" for v in row[config.SHEET_HEADERS]]))
+
+
+def test_compare_puts_each_listing_in_its_own_column():
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1", 6000, 3, "", "א 1"),
+                                               _row("https://f/2", 6100, 3, "", "ב 2")])])
+
+    assert list(data.compare_frame(frame).columns) == ["1. א 1", "2. ב 2"]
+
+
+def test_the_apartment_page_shows_the_full_post(basic_user):
+    storage.record_post("https://www.facebook.com/groups/111/posts/1/", _G1, "דירה מקסימה ברחוב ביאליק", storage.VERDICT_ADDED)
+
+    at = AppTest.from_function(_apartment_page, default_timeout=60).run()
+
+    assert any("דירה מקסימה" in m.value for m in at.markdown)
+
+
+def _apartment_page():
+    from webapp import views
+    views.apartment_page()
+
+
+def test_a_flat_cross_posted_the_same_day_is_one_line_of_its_price_history():
+    posts = [{"url": f"https://f/{i}", "price_val": 6600, "first_seen": "2026-11-06T10:00"} for i in range(3)] + \
+            [{"url": "https://f/9", "price_val": 6100, "first_seen": "2026-11-13T09:00"}]
+
+    assert [(t["price"], t["posts"]) for t in data.price_timeline(posts)] == [(6600, 3), (6100, 1)]
+
+
+def test_numbers_show_without_a_trailing_zero_and_missing_ones_blank():
+    assert [data.display_text(v) for v in (3.0, 2.5, 6000.0, float("nan"), "None")] == ["3", "2.5", "6,000", "", ""]

@@ -4,6 +4,7 @@ show, adding groups, and the scan panel in the sidebar. Each saves on its own bu
 """
 import json
 import os
+import re
 import subprocess
 from datetime import datetime
 
@@ -20,6 +21,7 @@ from webapp import data
 _LOGIN_TIMEOUT_S = config.LOGIN_WAIT_S + 60
 _OLLAMA_PULL_TIMEOUT_S = 3600
 _TELEGRAM_CHAT_WAIT_S = 30
+_NEVER_MATCHES = r"(?!)"
 _AI_CHOICES = {"none": "בלי AI — בלי הגדרה, פחות מדויק", "gemini": "Gemini — מפתח חינמי של Google (מומלץ)",
                "ollama": "Ollama — AI על המחשב הזה, בלי חשבון"}
 
@@ -306,6 +308,43 @@ def maps_section(locked: bool):
         save_secrets({"GMAPS_API_KEY": key.strip()})
         save_settings({"GMAPS_ENABLED": True})
         st.rerun()
+
+
+def advanced_section(locked: bool):
+    st.caption("אחד בכל שורה. השינויים חלים מהסריקה הבאה; פוסטים שכבר נדחו אפשר לבדוק שוב בעמוד הכלים.")
+    with st.form("advanced"):
+        excluded = st.text_area("אזורים לפסול — פוסט שמזכיר אחד מהם נדחה", "\n".join(config.EXCLUDED_LOCATIONS),
+                                height=140, key="excluded_locations")
+        keywords = st.text_area("מילים לפסול — למשל סאבלט, סטודיו, מחפש/ת (מודעות של מחפשי דירה)",
+                                "\n".join(config.NEGATIVE_KEYWORDS.split("|")), height=140, key="negative_keywords")
+        focus = st.text_area(f"שכונות מועדפות — מקבלות בונוס של {config.SCORE_FOCUS_NEIGHBORHOOD_BONUS} נקודות בציון",
+                             "\n".join(config.FOCUS_NEIGHBORHOODS), height=140, key="focus_neighborhoods")
+        left, right = st.columns(2)
+        max_age = left.number_input("לא לקרוא פוסטים ישנים מ-X ימים", 1, 60, int(config.MAX_POST_AGE_DAYS),
+                                    key="max_post_age")
+        max_entry = right.number_input("לפסול תאריך כניסה רחוק מ-X ימים", 7, 365,
+                                       int(config.SCORE_ENTRY_DATE_MAX_DAYS_AHEAD), key="max_entry_days")
+        include_no_price = st.checkbox("להוסיף גם דירות בלי מחיר בפוסט (\"פרטים בפרטי\")",
+                                       value=bool(config.INCLUDE_PRICE_UNKNOWN), key="include_no_price")
+        if st.form_submit_button("שמירה", disabled=locked):
+            save_settings(advanced_settings(excluded, keywords, focus, max_age, max_entry, include_no_price))
+            st.success("נשמר — יחול בסריקה הבאה.")
+
+
+def advanced_settings(excluded: str, keywords: str, focus: str, max_age: int, max_entry: int,
+                      include_no_price: bool) -> dict:
+    """The advanced form's text boxes (one item per line) as config values. Keywords become one regex of
+    alternatives, each line escaped, so a word with a dot or bracket is matched as written; with none,
+    a pattern that never matches (an empty one would match, and reject, every post)."""
+    words = _lines(keywords)
+    return {"EXCLUDED_LOCATIONS": _lines(excluded),
+            "NEGATIVE_KEYWORDS": "|".join(re.escape(word) for word in words) if words else _NEVER_MATCHES,
+            "FOCUS_NEIGHBORHOODS": _lines(focus), "MAX_POST_AGE_DAYS": int(max_age),
+            "SCORE_ENTRY_DATE_MAX_DAYS_AHEAD": int(max_entry), "INCLUDE_PRICE_UNKNOWN": bool(include_no_price)}
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
 
 
 def scan_panel():

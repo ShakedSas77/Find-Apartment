@@ -521,6 +521,25 @@ def update_added_listing_address(url: str, address: str):
         )
 
 
+def get_post(url: str) -> dict | None:
+    """One stored post: its text (None once pruned after MAX_POST_AGE_DAYS), group, dates and verdict."""
+    with _lock, _connect() as conn:
+        row = conn.execute("SELECT url, group_url, raw_text, verdict, first_seen, post_date, model_used "
+                           "FROM posts WHERE url = ?", (url,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_priced_posts() -> list[dict]:
+    """Every post the bot read an address and a price from, whatever its verdict — the web app matches
+    them by flat to show a listing's earlier posts and price changes."""
+    with _lock, _connect() as conn:
+        rows = conn.execute(
+            "SELECT url, group_url, address, rooms_val, price_val, first_seen, verdict FROM posts "
+            "WHERE address IS NOT NULL AND address != '' AND price_val > 0 ORDER BY first_seen"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def get_all_posts() -> list[dict]:
     """Every post ever scanned, regardless of verdict — used by --replay (testing new code/prompt without a browser)."""
     with _lock, _connect() as conn:

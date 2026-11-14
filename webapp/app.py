@@ -37,6 +37,8 @@ if data.setup_missing():
     page = st.navigation([st.Page(views.setup_page, title="הגדרה ראשונה", icon="👋")])
 else:
     page = st.navigation([results, st.Page(views.map_page, title="מפה", icon="🗺"),
+                          st.Page(views.apartment_page, title="כרטיס דירה", icon="🏡", url_path="apartment"),
+                          st.Page(views.compare_page, title="השוואה", icon="⚖️", url_path="compare"),
                           st.Page(views.groups_page, title="קבוצות", icon="👥"),
                           st.Page(views.settings_page, title="הגדרות", icon="⚙️"),
                           st.Page(views.stats_page, title="סטטיסטיקה", icon="📊"),

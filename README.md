@@ -24,10 +24,12 @@ Everything runs on free tiers: Gemini's free API quota (or a local Ollama model,
 
 | Page | What's there |
 |---|---|
-| דירות (Results) | every apartment found: filters, sorting, fit score, links to the post and Google Maps, and your own tracking — interested / contacted / visited / not relevant, plus a note |
+| דירות (Results) | every apartment found: filters, sorting, fit score, price changes since it was first posted, links to its page, the post and Google Maps, and your own tracking — interested / contacted / visited / not relevant, plus a note |
+| כרטיס דירה (Apartment) | one apartment in full: the post's text, why it got its score, its price history across reposts, a small map, status, note, contact buttons |
+| השוואה (Compare) | 2-4 apartments side by side, the best value in each row marked |
 | מפה (Map) | the apartments on a map, coloured by fit score, around your destination; extra filters for score and post age; click one for its details |
 | קבוצות (Groups) | the groups scanned, their status and yield; pause, remove, add |
-| הגדרות (Settings) | the setup answers, and every add-on below |
+| הגדרות (Settings) | the setup answers, advanced filters (areas and words to reject, preferred neighbourhoods, post age), and every add-on below |
 | סטטיסטיקה (Stats) | totals, apartments per day, the last scans, per-group yield, a health check |
 | כלים (Tools) | each scan's log, and one-click backup / cleanup / re-check / recompute |
 | side panel | full / Facebook-only / Yad2-only / one-group scans, stop, live progress, pause the daily scans |

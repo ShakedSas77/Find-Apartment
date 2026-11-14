@@ -2,9 +2,11 @@
 The web app's pages. Each is a function st.navigation runs; data comes from webapp/data.py and the
 settings sections from webapp/components.py.
 """
+import html
 import json
 import os
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 import pandas as pd
 import pydeck as pdk
@@ -12,11 +14,14 @@ import streamlit as st
 
 import config
 from core import scan_runner, storage
+from core.normalize import _first_mobile_phone
 from integrations.groups_sync import remove_group, set_group_active
 from integrations.sheets import open_spreadsheet
 from webapp import components, data
 
 _CACHE_S = 60
+_COMPARE_MAX = 4
+DETAILS = "כרטיס"
 _LOG_MAX_LINES = 1500
 _TOOL_TIMEOUT_S = 1800
 _TOOL_OUTPUT_CHARS = 6000
@@ -46,11 +51,12 @@ def results_page():
     if frame.empty:
         st.info("עוד אין דירות. הריצו סריקה מהתפריט בצד.")
         return
-    shown = _filtered(frame, "results")
+    shown = _filtered(_with_extras(frame), "results")
     sort_by = st.radio("מיון", [data.SCORE, data.POST_DATE, data.PRICE, data.DISTANCE], horizontal=True)
     if sort_by != data.POST_DATE:  # the file itself is kept newest post first
         shown = shown.sort_values(sort_by, ascending=sort_by != data.SCORE, na_position="last")
-    st.caption(f"{len(shown)} מתוך {len(frame)} דירות · אפשר לסמן כל דירה בעמודת המעקב ולהוסיף הערה")
+    st.caption(f"{len(shown)} מתוך {len(frame)} דירות · סמנו כל דירה בעמודת המעקב והוסיפו הערה · "
+               "🏡 פותח את כרטיס הדירה (לחיצה לבחירת התא, ולחיצה נוספת לפתיחה)")
     edited = _listings_table(shown, height=600, editable=True)
     changes = data.tracking_changes(shown, edited)
     for url, status, note in changes:
@@ -71,7 +77,7 @@ def map_page():
     if frame.empty:
         st.info("עוד אין דירות. הריצו סריקה מהתפריט בצד.")
         return
-    shown = _filtered(frame, "map", more=True)
+    shown = _filtered(_with_extras(frame), "map", more=True)
     placed = data.with_coordinates(shown).dropna(subset=[data.LAT, data.LON])
     st.caption(f"{len(placed)} דירות על המפה · {len(shown) - len(placed)} בלי מיקום (כתובת חסרה או לא נמצאה) · "
                f"{len(frame)} בסך הכול · הנקודה הצהובה הגדולה = היעד שלכם, והעיגול = מרחק ההליכה המקסימלי בקירוב")
@@ -88,7 +94,6 @@ def map_page():
 
 def _filtered(frame: pd.DataFrame, key: str, more: bool = False) -> pd.DataFrame:
     """The filter bar both listing pages share; the map adds fit score and how recent the post is."""
-    frame = data.with_tracking(frame, storage.get_listing_tracking())
     with st.container(border=True):
         cols = st.columns([1, 1, 1, 1.4, 1.4])
         prices = frame[data.PRICE].dropna()
@@ -120,12 +125,15 @@ def _listings_table(frame: pd.DataFrame, height: int, editable: bool = False) ->
     show = st.data_editor if editable else st.dataframe
     # Keyed by the rows shown: the table keeps edits by row position, so a filter change must start a
     # fresh table rather than apply an old edit to whichever listing now sits in that row.
+    # Shown as text: the table writes an empty number as "None".
+    frame = frame.assign(**{DETAILS: frame["לינק למודעה"].map(lambda url: f"apartment?u={quote(url, safe='')}"),
+                            data.PRICE_CHANGE: frame[data.PRICE_CHANGE].map(_price_change_cell)})
     extra = {"disabled": [c for c in frame.columns if c not in (data.STATUS, data.NOTE)],
              "key": f"listings_{hash(tuple(frame['לינק למודעה']))}"} if editable else {}
     return show(
-        frame[[data.STATUS, data.NOTE, "לינק למודעה", data.SCORE, data.PRICE, data.ROOMS, data.DISTANCE, "דיוק מרחק", data.ADDRESS, data.MAPS,
-               "עלות חודשית כוללת", "תאריך כניסה", "קומה", "מעלית", "חניה", 'ממ"ד/מקלט', "תיווך/פרטי",
-               data.POST_DATE, data.SOURCE]],
+        frame[[data.STATUS, data.NOTE, DETAILS, "לינק למודעה", data.SCORE, data.PRICE, data.PRICE_CHANGE, data.ROOMS,
+               data.DISTANCE, "דיוק מרחק", data.ADDRESS, data.MAPS, "עלות חודשית כוללת", "תאריך כניסה", "קומה",
+               "מעלית", "חניה", 'ממ"ד/מקלט', "תיווך/פרטי", data.TIMES_POSTED, data.POST_DATE, data.SOURCE]],
         hide_index=True, width="stretch", height=height,
         column_config={
             "לינק למודעה": st.column_config.LinkColumn("מודעה", display_text="פתיחה"),
@@ -135,10 +143,14 @@ def _listings_table(frame: pd.DataFrame, height: int, editable: bool = False) ->
             "עלות חודשית כוללת": st.column_config.NumberColumn("עלות כוללת", format="₪%d"),
             data.STATUS: st.column_config.SelectboxColumn("מעקב", options=list(data.STATUS_LABELS.values())),
             data.NOTE: st.column_config.TextColumn("הערה"),
+            DETAILS: st.column_config.LinkColumn("כרטיס", display_text="🏡"),
+            data.PRICE_CHANGE: st.column_config.TextColumn("שינוי מחיר",
+                                                           help="המחיר עכשיו פחות המחיר בפרסום הראשון של אותה דירה"),
+            data.TIMES_POSTED: st.column_config.NumberColumn("פרסומים", help="כמה פעמים הדירה פורסמה"),
         }, **extra)
 
 
-def _map_deck(placed: pd.DataFrame) -> pdk.Deck:
+def _map_deck(placed: pd.DataFrame, zoom: float = 12.5) -> pdk.Deck:
     points = pd.DataFrame({
         "lat": placed[data.LAT], "lon": placed[data.LON],
         "color": placed[data.SCORE].map(_score_color),
@@ -160,7 +172,10 @@ def _map_deck(placed: pd.DataFrame) -> pdk.Deck:
     destination = pdk.Layer("ScatterplotLayer", home, id="destination", get_position="[lon, lat]", get_radius=120,
                             radius_min_pixels=11, get_fill_color=[255, 200, 0], stroked=True,
                             get_line_color=[0, 0, 0], line_width_min_pixels=3)
-    view = pdk.ViewState(latitude=config.DESTINATION_LAT, longitude=config.DESTINATION_LON, zoom=12.5)
+    # One listing (the apartment page): centred between it and the destination; else on the destination.
+    lat = (placed[data.LAT].iloc[0] + config.DESTINATION_LAT) / 2 if len(placed) == 1 else config.DESTINATION_LAT
+    lon = (placed[data.LON].iloc[0] + config.DESTINATION_LON) / 2 if len(placed) == 1 else config.DESTINATION_LON
+    view = pdk.ViewState(latitude=lat, longitude=lon, zoom=zoom)
     return pdk.Deck(layers=[reach, listings, destination], initial_view_state=view,
                     tooltip={"html": "<b>{price}</b> · {rooms} חד' · ציון {score}<br/>{address}<br/>{distance} ק\"מ הליכה",
                              "style": {"direction": "rtl"}})
@@ -188,9 +203,170 @@ def _listing_card(listing: dict):
         if data.STATUS_KEYS[status] != tracked.get("status", ""):
             storage.set_listing_tracking(listing["url"], data.STATUS_KEYS[status], tracked.get("note", ""))
             st.toast("נשמר")
-        middle.link_button("פתיחת המודעה", listing["url"])
-        if listing.get("maps"):
-            right.link_button("Google Maps", listing["maps"])
+        middle.link_button("🏡 כרטיס מלא", f"apartment?u={quote(listing['url'], safe='')}")
+        right.link_button("פתיחת המודעה", listing["url"])
+
+
+def apartment_page():
+    st.title("🏡 כרטיס דירה")
+    frame = _with_extras(_listings())
+    if frame.empty:
+        st.info("עוד אין דירות. הריצו סריקה מהתפריט בצד.")
+        return
+    urls = list(frame["לינק למודעה"])
+    wanted = st.query_params.get("u")
+    picked = st.selectbox("דירה", urls, index=urls.index(wanted) if wanted in urls else 0,
+                          format_func=lambda url: _listing_title(frame[frame["לינק למודעה"] == url].iloc[0]))
+    st.query_params["u"] = picked
+    row = frame[frame["לינק למודעה"] == picked].iloc[0]
+
+    cols = st.columns(5)
+    cols[0].metric("מחיר", _money(row[data.PRICE]), _price_change_text(row[data.PRICE_CHANGE]), delta_color="inverse")
+    cols[1].metric("עלות חודשית כוללת", _money(row["עלות חודשית כוללת"]))
+    cols[2].metric("חדרים", f"{row[data.ROOMS]:g}" if pd.notna(row[data.ROOMS]) else "—")
+    accuracy = str(row["דיוק מרחק"]).replace("הערכה ", "") if row["דיוק מרחק"] else ""
+    cols[3].metric('הליכה (ק"מ)', f"{row[data.DISTANCE]:g} {accuracy}".strip() if pd.notna(row[data.DISTANCE]) else "—",
+                   help="Google = מסלול הליכה אמיתי; ± = הערכה חינמית, בטווח הזה" if accuracy else None)
+    cols[4].metric("ציון התאמה", f"{row[data.SCORE]:.0f}" if pd.notna(row[data.SCORE]) else "—")
+
+    post = storage.get_post(picked) or {}
+    _contact_buttons(row, post.get("raw_text") or "")
+    _tracking_editor(picked)
+
+    left, right = st.columns(2)
+    with left:
+        st.subheader("למה הציון הזה")
+        parts = data.score_parts(row)
+        st.dataframe(pd.DataFrame([{"חלק": label, "נקודות": round(points, 1), "מתוך": weight}
+                                   for label, points, weight in parts]),
+                     hide_index=True, width="stretch",
+                     column_config={"נקודות": st.column_config.ProgressColumn("נקודות", min_value=0, max_value=25,
+                                                                               format="%.1f")})
+        total = min(100, round(sum(points for _, points, _ in parts)))
+        if pd.notna(row[data.SCORE]) and total != round(row[data.SCORE]):
+            st.caption(f"לפי הנוסחה היום: {total}. הציון בטבלה ({row[data.SCORE]:.0f}) חושב כשהדירה נוספה, "
+                       "או קיבל תוספת מהצבעות בטלגרם.")
+        st.subheader("פרטים")
+        details = ["תאריך כניסה", "קומה", "מעלית", "חניה", 'ממ"ד/מקלט', "תיווך/פרטי", "ארנונה (לחודשיים)",
+                   "ועד בית (לחודשיים)", data.POST_DATE, "זמן סריקה", data.SOURCE]
+        st.dataframe(pd.DataFrame({"": details, "ערך": [data.display_text(row[d]) or "—" for d in details]}),
+                     hide_index=True, width="stretch")
+    with right:
+        placed = data.with_coordinates(frame[frame["לינק למודעה"] == picked]).dropna(subset=[data.LAT, data.LON])
+        if placed.empty:
+            st.caption("הכתובת לא מוקמה במפה.")
+        else:
+            st.pydeck_chart(_map_deck(placed, zoom=14), height=330)
+        _price_history(row)
+
+    st.subheader("המודעה המלאה")
+    if post.get("raw_text"):
+        st.markdown(f'<div dir="rtl" style="white-space: pre-wrap; line-height: 1.6">{html.escape(post["raw_text"])}</div>',
+                    unsafe_allow_html=True)
+    else:
+        st.caption("הטקסט כבר לא שמור (נשמר 14 יום) — פתחו את המודעה.")
+
+
+def compare_page():
+    st.title("⚖️ השוואה")
+    frame = _with_extras(_listings())
+    if frame.empty:
+        st.info("עוד אין דירות. הריצו סריקה מהתפריט בצד.")
+        return
+    urls = list(frame["לינק למודעה"])
+    chosen = st.multiselect("בחרו עד 4 דירות", urls, default=[u for u in st.session_state.get("compare", []) if u in urls],
+                            max_selections=_COMPARE_MAX, placeholder="דירות להשוואה",
+                            format_func=lambda url: _listing_title(frame[frame["לינק למודעה"] == url].iloc[0]))
+    st.session_state["compare"] = chosen
+    if len(chosen) < 2:
+        st.caption("בחרו לפחות 2 דירות — או לחצו ⚖️ להשוואה בכרטיס של דירה.")
+        return
+    listings = frame.set_index("לינק למודעה").loc[chosen].reset_index()
+    table = data.compare_frame(listings)
+    st.dataframe(table.style.apply(_best_in_row, axis=1), width="stretch", height=640)
+    st.caption("ירוק = הכי טוב בשורה (הכי זול, הכי קרוב, הכי גבוה בציון).")
+    cols = st.columns(len(chosen))
+    for col, (_, row) in zip(cols, listings.iterrows()):
+        col.link_button("כרטיס דירה", f"apartment?u={quote(row['לינק למודעה'], safe='')}")
+
+
+@st.cache_data(ttl=_CACHE_S, show_spinner=False)
+def _history() -> dict:
+    return data.history_by_flat(storage.get_priced_posts())
+
+
+def _with_extras(frame: pd.DataFrame) -> pd.DataFrame:
+    """The listings with the user's tracking and each flat's posting history."""
+    return data.with_history(data.with_tracking(frame, storage.get_listing_tracking()), _history())
+
+
+def _listing_title(row: pd.Series) -> str:
+    price = _money(row[data.PRICE])
+    rooms = f"{row[data.ROOMS]:g} חד'" if pd.notna(row[data.ROOMS]) else ""
+    return " · ".join(part for part in (row[data.ADDRESS] or "בלי כתובת", price, rooms) if part)
+
+
+def _money(value) -> str:
+    return f"₪{value:,.0f}" if pd.notna(value) else "—"
+
+
+def _price_change_text(change) -> str | None:
+    return None if change is None or pd.isna(change) else f"{change:+,.0f} ₪ מאז הפרסום הראשון"
+
+
+def _contact_buttons(row: pd.Series, post_text: str):
+    cols = st.columns(4)
+    cols[0].link_button("פתיחת המודעה", row["לינק למודעה"])
+    if row[data.MAPS]:
+        cols[1].link_button("Google Maps", row[data.MAPS])
+    phone = _first_mobile_phone(post_text)
+    if phone:
+        cols[2].link_button("וואטסאפ", f"https://wa.me/972{phone[1:]}")
+    compare = st.session_state.setdefault("compare", [])
+    if row["לינק למודעה"] not in compare and cols[3].button("⚖️ להשוואה", disabled=len(compare) >= _COMPARE_MAX):
+        compare.append(row["לינק למודעה"])
+        st.toast("נוספה להשוואה")
+
+
+def _tracking_editor(url: str):
+    tracked = storage.get_listing_tracking().get(url, {})
+    labels = list(data.STATUS_LABELS.values())
+    with st.form(f"tracking_{url}"):
+        left, right = st.columns([1, 3])
+        status = left.selectbox("מעקב", labels, index=labels.index(data.STATUS_LABELS[tracked.get("status", "")]))
+        note = right.text_input("הערה", value=tracked.get("note", ""))
+        if st.form_submit_button("שמירה"):
+            storage.set_listing_tracking(url, data.STATUS_KEYS[status], note)
+            st.toast("נשמר")
+
+
+def _price_history(row: pd.Series):
+    posts = data.flat_history(_history(), row[data.ADDRESS], row[data.ROOMS])
+    if len(posts) < 2:
+        st.caption("פורסמה פעם אחת עד עכשיו.")
+        return
+    st.subheader(f"פורסמה {len(posts)} פעמים")
+    if not data.is_exact_flat(row[data.ADDRESS]):
+        st.caption("בלי מספר בית — ייתכן שחלק מהפרסומים הם דירה אחרת באותו רחוב עם אותו מספר חדרים.")
+    st.dataframe(pd.DataFrame([{"תאריך": t["day"], "מחיר": t["price"], "פרסומים": t["posts"], "מודעה": t["url"]}
+                               for t in data.price_timeline(posts)]),
+                 hide_index=True, width="stretch",
+                 column_config={"מחיר": st.column_config.NumberColumn("מחיר", format="₪%d"),
+                                "מודעה": st.column_config.LinkColumn("מודעה", display_text="פתיחה")})
+
+
+def _price_change_cell(change) -> str:
+    return "" if change is None or pd.isna(change) else f"{'↓' if change < 0 else '↑'} {abs(change):,.0f} ₪"
+
+
+def _best_in_row(values: pd.Series) -> list[str]:
+    # Lower is better for money and distance, higher for the score; other rows aren't ranked.
+    better = {"ציון": max, "מחיר": min, "עלות חודשית כוללת": min, 'מרחק הליכה (ק"מ)': min}.get(values.name)
+    numbers = pd.to_numeric(values.str.replace(",", ""), errors="coerce")
+    if better is None or numbers.isna().all():
+        return [""] * len(values)
+    best = better(numbers.dropna())
+    return ["background-color: rgba(40, 167, 69, 0.35)" if n == best else "" for n in numbers]
 
 
 def groups_page():
@@ -230,6 +406,8 @@ def settings_page():
         components.ai_section(locked)
     with st.expander("📘 פייסבוק"):
         components.facebook_section(locked)
+    with st.expander("🔧 סינון מתקדם"):
+        components.advanced_section(locked)
     with st.expander("📂 איפה התוצאות נשמרות"):
         components.sheets_section(locked)
     st.subheader("🧩 תוספים")
