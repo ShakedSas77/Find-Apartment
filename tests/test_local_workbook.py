@@ -3,11 +3,15 @@ Tests for the local Excel stand-in for the Google Sheet: it must answer the gspr
 makes the way Sheets does. Real files in a temp folder; only openpyxl's save is faked, to simulate
 Excel holding the file open.
 """
+from datetime import datetime, timedelta
+
 import gspread
 import pytest
 
+import config
 from integrations import local_workbook
 from integrations.local_workbook import LocalWorkbook
+from integrations.sheets import dedupe_and_sort_sheet
 
 _HEADERS = ["לינק למודעה", "מחיר", "חדרים"]
 
@@ -107,3 +111,18 @@ def test_rows_written_while_excel_locks_the_file_are_saved_by_the_next_write(tab
     tab.append_rows([["https://x/2", 6100, 3]])
 
     assert LocalWorkbook(str(tmp_path / "listings.xlsx")).sheet1.col_values(1)[1:] == ["https://x/1", "https://x/2"]
+
+
+def test_the_end_of_run_sort_rewrites_the_excel_tab_newest_first(tmp_path):
+    tab = LocalWorkbook(str(tmp_path / "listings.xlsx")).sheet1
+    tab.insert_row(config.SHEET_HEADERS, 1)
+    yesterday, today = (f"{d:%d/%m}" for d in (datetime.now() - timedelta(days=1), datetime.now()))
+    post_date_col = config.SHEET_HEADERS.index("תאריך פרסום")
+    rows = [["https://x/old", 6000, 3] + [""] * (len(config.SHEET_HEADERS) - 3),
+            ["https://x/new", 6100, 3] + [""] * (len(config.SHEET_HEADERS) - 3)]
+    rows[0][post_date_col], rows[1][post_date_col] = yesterday, today
+    tab.append_rows(rows, value_input_option="USER_ENTERED")
+
+    dedupe_and_sort_sheet(tab)
+
+    assert tab.col_values(1)[1:] == ["https://x/new", "https://x/old"]
