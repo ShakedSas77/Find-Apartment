@@ -111,3 +111,36 @@ def test_settings_cannot_be_saved_while_a_scan_runs(basic_user):
 def _settings_page():
     from webapp import components
     components.budget_section(components.edits_locked())
+
+
+def test_a_listing_is_placed_where_its_address_was_located(basic_user):
+    storage.save_address_cache("ביאליק 30, רמת גן", "", "", "high", "", "1.2", 1200, "street_estimate", "ok", 32.08, 34.81)
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1", address="ביאליק 30, רמת גן")])])
+
+    assert data.with_coordinates(frame)[[data.LAT, data.LON]].iloc[0].tolist() == [32.08, 34.81]
+
+
+def test_the_score_filter_drops_lower_fits():
+    rows = [_row("https://f/1"), _row("https://f/2")]
+    rows[0][config.SHEET_HEADERS.index("ציון התאמה")], rows[1][config.SHEET_HEADERS.index("ציון התאמה")] = "40", "80"
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, *rows])])
+
+    assert list(data.filter_listings(frame, min_score=60)["לינק למודעה"]) == ["https://f/2"]
+
+
+def test_the_age_filter_keeps_a_listing_with_no_post_date():
+    frame = data.listings_frame([("פייסבוק", [config.SHEET_HEADERS, _row("https://f/1")])])
+
+    assert len(data.filter_listings(frame, max_age_days=1)) == 1
+
+
+def test_the_map_page_places_the_located_listings(basic_user):
+    storage.save_address_cache("ביאליק 30, רמת גן", "", "", "high", "", "1.2", 1200, "street_estimate", "ok", 32.08, 34.81)
+    at = AppTest.from_function(_map_page, default_timeout=60).run()
+
+    assert at.caption[0].value.startswith("1 דירות על המפה")
+
+
+def _map_page():
+    from webapp import views
+    views.map_page()

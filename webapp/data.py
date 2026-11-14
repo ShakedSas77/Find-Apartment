@@ -2,6 +2,7 @@
 Data for the web app's pages, kept free of Streamlit so it's tested directly: the listings table built
 from the results file, the filters on it, the Groups table, and what the quick setup still needs.
 """
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 
 import gspread
@@ -12,6 +13,7 @@ import env
 from config import SHEET_HEADERS, YAD2_TAB_NAME
 from core import storage
 from core.local_settings import is_saved
+from core.normalize import _infer_post_date
 from integrations.groups_sync import HEADERS as GROUP_HEADERS, stats_cells
 
 # How a run's type and outcome (storage `runs` rows) read in the app.
@@ -21,6 +23,7 @@ RUN_STATUSES = {"ok": "✅ הצליחה", "running": "⏳ רצה", "stopped": "�
 
 SOURCE = "מקור"
 MAPS = "מפה"
+LAT, LON = "lat", "lon"
 PRICE, ROOMS, DISTANCE, SCORE = "מחיר", "חדרים", 'מרחק הליכה (ק"מ)', "ציון התאמה"
 ADDRESS, POST_DATE, SCAN_TIME = "כתובת", "תאריך פרסום", "זמן סריקה"
 _NUMBER_COLUMNS = [PRICE, ROOMS, DISTANCE, SCORE, "עלות חודשית כוללת", "ארנונה (לחודשיים)", "ועד בית (לחודשיים)"]
@@ -55,10 +58,17 @@ def listings_frame(tabs: list[tuple[str, list[list[str]]]]) -> pd.DataFrame:
 
 
 def filter_listings(frame: pd.DataFrame, max_price: float | None = None, min_rooms: float | None = None,
-                    max_km: float | None = None, sources: list[str] | None = None, text: str = "") -> pd.DataFrame:
-    """Rows within every given limit. A blank price or distance is kept — unknown isn't out of range,
-    the same rule the scan uses."""
+                    max_km: float | None = None, sources: list[str] | None = None, text: str = "",
+                    min_score: float | None = None, max_age_days: int | None = None) -> pd.DataFrame:
+    """Rows within every given limit. A blank price, distance or post date is kept — unknown isn't out
+    of range, the same rule the scan uses."""
     keep = pd.Series(True, index=frame.index)
+    if min_score is not None:
+        keep &= frame[SCORE] >= min_score
+    if max_age_days is not None:
+        cutoff = datetime.now() - timedelta(days=max_age_days)
+        posted = frame[POST_DATE].map(_infer_post_date)
+        keep &= posted.map(lambda d: d is None or d >= cutoff)
     if max_price is not None:
         keep &= frame[PRICE].isna() | (frame[PRICE] <= max_price)
     if min_rooms is not None:
@@ -70,6 +80,16 @@ def filter_listings(frame: pd.DataFrame, max_price: float | None = None, min_roo
     if text:
         keep &= frame[ADDRESS].str.contains(text, regex=False, na=False)
     return frame[keep]
+
+
+def with_coordinates(frame: pd.DataFrame) -> pd.DataFrame:
+    """Adds each listing's map position, from where the bot located its address when measuring the
+    distance (the address cache); blank when it couldn't be placed."""
+    places = {address: storage.get_address_cache(address) or {} for address in frame[ADDRESS].unique() if address}
+    frame = frame.copy()
+    frame[LAT] = frame[ADDRESS].map(lambda a: places.get(a, {}).get("lat"))
+    frame[LON] = frame[ADDRESS].map(lambda a: places.get(a, {}).get("lon"))
+    return frame
 
 
 def groups_frame(groups: list[dict], overview: dict[str, dict]) -> pd.DataFrame:

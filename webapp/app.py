@@ -34,7 +34,8 @@ results = st.Page(views.results_page, title="דירות", icon="🏠", default=T
 if data.setup_missing():
     page = st.navigation([st.Page(views.setup_page, title="הגדרה ראשונה", icon="👋")])
 else:
-    page = st.navigation([results, st.Page(views.groups_page, title="קבוצות", icon="👥"),
+    page = st.navigation([results, st.Page(views.map_page, title="מפה", icon="🗺"),
+                          st.Page(views.groups_page, title="קבוצות", icon="👥"),
                           st.Page(views.settings_page, title="הגדרות", icon="⚙️"),
                           st.Page(views.stats_page, title="סטטיסטיקה", icon="📊")])
     components.scan_panel()
