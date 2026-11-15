@@ -563,13 +563,11 @@ def increment_gmaps_usage(month: str | None = None) -> int:
 
 def get_stats() -> tuple[dict, str, int]:
     """Returns (count by verdict, current month YYYY-MM, this month's Maps calls)."""
-    month = datetime.now().strftime("%Y-%m")
+    month = _current_month()
     with _lock, _connect() as conn:
         rows = conn.execute("SELECT verdict, COUNT(*) AS cnt FROM posts GROUP BY verdict").fetchall()
-        usage_row = conn.execute("SELECT gmaps_calls FROM api_usage WHERE month = ?", (month,)).fetchone()
     counts = {row["verdict"]: row["cnt"] for row in rows}
-    gmaps_calls = usage_row["gmaps_calls"] if usage_row else 0
-    return counts, month, gmaps_calls
+    return counts, month, get_gmaps_usage(month)
 
 
 def get_group_stats() -> dict[str, dict[str, int]]:

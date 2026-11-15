@@ -11,3 +11,5 @@ requests>=2.31.0
 pytest>=8.0
 openpyxl>=3.1.0
 streamlit>=1.40
+pandas>=2.0
+pydeck>=0.8

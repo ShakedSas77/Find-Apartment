@@ -13,11 +13,11 @@ from config import (
 )
 from core.util import _with_retries
 from core.errors import LoginRequired
-from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE
+from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE, _extract_price_candidates
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
-    _content_prefilter, _extract_price_candidates,
+    _content_prefilter,
 )
 from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX, _TOTAL_COST_COL_INDEX
 from sources.fb_scraper import list_my_groups, log_in_to_facebook, run_scraper

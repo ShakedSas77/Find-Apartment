@@ -227,7 +227,6 @@ To add a new disqualifying word, append it to the relevant regex with a `|`, e.g
 **LLM and scanning**
 - `GEMINI_MODELS` — the ordered model chain, strongest first. Use rolling aliases (`gemini-flash-latest`) or named tiers, not dated snapshots — those 404 for new keys.
 - `OLLAMA_MODEL` — the local fallback model.
-- `PROMPT_LANGUAGE` — `"en"` or `"he"` instructions in the prompt (the field content is Hebrew either way).
 - `MAX_CONCURRENT_GROUPS` — how many groups scan in parallel. Higher is faster but more bot-like; `1` is the safest fallback if you start seeing Facebook checkpoints.
 - `SCROLL_COUNT` / `FIRST_SCAN_SCROLL_COUNT` — how far each group's feed is scrolled (a group's first scan goes deeper). With `GROUP_YIELD_SCALING`, groups that rarely produce matches get scrolled less.
 

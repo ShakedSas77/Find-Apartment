@@ -146,10 +146,6 @@ OLLAMA_TIMEOUT_S = 120
 # Number of manual login attempts before exiting
 LOGIN_MAX_ATTEMPTS = 5
 
-# Prompt instruction language (not the output language — that's always Hebrew): "en" or "hebrew".
-# Lets you A/B the two prompt variants in prompts.py.
-PROMPT_LANGUAGE = "en"
-
 # ─── Distance ────────────────────────────────────────────────────────────────────
 # Destination address to compute walking distance from every listing (display only — not a filter)
 DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
@@ -259,8 +255,9 @@ DEAD_LINK_CHECK_INTERVAL_HOURS = 24
 
 # Passively read the feed's own /api/graphql/ responses (graphql_capture.py) and print, per group,
 # how well their post ids/text/exact dates line up with the DOM scan. Observational only — no extra
-# requests, no effect on what's scanned or added. Turn off if it ever slows a run down.
-GRAPHQL_CAPTURE_ENABLED = True
+# requests, no effect on what's scanned or added. Off by default: logs already show the ids and dates
+# match, and it buffers every GraphQL response per group. Turn on to re-check after a Facebook change.
+GRAPHQL_CAPTURE_ENABLED = False
 
 # ─── Alert emails (second listing source) ──────────────────────────────────────
 # Sites' own saved-search alert emails (Yad2, ...), read from a Gmail label over read-only IMAP

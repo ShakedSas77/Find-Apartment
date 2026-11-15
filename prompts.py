@@ -1,48 +1,7 @@
-from config import PROMPT_LANGUAGE
-
-
-def get_apartment_prompt_hebrew(text: str) -> str:
+def get_apartment_prompt_improved(text: str) -> str:
     """
-    Builds an optimized prompt to send to the AI model for extracting data from a real-estate post.
-    """
-    return f"""אתה מומחה לחילוץ נתונים מתוך טקסט (Data Extraction).
-המטרה שלך היא לקרוא את מודעת הנדל"ן הבאה ולהמיר את המידע שבה למבנה נתונים מסוג JSON.
-
-חוקי ברזל:
-1. החזר *אך ורק* אובייקט JSON חוקי וטהור. ללא טקסט מקדים, ללא סיכום, וללא עטיפת Markdown (אל תשתמש ב-```json).
-2. אם נתון חסר או לא ידוע, החזר null (לכל סוגי הנתונים - מספרים, מחרוזות ובוליאנים). אל תחזיר טקסט כמו "לא צוין".
-3. היצמד בקפידה לסוגי הנתונים המוגדרים מטה.
-
-המפתחות הנדרשים וסוגי הנתונים:
-- "rooms" (Number): מספר החדרים כעשרוני (למשל 3.0, 3.5). אם כתוב "סטודיו", החזר 1.0.
-- "price" (Number): שכר דירה חודשי בשקלים. חלץ רק את המספר (למשל 5500). אם כתוב ב-K (למשל 5.5K), המר למספר המלא (5500).
-- "arnona" (String): עלות ארנונה. ציין תמיד את יחידת הזמן כפי שהיא כתובה בטקסט המקורי — "לחודש" או "לחודשיים" (למשל "300 לחודשיים", "150 לחודש"). אם לא צוינה יחידת זמן בטקסט, כתוב את הסכום בלבד ללא יחידה (למשל "800"). אל תמציא יחידת זמן שלא מופיעה במקור.
-- "vaad" (String): עלות ועד בית. אותו כלל יחידת זמן כמו ארנונה (למשל "200 לחודש", "400 לחודשיים", "כלול במחיר").
-- "shelter" (Boolean): האם יש ממ"ד או מקלט? (true = יש, false = אין, null = לא צוין).
-- "parking" (String): פרטי חניה (למשל "חניה בטאבו", "ברחוב", "אין חניה").
-- "entry_date" (String): תאריך כניסה. אם צוין תאריך מדויק, החזר אותו בפורמט "D.M" (למשל "1.8"). אם צוין רק חודש, החזר את שם החודש בעברית, אפשר עם "תחילת"/"אמצע"/"סוף" (למשל "ספטמבר", "תחילת אוקטובר"). אם הטקסט מציין כניסה מיידית/גמישה/בהקדם, החזר "מיידי". אם יש טווח תאריכים, החזר את התאריך המוקדם ביותר בטווח. סנן רעשי רקע וסמיילים.
-- "floor" (String): קומה. למשל "2", "קרקע", "3 מתוך 4".
-- "elevator" (Boolean): האם יש מעלית? (true = יש, false = אין, null = לא צוין).
-- "is_agent" (Boolean): האם המודעה מתיווך? (true = תיווך, false = ללא תיווך, null = לא צוין).
-- "address" (String): מיקום הדירה, בעברית בלבד, בדיוק כפי שכתוב בטקסט המקורי — לא כתובת מומצאת.
-  - אם יש שם רחוב מפורש: החזר אותו + מספר בית אם קיים (למשל "רחוב טור הברושים 5"). הסר לחלוטין תארים ותוספות תיאוריות שאינן חלק משם הרחוב עצמו (למשל "השקט", "המבוקש", "הנחשק", "היוקרתי") — השאר רק את שם הרחוב הגולמי. אל תפרש צירופי סלנג כמו "שירוקלחת" (=שירותים+מקלחת) כשם רחוב.
-  - אם אין שם רחוב מפורש אך הטקסט כן מזכיר קרבה מפורשת לציון דרך/שכונה (למשל "ליד הפארק הלאומי", "בשכונת שנקין") — החזר את הביטוי הזה בדיוק כפי שהוא מופיע בטקסט, בלי לשנות, לקצר או להוסיף עליו.
-  - **חובה מוחלטת: המחרוזת חייבת להכיל אך ורק אותיות עבריות — אסור בהחלט שיופיעו בה אותיות לטיניות (A-Z/a-z), אפילו לא כתעתיק לפני או אחרי הכתיב העברי.** אל תתרגם, אל תתעתק, ואל תוסיף גרסה אנגלית "בשביל בהירות". דוגמה שגויה: "etur habrisot רחוב טור הברושים" (אסור). דוגמה נכונה: "רחוב טור הברושים 5".
-  - **לעולם אל תמציא כתובת, רחוב, שכונה, או ציון דרך שאינו כתוב במפורש בטקסט המקורי — גם לא כניחוש סביר.** אם שום מידע מיקום אמיתי אינו מופיע בטקסט, החזר null.
-  - אם עיר לא מוזכרת כלל בטקסט, הנח שהיא "רמת גן / גבעתיים" בלבד — בלי להמציא רחוב או ציון דרך. יוצא מן הכלל: שכונות תל אביב (תל חיים, ביצרון, רמת ישראל, שיכון חברת החשמל, שיכון עממי ג', יד אליהו, נחלת יצחק, רמת הטייסים) שייכות לתל אביב ולא לרמת גן / גבעתיים.
-
-הטקסט לפענוח:
----
-{text[:3000]}
----
-"""
-
-
-def get_apartment_prompt_english(text: str) -> str:
-    """
-    Same extraction rules as get_apartment_prompt_hebrew(), but with English
-    instructions — field-rule content and all output values stay Hebrew
-    (the source posts are Hebrew and the sheet is Hebrew). Same JSON keys.
+    English instructions; field-rule content and all output values stay Hebrew
+    (the source posts are Hebrew and the sheet is Hebrew).
     """
     return f"""You are a data extraction expert. Read the following Hebrew real-estate rental listing and convert it into a single JSON object.
 
@@ -74,10 +33,3 @@ Text to parse:
 {text[:3000]}
 ---
 """
-
-
-def get_apartment_prompt_improved(text: str) -> str:
-    """Dispatches to the Hebrew or English prompt variant per config.PROMPT_LANGUAGE (for A/B testing)."""
-    if PROMPT_LANGUAGE == "hebrew":
-        return get_apartment_prompt_hebrew(text)
-    return get_apartment_prompt_english(text)
