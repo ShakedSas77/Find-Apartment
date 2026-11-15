@@ -51,11 +51,12 @@ class ApartmentData(BaseModel):
     address: Optional[str] = None
 
 # --- API clients ---
-# Lazy + double-checked-locked, not constructed at import time: importing this
-# module (e.g. to unit-test a pure function) must work with no .env at all.
+# The Gemini client is lazy + double-checked-locked, not constructed at import time:
+# importing this module (e.g. to unit-test a pure function) must work with no .env
+# at all. (The Ollama client below needs no key, so it's built at import.)
 # Double-checking is required, not decorative — _scan_group_page runs a
 # 5-worker ThreadPoolExecutor over process_candidate_listing, so first touch
-# of either client is genuinely concurrent.
+# of the client is genuinely concurrent.
 _gemini_client = None
 
 _gemini_client_lock = threading.Lock()

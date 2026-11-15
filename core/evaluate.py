@@ -332,7 +332,7 @@ def flush_pending_listings(sheet, seen_urls: set, pending_rows: list, pending_se
     if not pending_rows:
         return
     if not live:
-        _safe_print(f"    [{label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — rerun without --dry-run to commit).")
+        _safe_print(f"    [{label}] DRY RUN: {len(pending_rows)} row(s) would be written to the results sheet (skipped — rerun without --dry-run to commit).")
         return
     with _sheet_lock:
         try:
@@ -341,7 +341,7 @@ def flush_pending_listings(sheet, seen_urls: set, pending_rows: list, pending_se
             seen_urls.update(pending_seen_urls)
             for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
                 storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
-            _safe_print(f"    [{label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
+            _safe_print(f"    [{label}] Batch wrote {len(pending_rows)} row(s) to the results sheet.")
             if TELEGRAM_ENABLED:
                 for tg_url, tg_fields, tg_score in pending_telegram:
                     try:

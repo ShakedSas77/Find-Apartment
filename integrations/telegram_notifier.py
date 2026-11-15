@@ -216,7 +216,7 @@ def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> d
 
 
 def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
-    """Sends a new match to the shared Telegram chat with vote buttons.
+    """Sends a new match to the shared Telegram chat with link buttons.
     Returns the sent message_id, or None on any failure/misconfiguration."""
     if not _configured():
         return None

@@ -2,9 +2,9 @@
 === Shared signal exceptions ===
 
 Zero-import leaf. Both exceptions are raised in one module and caught in
-another (GmapsQuotaHalted: maps.py raises, fb_scraper.py/apartment_bot.py
-catch. HeadlessCheckpointAbort: fb_scraper.py raises, core/evaluate.py
-catches), so they need a home neither side owns to avoid a circular import.
+another (GmapsQuotaHalted: maps.py raises, fb_scraper.py catches.
+HeadlessCheckpointAbort: raised and caught in fb_scraper.py), so they need a
+home neither side owns to avoid a circular import.
 """
 
 

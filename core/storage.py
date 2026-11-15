@@ -6,7 +6,7 @@ sheet. Saves repeat LLM calls on posts already rejected/disqualified, and lets
 the raw text be replayed for prompt iteration (--reparse-rejected) without
 opening a browser.
 
-The sheet (Google Sheet) stays the source of truth for actual matches; this DB
+The results sheet (Excel file or Google Sheet) stays the source of truth for actual matches; this DB
 is the memory of everything else (rejected/pre-filtered/failed).
 """
 
@@ -572,7 +572,7 @@ def get_stats() -> tuple[dict, str, int]:
 
 def get_group_stats() -> dict[str, dict[str, int]]:
     """group_url -> {verdict: count}, for the per-group yield breakdown in --stats
-    (flags groups with zero VERDICT_ADDED as candidates to drop from TARGET_URLS)."""
+    (flags groups with zero VERDICT_ADDED as candidates to pause in the Groups tab)."""
     with _lock, _connect() as conn:
         rows = conn.execute(
             "SELECT group_url, verdict, COUNT(*) AS cnt FROM posts "

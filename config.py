@@ -27,7 +27,7 @@ MY_GROUPS_SCROLLS = 6
 CREDENTIALS_FILE = "credentials.json"
 
 # Google Sheets – spreadsheet ID (from the sheet's URL). Moved to .env (SHEET_ID=...)
-# since the repo is public — don't put it back here. Loaded via os.getenv in apartment_bot.py.
+# since the repo is public — don't put it back here. Read by env.get_sheet_id().
 
 # Google Maps – API key for Distance Matrix
 # Create one at: https://console.cloud.google.com/apis/credentials
@@ -98,7 +98,7 @@ INCLUDE_PRICE_UNKNOWN = False
 # internally uses the full date.
 MAX_POST_AGE_DAYS = 14
 
-# Scheduled-run log files (logs/run_*.log) older than this get deleted by run_scheduled.bat.
+# Scan log files (logs/bot_*.log, core/run_log.py) older than this are deleted at the start of a scan.
 LOG_RETENTION_DAYS = 14
 # doctor.py FAILs the "last run" check when no live run has completed OK for this long — catches a
 # scheduled task that silently stopped running. A bit over a day, so one late run doesn't trip it.
@@ -114,7 +114,7 @@ NEGATIVE_KEYWORDS = r'סאבלט|סטודיו|קליניקה|מחפש|מחפשת
 # 'שותפ'/'שותף' (roommate) is handled separately: disqualifies roommate posts, unless
 # 'זוג' (couple) is mentioned nearby — e.g. a landlord describing tenant-type flexibility
 # ("suitable for a couple or 2 roommates") — see _ROOMMATE_COUPLE_EXCEPTION_RE
-# in apartment_bot.py. [פף] also covers the singular form "שותף" (final פ) as well as
+# in core/normalize.py. [פף] also covers the singular form "שותף" (final פ) as well as
 # שותפה/שותפים/שותפות (feminine/plural/collective forms).
 ROOMMATE_KEYWORDS = r'שות[פף]'
 
@@ -147,7 +147,7 @@ OLLAMA_TIMEOUT_S = 120
 LOGIN_MAX_ATTEMPTS = 5
 
 # ─── Distance ────────────────────────────────────────────────────────────────────
-# Destination address to compute walking distance from every listing (display only — not a filter)
+# Destination address to compute walking distance from every listing (MAX_WALKING_DISTANCE_KM filters on it)
 DESTINATION_ADDRESS = "רחוב הדוגמה 1, תל אביב, ישראל"
 
 # Maximum walking distance in km. Listings farther than this are filtered out. Set to 99.0 to disable filtering.
@@ -383,10 +383,9 @@ SCORE_SHELTER_BONUS = 2
 # SCORE_WEIGHT_ROOMS shaved off at MAX_ROOMS, interpolated linearly from MIN_ROOMS.
 SCORE_ROOMS_MAX_PENALTY_FRACTION = 0.2
 
-# ─── Free routing fallback (over Google's monthly cap) ──────────────────────────
-# Straight-line (haversine) distance to DESTINATION_ADDRESS, used only when
-# GMAPS_MONTHLY_CAP is hit and Google's own geocoding is therefore also unavailable
-# (see get_walking_distance()). Placeholders matching the placeholder
+# ─── Free routing fallback (Google Maps off, or over its monthly cap) ───────────
+# Straight-line (haversine) distance to DESTINATION_ADDRESS, used whenever GMAPS_ENABLED
+# is False (the default) or GMAPS_MONTHLY_CAP is hit (see get_walking_distance()). Placeholders matching the placeholder
 # DESTINATION_ADDRESS above — override both in config_local.py with your real
 # address's coordinates (same reasoning as TARGET_URLS: repo is public).
 DESTINATION_LAT = 32.0809
@@ -416,7 +415,6 @@ NOMINATIM_USER_AGENT = "apartment-bot/1.0 (https://github.com/ShakedSas77/Find-A
 # When True, TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID must be set in .env.
 TELEGRAM_ENABLED = False
 
-# Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
 # Fit-score tiers shown as green/yellow/red on a listing's Telegram message (>= GOOD green, >= OK yellow, else red).
 # Set from the sheet's score spread on 2026-10-15 (tertiles were 60 / 69).
 TELEGRAM_SCORE_GOOD = 70
@@ -424,6 +422,7 @@ TELEGRAM_SCORE_OK = 55
 # A live run re-sends alerts for listings added within this window whose Telegram send failed
 # (row is in the sheet, no message id stored). Older ones are left alone — a days-late alert is noise.
 ALERT_RETRY_MAX_AGE_HOURS = 48
+# Down-votes at which bot_listener.py deletes the listing's row from the sheet outright.
 VOTES_TO_REMOVE = 2
 # Up-votes at which bot_listener.py sends a highlight alert to the Telegram chat.
 VOTES_TO_HIGHLIGHT = 2
@@ -431,8 +430,8 @@ VOTES_TO_HIGHLIGHT = 2
 SCORE_VOTE_BOOST = 10
 
 # ─── Local overrides ────────────────────────────────────────────────────────────
-# config_local.py (gitignored) can override any setting above — currently used
-# for TARGET_URLS so real group URLs never land in the (public) repo history.
+# config_local.py (gitignored) can override any setting above — the setup wizard and the
+# web app write personal values there so they never land in the (public) repo history.
 try:
     from config_local import *  # noqa: F401,F403
 except ImportError:
