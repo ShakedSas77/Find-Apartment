@@ -122,16 +122,6 @@ def init_db():
             )
         """)
         conn.execute("""
-            CREATE TABLE IF NOT EXISTS ratings (
-                url TEXT,
-                voter_id TEXT,
-                voter_name TEXT,
-                score INTEGER,
-                rated_at TEXT,
-                PRIMARY KEY (url, voter_id)
-            )
-        """)
-        conn.execute("""
             CREATE TABLE IF NOT EXISTS group_status (
                 group_url TEXT PRIMARY KEY,
                 status TEXT,
@@ -656,41 +646,6 @@ def get_votes(url: str) -> list[dict]:
         rows = conn.execute(
             "SELECT voter_id, voter_name, vote, voted_at FROM votes WHERE url = ?", (url,)
         ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def record_rating(url: str, voter_id: str, voter_name: str, score: int):
-    """Upsert — a voter's latest 0-10 rating replaces their previous one for
-    that listing, same "latest tap wins" rule as record_vote."""
-    now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
-        conn.execute(
-            """INSERT INTO ratings (url, voter_id, voter_name, score, rated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(url, voter_id) DO UPDATE SET
-                   voter_name=excluded.voter_name,
-                   score=excluded.score,
-                   rated_at=excluded.rated_at""",
-            (url, voter_id, voter_name, score, now),
-        )
-
-
-def get_ratings_with_listing_data() -> list[dict]:
-    """
-    Every human 0-10 rating joined with that listing's stored fields
-    (price/rooms/distance plus the full LLM parse in parsed_json, which has
-    floor/elevator/parking/arnona/vaad/shelter/entry_date/is_agent) — the
-    training set for eventually regressing compute_fit_score()'s weights
-    against real human judgment instead of guessed weights.
-    """
-    with _lock, _connect() as conn:
-        rows = conn.execute("""
-            SELECT r.url, r.voter_id, r.voter_name, r.score, r.rated_at,
-                   p.price_val, p.rooms_val, p.address, p.distance_meters, p.distance_text,
-                   p.parsed_json
-            FROM ratings r
-            LEFT JOIN posts p ON p.url = r.url
-        """).fetchall()
     return [dict(row) for row in rows]
 
 

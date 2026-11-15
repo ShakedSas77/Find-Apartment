@@ -3,7 +3,6 @@ import json
 import os
 import re
 import sys
-import time
 import traceback
 
 from config import (
@@ -261,44 +260,6 @@ def recompute_sheet_scores():
     ))
     print(f"Recomputed fit score for {len(rows)} row(s); {changed} changed.")
 
-def backfill_ratings():
-    """
-    Pushes every currently-listed sheet row to Telegram with the 0-10 rating
-    keyboard, for collecting human judgment on apartments already added —
-    the training set for eventually regressing compute_fit_score()'s weights
-    against real preference (storage.get_ratings_with_listing_data()). Reuses
-    the same row->fields reconstruction as --recompute-scores. No browser, no
-    Maps/Gemini calls. 3s pacing between sends — Telegram's group-chat rate
-    limit is roughly 20 messages/minute; telegram_notifier._call() also
-    retries once on a 429, honoring the server's own retry_after cooldown.
-    """
-    if not TELEGRAM_ENABLED:
-        print("TELEGRAM_ENABLED is False in config.py — nothing to send.")
-        return
-    sheet, _ = open_output()
-    data = sheet.get_all_values()
-    rows = data[1:]
-    if not rows:
-        print("Sheet has no data rows.")
-        return
-
-    telegram_notifier.send_backfill_announcement(len(rows))
-    sent = 0
-    for row in rows:
-        url = row[0] if row else ""
-        if not url:
-            continue
-        score_cell = row[_SCORE_COL_INDEX].strip() if len(row) > _SCORE_COL_INDEX else ""
-        try:
-            score = int(score_cell)
-        except ValueError:
-            score = 0
-        message_id = telegram_notifier.send_listing_alert(url, _fields_from_sheet_row(row), score)
-        if message_id:
-            sent += 1
-        time.sleep(3)
-    print(f"Sent {sent}/{len(rows)} listing(s) to Telegram for rating.")
-
 def prune_data():
     """
     On-demand cleanup, no browser: drops sheet rows and lightens local DB rows
@@ -336,8 +297,6 @@ if __name__ == "__main__":
                          help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
     parser.add_argument("--recompute-scores", action="store_true",
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
-    parser.add_argument("--backfill-ratings", action="store_true",
-                         help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
     parser.add_argument("--sync-groups", action="store_true",
                          help="Sync the sheet's Groups tab with the local DB (fill names/cities, refresh stats), then exit")
     parser.add_argument("--eval", action="store_true",
@@ -390,10 +349,6 @@ if __name__ == "__main__":
 
     if args.recompute_scores:
         recompute_sheet_scores()
-        sys.exit(0)
-
-    if args.backfill_ratings:
-        backfill_ratings()
         sys.exit(0)
 
     if args.sync_groups:

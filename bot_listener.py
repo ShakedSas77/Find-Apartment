@@ -1,17 +1,11 @@
 """
-=== Telegram vote + rating listener ===
+=== Telegram vote listener ===
 
-Long-polls Telegram getUpdates for taps on the buttons attached by
-telegram_notifier.build_listing_keyboard(): a ⭐/🗑 vote row and two rows of
-0-10 rating buttons.
-  - Votes act on the sheet based on the running tally: VOTES_TO_REMOVE
-    down-votes deletes the listing's row; each up-vote bumps the sheet's
-    fit-score cell by SCORE_VOTE_BOOST (clamped to 100); VOTES_TO_HIGHLIGHT
-    up-votes sends a highlight message to the chat.
-  - Ratings (storage.record_rating()) have no sheet side effect at all —
-    pure data collection, the training set for eventually regressing
-    compute_fit_score()'s weights against real human judgment
-    (storage.get_ratings_with_listing_data()).
+Long-polls Telegram getUpdates for taps on the ⭐/🗑 vote buttons attached by
+telegram_notifier.build_listing_keyboard(). Votes act on the sheet based on the
+running tally: VOTES_TO_REMOVE down-votes removes the listing's row; each up-vote
+bumps the sheet's fit-score cell by SCORE_VOTE_BOOST (clamped to 100);
+VOTES_TO_HIGHLIGHT up-votes sends a highlight message to the chat.
 Text messages in the configured chat are chat commands (/scan, /status, /stats...),
 handled by integrations/telegram_commands.py.
 A separate long-lived process — not part of the scrape.
@@ -85,27 +79,6 @@ def _boost_score(sheet, row_num: int, row: list):
     sheet.update_cell(row_num, _SCORE_COL, new_score)
 
 
-def _handle_rating(cq: dict, parts: list[str]):
-    """rate:{score}:{group_id}:{post_id} — pure data collection, no sheet
-    side effect, unlike the up/down vote (see _handle_callback_query)."""
-    _, score_str, group_id, post_id = parts
-    try:
-        score = int(score_str)
-    except ValueError:
-        return
-    url = f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
-
-    voter = cq.get("from", {})
-    voter_id = str(voter.get("id", ""))
-    voter_name = voter.get("first_name") or voter.get("username") or voter_id
-    storage.record_rating(url, voter_id, voter_name, score)
-
-    _call("answerCallbackQuery", {
-        "callback_query_id": cq.get("id"),
-        "text": f"ניקוד {score}/10 נשמר, תודה!",
-    })
-
-
 def _handle_command_button(cq: dict):
     # Same rule as a typed command: only the configured chat is obeyed.
     if str(cq.get("message", {}).get("chat", {}).get("id")) != str(TELEGRAM_CHAT_ID):
@@ -123,13 +96,10 @@ def _handle_callback_query(cq: dict, sheet):
         _handle_command_button(cq)
         return
     parts = cq.get("data", "").split(":")
-    if parts and parts[0] == "rate" and len(parts) == 4:
-        _handle_rating(cq, parts)
-        return
     if len(parts) != 3:
         return
     vote, group_id, post_id = parts
-    url = f"https://www.facebook.com/groups/{group_id}/posts/{post_id}/"
+    url = telegram_notifier._post_url(group_id, post_id)
 
     voter = cq.get("from", {})
     voter_id = str(voter.get("id", ""))

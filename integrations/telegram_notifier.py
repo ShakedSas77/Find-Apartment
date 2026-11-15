@@ -57,7 +57,7 @@ def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
         resp = requests.post(url, json=payload, timeout=10)
         data = resp.json()
         if not data.get("ok"):
-            # 429 from a burst of sends (e.g. --backfill-ratings) carries the
+            # 429 from a burst of sends carries the
             # server's own cooldown in retry_after — honor it and retry once
             # rather than dropping the message, since a single flood-control
             # hit is otherwise indistinguishable from a real failure.
@@ -270,18 +270,6 @@ def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str
         "disable_web_page_preview": True,
         "reply_markup": {"inline_keyboard": [_link_row(post_url, _maps_url({"address": address}))]},
     })
-
-
-def send_backfill_announcement(count: int):
-    """Sent once before apartment_bot.py --backfill-ratings replays every
-    sheet row, so the chat knows why a burst of old listings just showed up."""
-    if not _configured():
-        return
-    text = (
-        f"📋 גיבוי היסטורי — {count} דירות מהעבר.\n"
-        f"דרגו כל אחת (0-10) — עוזר לנו לכייל את מערכת הניקוד לפי מה שבאמת חשוב לכם."
-    )
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
 
 def send_failure_alert(summary: str):
