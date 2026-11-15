@@ -12,7 +12,7 @@ import streamlit as st
 
 import config
 from core import addon_setup, scan_runner, storage
-from core.local_settings import is_saved, save_secrets, save_settings
+from core.local_settings import is_saved, save_settings
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
@@ -53,9 +53,7 @@ def destination_section(locked: bool):
         address, lat, lon = st.session_state["destination_found"]
         st.map([{"lat": lat, "lon": lon}], zoom=14, height=250)
         if st.button("זו הכתובת — שמירה", type="primary", disabled=locked):
-            # The south-of cutoff in config.py belongs to the original Tel Aviv destination.
-            save_settings({"DESTINATION_ADDRESS": address, "DESTINATION_LAT": lat, "DESTINATION_LON": lon,
-                           "EXCLUDE_SOUTH_OF_LAT": None})
+            addon_setup.save_destination(address, lat, lon)
             del st.session_state["destination_found"]
             st.success("נשמר.")
             st.rerun()
@@ -102,8 +100,7 @@ def ai_section(locked: bool):
             if not addon_setup.gemini_key_works(key):
                 st.error("המפתח לא עובד — ודאו שהעתקתם את כולו.")
                 return
-            save_secrets({"GEMINI_API_KEY": key})
-            save_settings({"LLM_PROVIDER": "gemini"})
+            addon_setup.use_gemini(key)
             st.success("המפתח עובד ונשמר.")
     else:
         exe = addon_setup.ollama_exe()
@@ -205,9 +202,7 @@ def telegram_section(locked: bool):
                 st.error("לא הגיעה הודעה — שלחו /start לבוט ונסו שוב. (אם בוט הפקודות כבר רץ על המחשב, הוא קולט "
                          "את ההודעות לפני הבדיקה הזו.)")
                 return
-            addon_setup.telegram(token, "sendMessage", {"chat_id": chat["id"], "text": "✅ הבוט מחובר — דירות חדשות יגיעו לכאן"})
-            save_secrets({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": str(chat["id"])})
-            save_settings({"TELEGRAM_ENABLED": True})
+            addon_setup.connect_telegram(token, chat["id"])
             del st.session_state["telegram_bot"]
             st.success(f"מחובר ל-{chat['title']} — נשלחה הודעת בדיקה.")
             st.rerun()
@@ -234,8 +229,7 @@ def yad2_section(locked: bool):
             if problem:
                 st.error(f"לא הצלחתי לקרוא את תיבת המייל: {problem}")
                 return
-            save_secrets({"ALERTS_IMAP_USER": user, "ALERTS_IMAP_PASSWORD": password, "ALERTS_IMAP_FOLDER": folder})
-            save_settings({"ALERTS_SCAN_ENABLED": True})
+            addon_setup.enable_yad2_emails(user, password, folder)
             st.rerun()
 
 
@@ -282,8 +276,7 @@ def sheets_section(locked: bool):
                 st.error("זה לא קישור ל-Google Sheets.")
                 return
             (scan_runner.PROJECT_DIR / config.CREDENTIALS_FILE).write_bytes(key_file.getvalue())
-            save_secrets({"SHEET_ID": sheet_id})
-            save_settings({"OUTPUT_BACKEND": "sheets"})
+            addon_setup.use_google_sheet(sheet_id)
             try:
                 open_spreadsheet().sheet1.row_values(1)
             except Exception as e:
@@ -305,8 +298,7 @@ def maps_section(locked: bool):
                 "(ההוראות המלאות במדריך, תוסף E).")
     key = st.text_input("מפתח Google Maps", type="password", key="maps_key")
     if st.button("שמירה והפעלה", disabled=locked or not key):
-        save_secrets({"GMAPS_API_KEY": key.strip()})
-        save_settings({"GMAPS_ENABLED": True})
+        addon_setup.enable_google_maps(key.strip())
         st.rerun()
 
 
