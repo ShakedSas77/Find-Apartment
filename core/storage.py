@@ -636,16 +636,6 @@ def set_telegram_message(url: str, chat_id: str, message_id: str):
         )
 
 
-def get_telegram_message(url: str) -> tuple[str, str] | None:
-    with _lock, _connect() as conn:
-        row = conn.execute(
-            "SELECT telegram_chat_id, telegram_message_id FROM posts WHERE url = ?", (url,)
-        ).fetchone()
-    if not row or not row["telegram_message_id"]:
-        return None
-    return row["telegram_chat_id"], row["telegram_message_id"]
-
-
 def record_vote(url: str, voter_id: str, voter_name: str, vote: str):
     """Upsert — a voter can change their mind, only their latest vote counts."""
     now = datetime.now().isoformat()
@@ -683,14 +673,6 @@ def record_rating(url: str, voter_id: str, voter_name: str, score: int):
                    rated_at=excluded.rated_at""",
             (url, voter_id, voter_name, score, now),
         )
-
-
-def get_ratings(url: str) -> list[dict]:
-    with _lock, _connect() as conn:
-        rows = conn.execute(
-            "SELECT voter_id, voter_name, score, rated_at FROM ratings WHERE url = ?", (url,)
-        ).fetchall()
-    return [dict(row) for row in rows]
 
 
 def get_ratings_with_listing_data() -> list[dict]:

@@ -20,14 +20,13 @@ from config import (
     ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
 )
 from core.util import _safe_print, _sheet_lock, timed
-from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.llm import analyze_post_with_llm, last_model_used
 from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _is_price_in_text, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE, _CITY_DISPLAY_RES,
-    _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
+    _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer, _ROOMS_EXTRACT_RE, _flatten_numbers,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from integrations.distance_fallback import ESTIMATE_SOURCES, distance_accuracy_label, estimate_error_km
@@ -59,7 +58,7 @@ def _price_prefilter_reject(text: str) -> int | None:
     candidates = [p for p in _extract_price_candidates(text) if p >= PRICE_PREFILTER_MIN_RENT]
     if not candidates:
         return None
-    flat_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', BIDI_RE.sub('', text))
+    flat_text = _flatten_numbers(text)
     bare_numbers = (int(n) for n in re.findall(r'(?<![0-9])[0-9]{4,5}(?![0-9])', flat_text))
     if any(MIN_PRICE <= n <= MAX_PRICE for n in bare_numbers):
         return None
@@ -106,14 +105,14 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "", post_url: st
             valid_prices = [p for p in possible_prices if MIN_PRICE <= p <= MAX_PRICE]
             if valid_prices and price_missing_or_invalid:
                 price_val = float(valid_prices[0])
-            elif price_val < 3000 or price_val > 30000:
+            elif price_val < PRICE_PREFILTER_MIN_RENT or price_val > 30000:
                 price_val = float(possible_prices[0])
 
     # --- Second chance for rooms: only when the model returned no valid room count at all ---
     # (doesn't override a real numeric value the model did return, even if outside the target range)
     if not (MIN_ROOMS <= rooms_val <= MAX_ROOMS) and rooms_missing_or_invalid:
         clean_text_rooms = BIDI_RE.sub('', text)
-        room_matches = [float(r) for r in re.findall(r'([1-9](?:\.5)?)\s*חד', clean_text_rooms)]
+        room_matches = [float(r) for r in _ROOMS_EXTRACT_RE.findall(clean_text_rooms)]
         valid_rooms = [r for r in room_matches if MIN_ROOMS <= r <= MAX_ROOMS]
         if valid_rooms:
             rooms_val = valid_rooms[0]
@@ -237,11 +236,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
     if parsed is not None:
         data = parsed
     else:
-        try:
-            with timed("llm"):
-                data = analyze_post_with_llm(text)
-        except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-            raise
+        with timed("llm"):
+            data = analyze_post_with_llm(text)
         with local_lock:
             stats["llm_parsed"] += 1
     if not data:
@@ -394,7 +390,7 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
     if not re.search(ROOMS_PRE_FILTER_REGEX, text) and not _ENGLISH_ROOMS_RE.search(text):
         clean_snip = text[:100].replace('\n', ' ')
         detail = f"\n      URL: {post_url}\n      Text: {clean_snip}..." if post_url else ""
-        actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
+        actual_rooms_match = _ROOMS_EXTRACT_RE.search(text)
         if actual_rooms_match:
             message = f"Post is for {actual_rooms_match.group(1)} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS})."
         else:

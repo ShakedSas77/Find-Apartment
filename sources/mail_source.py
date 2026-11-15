@@ -31,6 +31,7 @@ import env
 from config import ALERTS_IMAP_HOST, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, YAD2_TAB_NAME
 from core import storage
 from core.evaluate import _content_prefilter, flush_pending_listings, process_candidate_listing
+from core.normalize import BIDI_RE
 from core.util import _safe_print
 from integrations.sheets import open_listings_tab
 
@@ -51,7 +52,6 @@ _DIGEST_START = "מודעות חדשות שמתאימות לחיפוש שלך"
 _DIGEST_END = "לכל המודעות"
 _LISTING_END = "לפרטים נוספים"
 _YAD2_ITEM_RE = re.compile(r"yad2\.co\.il/realestate/item/([a-z0-9]+)", re.I)
-_DIRECTION_MARKS_RE = re.compile("[‎‏‪-‮⁦-⁩]")
 _PRICE_LINE_RE = re.compile(r"^([\d,]+)\s*₪$")
 _ROOMS_RE = re.compile(r"(\d+(?:\.\d+)?)\s*חדרים")
 _SIZE_RE = re.compile(r"(\d+)\s*מ[״\"]ר")
@@ -110,7 +110,7 @@ def parse_yad2_digest(msg: Message) -> list[dict]:
     [] when the email doesn't read as a digest, or its listings and item links don't pair up
     one to one — better to skip an email than attach a price to the wrong apartment.
     """
-    text = _DIRECTION_MARKS_RE.sub("", message_text(msg))
+    text = BIDI_RE.sub("", message_text(msg))
     start, end = text.find(_DIGEST_START), text.rfind(_DIGEST_END)
     if start < 0 or end < start:
         return []
