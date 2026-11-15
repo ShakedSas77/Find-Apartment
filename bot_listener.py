@@ -15,7 +15,6 @@ A separate long-lived process — not part of the scrape.
 
 import os
 
-import requests
 from dotenv import load_dotenv
 
 import config
@@ -29,24 +28,14 @@ from integrations.sheets import (
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-_API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
 _POLL_TIMEOUT_SECONDS = 30
 _SCORE_COL = _SCORE_COL_INDEX + 1
 
 
 def _call(method: str, payload: dict) -> dict | list | None:
-    url = _API_BASE.format(token=TELEGRAM_BOT_TOKEN, method=method)
-    try:
-        resp = requests.post(url, json=payload, timeout=_POLL_TIMEOUT_SECONDS + 10)
-        data = resp.json()
-        if not data.get("ok"):
-            print(f"WARNING: Telegram {method} failed: {data.get('description')}")
-            return None
-        return data.get("result")
-    except Exception as e:
-        print(f"WARNING: Telegram {method} request failed: {telegram_notifier._redact_bot_token(str(e))}")
-        return None
+    # getUpdates long-polls for _POLL_TIMEOUT_SECONDS, so the request needs a longer timeout than an alert send.
+    return telegram_notifier._call(method, payload, timeout=_POLL_TIMEOUT_SECONDS + 10)
 
 
 def _open_sheet():

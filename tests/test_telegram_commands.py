@@ -272,6 +272,12 @@ def test_problem_groups_lists_a_group_not_joined():
     assert "סגורה" in text
 
 
+def test_problem_groups_lists_a_group_awaiting_join_approval():
+    text = format_problem_groups([_group("1", "ממתינה")], {"https://www.facebook.com/groups/1": {"status": "pending"}})
+
+    assert "בקשת הצטרפות ממתינה לאישור" in text
+
+
 def test_problem_groups_flags_many_posts_with_no_match():
     overview = {"https://www.facebook.com/groups/1": {"status": "ok", "last_scanned": "2026-11-13", "posts": 500, "added": 0}}
 

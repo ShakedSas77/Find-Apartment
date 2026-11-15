@@ -51,10 +51,10 @@ def _configured() -> bool:
     return False
 
 
-def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
+def _call(method: str, payload: dict, timeout: int = 10, _retried: bool = False) -> dict | list | None:
     url = _API_BASE.format(token=TELEGRAM_BOT_TOKEN, method=method)
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=timeout)
         data = resp.json()
         if not data.get("ok"):
             # 429 from a burst of sends carries the
@@ -64,7 +64,7 @@ def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
             retry_after = data.get("parameters", {}).get("retry_after")
             if not _retried and data.get("error_code") == 429 and retry_after:
                 time.sleep(retry_after + 1)
-                return _call(method, payload, _retried=True)
+                return _call(method, payload, timeout, _retried=True)
             print(f"WARNING: Telegram {method} failed: {data.get('description')}")
             return None
         return data.get("result")
