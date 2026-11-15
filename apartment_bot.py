@@ -8,7 +8,7 @@ import traceback
 from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS, ROOMS_PRE_FILTER_REGEX,
     LOCATIONS,
-    MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
+    MAX_POST_AGE_DAYS,
     TELEGRAM_ENABLED, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
@@ -16,7 +16,7 @@ from core.errors import LoginRequired
 from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE, _extract_price_candidates
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
-    _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
+    _evaluate_post_data, _build_row, _analysis_from_fields, _location_verdict,
     _content_prefilter,
 )
 from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX, _TOTAL_COST_COL_INDEX
@@ -66,14 +66,10 @@ def reparse_rejected_posts():
 
         post_date = post.get("post_date") or ""
         new_row = _build_row(url, post_date, fields)
-        if fields.get("distance_source") == "excluded_south":
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
-            print(f"    Still rejected_location: {url}")
-            continue
-        dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
-            print(f"    Still rejected_distance: {url}")
+        location_verdict = _location_verdict(fields)
+        if location_verdict:
+            storage.record_post(url, group_url, text, location_verdict, data, analysis=_analysis_from_fields(fields, post_date, location_verdict))
+            print(f"    Still {location_verdict}: {url}")
             continue
         try:
             _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED", table_range="A1"))
@@ -111,6 +107,8 @@ def replay_all_posts(use_llm: bool = False):
     for prompt/LLM changes, at one LLM call per post.
     Note: the relative date stored at original scan time ("3 days ago") doesn't
     update with time — replay doesn't re-apply the MAX_POST_AGE_DAYS filter, only filters/LLM/normalization.
+    Nor the location/distance filter: that needs a distance lookup (_build_row), which replay doesn't
+    make, so a stored rejected_location/rejected_distance post can show up as "-> added".
     """
     posts = storage.get_all_posts()
     mode = "re-parsing with the LLM" if use_llm else "reusing stored LLM parses"
@@ -143,14 +141,7 @@ def replay_all_posts(use_llm: bool = False):
             if not data:
                 new_verdict = storage.VERDICT_PARSE_FAILED
             else:
-                new_verdict, fields = _evaluate_post_data(data, text, group_url, post_url=url)
-                if new_verdict == storage.VERDICT_ADDED:
-                    if fields.get("distance_source") == "excluded_south":
-                        new_verdict = storage.VERDICT_REJECTED_LOCATION
-                    else:
-                        dist_meters = fields.get("distance_meters")
-                        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-                            new_verdict = storage.VERDICT_REJECTED_DISTANCE
+                new_verdict, _ = _evaluate_post_data(data, text, group_url, post_url=url)
 
         if new_verdict != old_verdict:
             changed.append((url, old_verdict, new_verdict))

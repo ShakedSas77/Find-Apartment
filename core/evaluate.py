@@ -202,6 +202,19 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     ]
     return [_sheet_safe_cell(v) for v in row]
 
+def _location_verdict(fields: dict) -> str | None:
+    """The location/distance verdict for a listing whose fields _build_row filled, or None when it's in range."""
+    if fields.get("distance_source") == "excluded_south":
+        return storage.VERDICT_REJECTED_LOCATION
+    dist_meters = fields.get("distance_meters")
+    # Only a trustworthy distance source can reject — dist_meters is a placeholder (999999/inf)
+    # for an uncertain address/quota/error. An estimate is judged by its nearest possible
+    # distance, so one whose error could bring it in range is kept.
+    nearest_km = dist_meters / 1000.0 - (fields.get("distance_error_km") or 0) if dist_meters is not None else None
+    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and nearest_km is not None and nearest_km > MAX_WALKING_DISTANCE_KM:
+        return storage.VERDICT_REJECTED_DISTANCE
+    return None
+
 def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str | None = None) -> dict:
     # model_used defaults to this thread's last LLM call: every caller records a post on the same
     # thread right after analyzing it.
@@ -268,20 +281,12 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
 
     new_row = _build_row(post_url, post_date, fields)
 
-    if fields.get("distance_source") == "excluded_south":
-        _safe_print(f"    [{label}] Skipped: location south of Tel Aviv HaHagana station.")
-        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
-        return
-
-    dist_meters = fields.get("distance_meters")
-    # Only reject on distance if a real distance was actually computed against
-    # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
-    # address/quota/error, not a real distance, and shouldn't disqualify a
-    # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
-    nearest_km = dist_meters / 1000.0 - (fields.get("distance_error_km") or 0) if dist_meters is not None else None
-    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and nearest_km is not None and nearest_km > MAX_WALKING_DISTANCE_KM:
-        _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
-        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
+    location_verdict = _location_verdict(fields)
+    if location_verdict:
+        reason = ("location south of Tel Aviv HaHagana station" if location_verdict == storage.VERDICT_REJECTED_LOCATION
+                  else f"Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km)")
+        _safe_print(f"    [{label}] Skipped: {reason}.")
+        storage.record_post(post_url, group_url, text, location_verdict, data, analysis=_analysis_from_fields(fields, post_date, location_verdict))
         return
 
     # _known_added_listing_keys() only knows listings already *recorded* as added, which happens at
