@@ -17,7 +17,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
 )
 from core.util import _safe_print, _sheet_lock, timed
 from core.llm import analyze_post_with_llm, last_model_used
@@ -31,10 +31,8 @@ from core.normalize import (
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from integrations.distance_fallback import ESTIMATE_SOURCES, distance_accuracy_label, estimate_error_km
 from integrations.maps import _format_address_display, get_walking_distance
-from integrations.sheets import _append_rows_batch
+from integrations.sheets import _append_rows_batch, _SCORE_COL_INDEX, _COL_DIST_KM
 from integrations import telegram_notifier
-
-_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 # distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
 # rejection on. The free estimates (distance_fallback.ESTIMATE_SOURCES) are real, if
@@ -310,7 +308,7 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
             prefix = "SUCCESS" if live else "DRY RUN"
             verb = "queued" if live else "would queue (rerun without --dry-run to commit)"
-            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
+            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[_COL_DIST_KM]} | Address: {fields['address']}")
         else:
             _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
     if repost_in_flight:

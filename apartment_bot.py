@@ -10,7 +10,7 @@ from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS, ROOMS_PRE_FILTER_REGEX,
     LOCATIONS,
     MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
-    TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
+    TELEGRAM_ENABLED, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
 from core.errors import LoginRequired
@@ -20,7 +20,7 @@ from core.evaluate import (
     _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
     _content_prefilter, _extract_price_candidates,
 )
-from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
+from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX, _TOTAL_COST_COL_INDEX
 from sources.fb_scraper import list_my_groups, log_in_to_facebook, run_scraper
 from sources.mail_source import dump_alert_emails
 from core.run_log import start_run_log
@@ -227,8 +227,6 @@ def _print_suspicious_rejects():
         for text in texts[:2]:
             at = text.find(keyword) if keyword else 0
             print(f"          ...{text[max(0, at - 40):at + 50].replace(chr(10), ' ')}...")
-
-_TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
 
 def recompute_sheet_scores():
     """

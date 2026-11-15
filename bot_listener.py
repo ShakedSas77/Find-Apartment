@@ -27,7 +27,10 @@ from dotenv import load_dotenv
 import config
 from core import storage
 from integrations import telegram_commands, telegram_notifier
-from integrations.sheets import open_spreadsheet
+from integrations.sheets import (
+    open_spreadsheet, _SCORE_COL_INDEX, _TOTAL_COST_COL_INDEX as _COL_TOTAL_COST,
+    _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ADDRESS, _COL_ENTRY_DATE, _COL_FLOOR, _COL_ELEVATOR,
+)
 
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -35,10 +38,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
 
 _POLL_TIMEOUT_SECONDS = 30
-_SCORE_COL = config.SHEET_HEADERS.index("ציון התאמה") + 1
-_COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ADDRESS = 1, 2, 3, 13  # 0-based row indexes
-_COL_ENTRY_DATE, _COL_FLOOR, _COL_ELEVATOR = 4, 5, 6
-_COL_TOTAL_COST = config.SHEET_HEADERS.index("עלות חודשית כוללת")
+_SCORE_COL = _SCORE_COL_INDEX + 1
 
 
 def _call(method: str, payload: dict) -> dict | list | None:
