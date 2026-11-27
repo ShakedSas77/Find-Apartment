@@ -55,14 +55,6 @@ def test_update_writes_a_block_at_an_a1_range(tab):
     assert tab.col_values(2) == ["מחיר", "5000", "5100"]
 
 
-def test_batch_update_writes_each_range(tab):
-    tab.append_rows([["https://x/1", 6000, 3]])
-
-    tab.batch_update([{"range": "C2", "values": [[2.5]]}])
-
-    assert tab.row_values(2) == ["https://x/1", "6000", "2.5"]
-
-
 def test_delete_rows_shifts_the_rows_below_up(tab):
     tab.append_rows([["https://x/1", 6000, 3], ["https://x/2", 6100, 3]])
 

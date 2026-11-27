@@ -347,7 +347,7 @@ def _ensure_sorted_by_new_posts(page, group_label: str):
     either of which can surface bumped/commented-on posts out of chronological
     order. Switching to "New posts" makes the feed strictly newest-first,
     which is what makes it safe to stop scrolling once old posts start
-    appearing (see the scroll loop in _scan_group_page). Verified against live
+    appearing (see the scroll loop in _scroll_and_harvest). Verified against live
     FB DOM 2026-07-25: the sort control is a role="button" whose visible text
     is the current selection ("Most relevant"/"Recent activity"/"New posts"),
     and the opened menu's options are role="menuitemradio", not "menuitem".

@@ -3,24 +3,23 @@ import json
 import os
 import re
 import sys
-import time
 import traceback
 
 from config import (
     MIN_PRICE, MAX_PRICE, DESTINATION_ADDRESS, ROOMS_PRE_FILTER_REGEX,
     LOCATIONS,
-    MAX_POST_AGE_DAYS, MAX_WALKING_DISTANCE_KM,
-    TELEGRAM_ENABLED, SHEET_HEADERS, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
+    MAX_POST_AGE_DAYS,
+    TELEGRAM_ENABLED, ALERTS_LOOKBACK_DAYS, ALERTS_DUMP_DIR, LOG_RETENTION_DAYS,
 )
 from core.util import _with_retries
 from core.errors import LoginRequired
-from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE
+from core.normalize import BIDI_RE, _strip_comment_section, _ENGLISH_ROOMS_RE, _extract_price_candidates
 from core.llm import analyze_post_with_llm
 from core.evaluate import (
-    _evaluate_post_data, _build_row, _analysis_from_fields, _DISTANCE_FILTERABLE_SOURCES,
-    _content_prefilter, _extract_price_candidates,
+    _evaluate_post_data, _build_row, _analysis_from_fields, _location_verdict,
+    _content_prefilter,
 )
-from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX
+from integrations.sheets import open_output, dedupe_and_sort_sheet, _fields_from_sheet_row, _SCORE_COL_INDEX, _TOTAL_COST_COL_INDEX
 from sources.fb_scraper import list_my_groups, log_in_to_facebook, run_scraper
 from sources.mail_source import dump_alert_emails
 from core.run_log import start_run_log
@@ -67,14 +66,10 @@ def reparse_rejected_posts():
 
         post_date = post.get("post_date") or ""
         new_row = _build_row(url, post_date, fields)
-        if fields.get("distance_source") == "excluded_south":
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
-            print(f"    Still rejected_location: {url}")
-            continue
-        dist_meters = fields.get("distance_meters")
-        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-            storage.record_post(url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
-            print(f"    Still rejected_distance: {url}")
+        location_verdict = _location_verdict(fields)
+        if location_verdict:
+            storage.record_post(url, group_url, text, location_verdict, data, analysis=_analysis_from_fields(fields, post_date, location_verdict))
+            print(f"    Still {location_verdict}: {url}")
             continue
         try:
             _with_retries(lambda: sheet.append_row(new_row, value_input_option="USER_ENTERED", table_range="A1"))
@@ -112,6 +107,8 @@ def replay_all_posts(use_llm: bool = False):
     for prompt/LLM changes, at one LLM call per post.
     Note: the relative date stored at original scan time ("3 days ago") doesn't
     update with time — replay doesn't re-apply the MAX_POST_AGE_DAYS filter, only filters/LLM/normalization.
+    Nor the location/distance filter: that needs a distance lookup (_build_row), which replay doesn't
+    make, so a stored rejected_location/rejected_distance post can show up as "-> added".
     """
     posts = storage.get_all_posts()
     mode = "re-parsing with the LLM" if use_llm else "reusing stored LLM parses"
@@ -144,14 +141,7 @@ def replay_all_posts(use_llm: bool = False):
             if not data:
                 new_verdict = storage.VERDICT_PARSE_FAILED
             else:
-                new_verdict, fields = _evaluate_post_data(data, text, group_url, post_url=url)
-                if new_verdict == storage.VERDICT_ADDED:
-                    if fields.get("distance_source") == "excluded_south":
-                        new_verdict = storage.VERDICT_REJECTED_LOCATION
-                    else:
-                        dist_meters = fields.get("distance_meters")
-                        if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and dist_meters is not None and (dist_meters / 1000.0) > MAX_WALKING_DISTANCE_KM:
-                            new_verdict = storage.VERDICT_REJECTED_DISTANCE
+                new_verdict, _ = _evaluate_post_data(data, text, group_url, post_url=url)
 
         if new_verdict != old_verdict:
             changed.append((url, old_verdict, new_verdict))
@@ -228,8 +218,6 @@ def _print_suspicious_rejects():
             at = text.find(keyword) if keyword else 0
             print(f"          ...{text[max(0, at - 40):at + 50].replace(chr(10), ' ')}...")
 
-_TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
-
 def recompute_sheet_scores():
     """
     Rewrites the ציון התאמה and עלות חודשית כוללת cells of every existing sheet row using the current
@@ -262,44 +250,6 @@ def recompute_sheet_scores():
         value_input_option="RAW",
     ))
     print(f"Recomputed fit score for {len(rows)} row(s); {changed} changed.")
-
-def backfill_ratings():
-    """
-    Pushes every currently-listed sheet row to Telegram with the 0-10 rating
-    keyboard, for collecting human judgment on apartments already added —
-    the training set for eventually regressing compute_fit_score()'s weights
-    against real preference (storage.get_ratings_with_listing_data()). Reuses
-    the same row->fields reconstruction as --recompute-scores. No browser, no
-    Maps/Gemini calls. 3s pacing between sends — Telegram's group-chat rate
-    limit is roughly 20 messages/minute; telegram_notifier._call() also
-    retries once on a 429, honoring the server's own retry_after cooldown.
-    """
-    if not TELEGRAM_ENABLED:
-        print("TELEGRAM_ENABLED is False in config.py — nothing to send.")
-        return
-    sheet, _ = open_output()
-    data = sheet.get_all_values()
-    rows = data[1:]
-    if not rows:
-        print("Sheet has no data rows.")
-        return
-
-    telegram_notifier.send_backfill_announcement(len(rows))
-    sent = 0
-    for row in rows:
-        url = row[0] if row else ""
-        if not url:
-            continue
-        score_cell = row[_SCORE_COL_INDEX].strip() if len(row) > _SCORE_COL_INDEX else ""
-        try:
-            score = int(score_cell)
-        except ValueError:
-            score = 0
-        message_id = telegram_notifier.send_listing_alert(url, _fields_from_sheet_row(row), score)
-        if message_id:
-            sent += 1
-        time.sleep(3)
-    print(f"Sent {sent}/{len(rows)} listing(s) to Telegram for rating.")
 
 def prune_data():
     """
@@ -338,8 +288,6 @@ if __name__ == "__main__":
                          help="Drop sheet rows and lighten local DB rows older than MAX_POST_AGE_DAYS, no browser, then exit")
     parser.add_argument("--recompute-scores", action="store_true",
                          help="Rewrite every existing sheet row's fit score with the current scoring formula, no browser, then exit")
-    parser.add_argument("--backfill-ratings", action="store_true",
-                         help="Send every existing sheet row to Telegram with the 0-10 rating keyboard, no browser, then exit")
     parser.add_argument("--sync-groups", action="store_true",
                          help="Sync the sheet's Groups tab with the local DB (fill names/cities, refresh stats), then exit")
     parser.add_argument("--eval", action="store_true",
@@ -392,10 +340,6 @@ if __name__ == "__main__":
 
     if args.recompute_scores:
         recompute_sheet_scores()
-        sys.exit(0)
-
-    if args.backfill_ratings:
-        backfill_ratings()
         sys.exit(0)
 
     if args.sync_groups:

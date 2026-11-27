@@ -248,7 +248,7 @@ def apartment_page():
                        "או קיבל תוספת מהצבעות בטלגרם.")
         st.subheader("פרטים")
         details = ["תאריך כניסה", "קומה", "מעלית", "חניה", 'ממ"ד/מקלט', "תיווך/פרטי", "ארנונה (לחודשיים)",
-                   "ועד בית (לחודשיים)", data.POST_DATE, "זמן סריקה", data.SOURCE]
+                   "ועד בית (לחודשיים)", data.POST_DATE, data.SCAN_TIME, data.SOURCE]
         st.dataframe(pd.DataFrame({"": details, "ערך": [data.display_text(row[d]) or "—" for d in details]}),
                      hide_index=True, width="stretch")
     with right:

@@ -1,7 +1,8 @@
 """
 The checks and system steps behind setting up the AI and the add-ons — a key that works, the
-Telegram chat, the Yad2 mailbox, the daily scans in Task Scheduler, the Google Sheet's key — shared by
-the console wizard (setup_wizard.py) and the web app's Settings page. No prompts or UI here.
+Telegram chat, the Yad2 mailbox, the daily scans in Task Scheduler, the Google Sheet's key — and the
+settings each one saves once it checks out, shared by the console wizard (setup_wizard.py) and the
+web app's Settings page. No prompts or UI here.
 """
 import csv
 import imaplib
@@ -18,6 +19,7 @@ import requests
 from google import genai
 
 import config
+from core.local_settings import save_secrets, save_settings
 from sources.mail_source import _quote_folder
 
 PROJECT_DIR = Path(__file__).resolve().parent.parent
@@ -26,6 +28,39 @@ SCHEDULE_TASK_PREFIX = "ApartmentBot"
 _SHEET_ID_RE = re.compile(r"/spreadsheets/d/([A-Za-z0-9_-]+)")
 _TELEGRAM_API = "https://api.telegram.org/bot{token}/{method}"
 _STARTUP_SHORTCUT = "Apartment bot Telegram listener.lnk"
+
+
+def save_destination(address: str, lat: float, lon: float):
+    # The south-of cutoff in config.py belongs to the original Tel Aviv destination.
+    save_settings({"DESTINATION_ADDRESS": address, "DESTINATION_LAT": lat, "DESTINATION_LON": lon,
+                   "EXCLUDE_SOUTH_OF_LAT": None})
+
+
+def use_gemini(key: str):
+    save_secrets({"GEMINI_API_KEY": key})
+    save_settings({"LLM_PROVIDER": "gemini"})
+
+
+def connect_telegram(token: str, chat_id):
+    """Sends the chat a test message and turns alerts on."""
+    telegram(token, "sendMessage", {"chat_id": chat_id, "text": "✅ הבוט מחובר — דירות חדשות יגיעו לכאן"})
+    save_secrets({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": str(chat_id)})
+    save_settings({"TELEGRAM_ENABLED": True})
+
+
+def enable_yad2_emails(user: str, password: str, folder: str):
+    save_secrets({"ALERTS_IMAP_USER": user, "ALERTS_IMAP_PASSWORD": password, "ALERTS_IMAP_FOLDER": folder})
+    save_settings({"ALERTS_SCAN_ENABLED": True})
+
+
+def enable_google_maps(key: str):
+    save_secrets({"GMAPS_API_KEY": key})
+    save_settings({"GMAPS_ENABLED": True})
+
+
+def use_google_sheet(sheet_id: str):
+    save_secrets({"SHEET_ID": sheet_id})
+    save_settings({"OUTPUT_BACKEND": "sheets"})
 
 
 def gemini_key_works(key: str) -> bool:

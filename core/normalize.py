@@ -77,9 +77,11 @@ _PRICE_CONTEXT_RE = re.compile(
 )
 
 def _extract_price_candidates(text: str) -> list[int]:
-    clean_text = BIDI_RE.sub('', text)
-    clean_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', clean_text)
-    return [int(m.group(1) or m.group(2)) for m in _PRICE_CONTEXT_RE.finditer(clean_text)]
+    return [int(m.group(1) or m.group(2)) for m in _PRICE_CONTEXT_RE.finditer(_flatten_numbers(text))]
+
+def _flatten_numbers(text: str) -> str:
+    """BIDI-stripped text with thousands separators removed ("6,500" / "6.500" / "6 500" -> "6500")."""
+    return re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', BIDI_RE.sub('', text))
 
 # Converts the relative date Facebook shows ("6h", "1d", "3w", plus the longer
 # forms Facebook sometimes renders: "3 hrs", "1 day", "2 wks") to an absolute date (DD/MM)
@@ -523,11 +525,6 @@ _STREET_HINT_RE = re.compile(r'רחוב|רח[\'’׳]|שדרות|שד[\'’׳]|�
 
 _LANDMARK_HINT_RE = re.compile(r'ליד|בסמוך|קרוב ל|צמוד ל|באזור|בשכונת|שכונת')
 
-# Street-type word/abbreviation carries no distinguishing signal for dedupe —
-# "רחוב הרצל" and "רח' הרצל" are the same street. LLM output uses the ASCII
-# apostrophe (U+0027), not the Hebrew geresh (׳), so both must be recognized.
-_STREET_TYPE_RE = _STREET_HINT_RE
-
 # A cross-street qualifier ("X פינת Y" / "X על פינת Y") is a more specific
 # description of the same corner, not a different address — one post calling
 # it "שמחה" and another "רחוב שמחה, פינת שפירא" are very likely the same
@@ -546,7 +543,9 @@ def _normalize_address_key(address: str) -> str:
         return ""
     norm = _CITY_TOKENS_RE.sub('', address)
     norm = _CORNER_HINT_RE.sub('', norm)
-    norm = _STREET_TYPE_RE.sub('', norm)
+    # Street-type word/abbreviation carries no distinguishing signal for dedupe —
+    # "רחוב הרצל" and "רח' הרצל" are the same street.
+    norm = _STREET_HINT_RE.sub('', norm)
     norm = _ADDRESS_PUNCT_RE.sub(' ', norm)
     norm = re.sub(r'\s+', ' ', norm).strip()
     # A street + house number identifies the building on its own; any neighborhood/landmark words after

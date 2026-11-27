@@ -17,25 +17,22 @@ from config import (
     MIN_PRICE, MAX_PRICE, MIN_ROOMS, MAX_ROOMS, INCLUDE_PRICE_UNKNOWN,
     MAX_WALKING_DISTANCE_KM, EXCLUDED_LOCATIONS, ROOMMATE_KEYWORDS,
     NEGATIVE_KEYWORDS, ROOMS_PRE_FILTER_REGEX, SCORE_ENTRY_DATE_MAX_DAYS_AHEAD,
-    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, SHEET_HEADERS, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
+    ARNONA_MAX_BIMONTHLY, PRICE_PREFILTER_MIN_RENT, TELEGRAM_ENABLED, EXCLUDED_STREETS_RAMAT_GAN_ONLY,
 )
 from core.util import _safe_print, _sheet_lock, timed
-from core.errors import GmapsQuotaHalted, HeadlessCheckpointAbort
 from core.llm import analyze_post_with_llm, last_model_used
 from core.normalize import (
     BIDI_RE, _extract_price_candidates, _normalize_bimonthly_fee, _warn_if_fee_implausible,
     _strip_foreign_letters, _reject_hallucinated_address, _is_price_in_text, _parse_floor, _detect_agent,
     _classify_parking, _normalize_entry_date, resolve_entry_date, map_bool, _sheet_safe_cell,
     _ROOMMATE_COUPLE_EXCEPTION_RE, _first_mobile_phone, _PHONE_RE, _SEEKING_A_TENANT_RE, _ENGLISH_ROOMS_RE, _STUDIO_AMENITY_RE, _CITY_DISPLAY_RES,
-    _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer,
+    _SHARED_WORD_PREFIX, _ROOMMATE_FRIENDLY_RE, _reads_as_an_offer, _ROOMS_EXTRACT_RE, _flatten_numbers,
 )
 from core.dedupe import _listing_dedupe_key, _known_added_listing_keys, _maybe_enrich_duplicate_address
 from integrations.distance_fallback import ESTIMATE_SOURCES, distance_accuracy_label, estimate_error_km
 from integrations.maps import _format_address_display, get_walking_distance
-from integrations.sheets import _append_rows_batch
+from integrations.sheets import _append_rows_batch, _SCORE_COL_INDEX, _COL_DIST_KM
 from integrations import telegram_notifier
-
-_SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
 
 # distance_source values trustworthy enough to gate the > MAX_WALKING_DISTANCE_KM
 # rejection on. The free estimates (distance_fallback.ESTIMATE_SOURCES) are real, if
@@ -59,7 +56,7 @@ def _price_prefilter_reject(text: str) -> int | None:
     candidates = [p for p in _extract_price_candidates(text) if p >= PRICE_PREFILTER_MIN_RENT]
     if not candidates:
         return None
-    flat_text = re.sub(r'(?<=[0-9])[.,\s](?=[0-9]{3}(?![0-9]))', '', BIDI_RE.sub('', text))
+    flat_text = _flatten_numbers(text)
     bare_numbers = (int(n) for n in re.findall(r'(?<![0-9])[0-9]{4,5}(?![0-9])', flat_text))
     if any(MIN_PRICE <= n <= MAX_PRICE for n in bare_numbers):
         return None
@@ -106,14 +103,14 @@ def _evaluate_post_data(data: dict, text: str, group_url: str = "", post_url: st
             valid_prices = [p for p in possible_prices if MIN_PRICE <= p <= MAX_PRICE]
             if valid_prices and price_missing_or_invalid:
                 price_val = float(valid_prices[0])
-            elif price_val < 3000 or price_val > 30000:
+            elif price_val < PRICE_PREFILTER_MIN_RENT or price_val > 30000:
                 price_val = float(possible_prices[0])
 
     # --- Second chance for rooms: only when the model returned no valid room count at all ---
     # (doesn't override a real numeric value the model did return, even if outside the target range)
     if not (MIN_ROOMS <= rooms_val <= MAX_ROOMS) and rooms_missing_or_invalid:
         clean_text_rooms = BIDI_RE.sub('', text)
-        room_matches = [float(r) for r in re.findall(r'([1-9](?:\.5)?)\s*חד', clean_text_rooms)]
+        room_matches = [float(r) for r in _ROOMS_EXTRACT_RE.findall(clean_text_rooms)]
         valid_rooms = [r for r in room_matches if MIN_ROOMS <= r <= MAX_ROOMS]
         if valid_rooms:
             rooms_val = valid_rooms[0]
@@ -205,6 +202,19 @@ def _build_row(post_url: str, fb_post_date: str, fields: dict) -> list:
     ]
     return [_sheet_safe_cell(v) for v in row]
 
+def _location_verdict(fields: dict) -> str | None:
+    """The location/distance verdict for a listing whose fields _build_row filled, or None when it's in range."""
+    if fields.get("distance_source") == "excluded_south":
+        return storage.VERDICT_REJECTED_LOCATION
+    dist_meters = fields.get("distance_meters")
+    # Only a trustworthy distance source can reject — dist_meters is a placeholder (999999/inf)
+    # for an uncertain address/quota/error. An estimate is judged by its nearest possible
+    # distance, so one whose error could bring it in range is kept.
+    nearest_km = dist_meters / 1000.0 - (fields.get("distance_error_km") or 0) if dist_meters is not None else None
+    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and nearest_km is not None and nearest_km > MAX_WALKING_DISTANCE_KM:
+        return storage.VERDICT_REJECTED_DISTANCE
+    return None
+
 def _analysis_from_fields(fields: dict, post_date: str, reject_reason: str = "", model_used: str | None = None) -> dict:
     # model_used defaults to this thread's last LLM call: every caller records a post on the same
     # thread right after analyzing it.
@@ -237,11 +247,8 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
     if parsed is not None:
         data = parsed
     else:
-        try:
-            with timed("llm"):
-                data = analyze_post_with_llm(text)
-        except (GmapsQuotaHalted, HeadlessCheckpointAbort):
-            raise
+        with timed("llm"):
+            data = analyze_post_with_llm(text)
         with local_lock:
             stats["llm_parsed"] += 1
     if not data:
@@ -274,20 +281,12 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
 
     new_row = _build_row(post_url, post_date, fields)
 
-    if fields.get("distance_source") == "excluded_south":
-        _safe_print(f"    [{label}] Skipped: location south of Tel Aviv HaHagana station.")
-        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_LOCATION, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_LOCATION))
-        return
-
-    dist_meters = fields.get("distance_meters")
-    # Only reject on distance if a real distance was actually computed against
-    # Google Maps — dist_meters is a placeholder (999999/inf) for an uncertain
-    # address/quota/error, not a real distance, and shouldn't disqualify a
-    # post as if it were far away (see CLAUDE.md, verified 2026-07-18).
-    nearest_km = dist_meters / 1000.0 - (fields.get("distance_error_km") or 0) if dist_meters is not None else None
-    if fields.get("distance_source") in _DISTANCE_FILTERABLE_SOURCES and nearest_km is not None and nearest_km > MAX_WALKING_DISTANCE_KM:
-        _safe_print(f"    [{label}] Skipped: Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km).")
-        storage.record_post(post_url, group_url, text, storage.VERDICT_REJECTED_DISTANCE, data, analysis=_analysis_from_fields(fields, post_date, storage.VERDICT_REJECTED_DISTANCE))
+    location_verdict = _location_verdict(fields)
+    if location_verdict:
+        reason = ("location south of Tel Aviv HaHagana station" if location_verdict == storage.VERDICT_REJECTED_LOCATION
+                  else f"Distance too far ({fields.get('distance_text')} > {MAX_WALKING_DISTANCE_KM}km)")
+        _safe_print(f"    [{label}] Skipped: {reason}.")
+        storage.record_post(post_url, group_url, text, location_verdict, data, analysis=_analysis_from_fields(fields, post_date, location_verdict))
         return
 
     # _known_added_listing_keys() only knows listings already *recorded* as added, which happens at
@@ -314,7 +313,7 @@ def process_candidate_listing(post_url: str, text: str, post_date: str, group_ur
             price_display = f"{int(fields['price_val']):,} ₪" if fields['price_val'] else "מחיר לא צוין"
             prefix = "SUCCESS" if live else "DRY RUN"
             verb = "queued" if live else "would queue (rerun without --dry-run to commit)"
-            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[3]} | Address: {fields['address']}")
+            _safe_print(f"    {prefix}: [{label}] Apartment {verb}: {fields['rooms_val']} rooms | {price_display} | {new_row[_COL_DIST_KM]} | Address: {fields['address']}")
         else:
             _safe_print(f"    [{label}] Skipped before queueing: duplicate URL.")
     if repost_in_flight:
@@ -333,7 +332,7 @@ def flush_pending_listings(sheet, seen_urls: set, pending_rows: list, pending_se
     if not pending_rows:
         return
     if not live:
-        _safe_print(f"    [{label}] DRY RUN: {len(pending_rows)} row(s) would be written to Google Sheets (skipped — rerun without --dry-run to commit).")
+        _safe_print(f"    [{label}] DRY RUN: {len(pending_rows)} row(s) would be written to the results sheet (skipped — rerun without --dry-run to commit).")
         return
     with _sheet_lock:
         try:
@@ -342,7 +341,7 @@ def flush_pending_listings(sheet, seen_urls: set, pending_rows: list, pending_se
             seen_urls.update(pending_seen_urls)
             for record_url, record_group_url, record_text, record_data, record_analysis in pending_records:
                 storage.record_post(record_url, record_group_url, record_text, storage.VERDICT_ADDED, record_data, analysis=record_analysis)
-            _safe_print(f"    [{label}] Batch wrote {len(pending_rows)} row(s) to Google Sheets.")
+            _safe_print(f"    [{label}] Batch wrote {len(pending_rows)} row(s) to the results sheet.")
             if TELEGRAM_ENABLED:
                 for tg_url, tg_fields, tg_score in pending_telegram:
                     try:
@@ -394,7 +393,7 @@ def _content_prefilter(text: str, post_url: str = "") -> tuple[str, dict, str] |
     if not re.search(ROOMS_PRE_FILTER_REGEX, text) and not _ENGLISH_ROOMS_RE.search(text):
         clean_snip = text[:100].replace('\n', ' ')
         detail = f"\n      URL: {post_url}\n      Text: {clean_snip}..." if post_url else ""
-        actual_rooms_match = re.search(r'([1-9](?:\.5)?)\s*חד', text)
+        actual_rooms_match = _ROOMS_EXTRACT_RE.search(text)
         if actual_rooms_match:
             message = f"Post is for {actual_rooms_match.group(1)} rooms (not matching target {MIN_ROOMS}-{MAX_ROOMS})."
         else:

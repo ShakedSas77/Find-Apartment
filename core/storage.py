@@ -6,7 +6,7 @@ sheet. Saves repeat LLM calls on posts already rejected/disqualified, and lets
 the raw text be replayed for prompt iteration (--reparse-rejected) without
 opening a browser.
 
-The sheet (Google Sheet) stays the source of truth for actual matches; this DB
+The results sheet (Excel file or Google Sheet) stays the source of truth for actual matches; this DB
 is the memory of everything else (rejected/pre-filtered/failed).
 """
 
@@ -119,16 +119,6 @@ def init_db():
             CREATE TABLE IF NOT EXISTS bot_state (
                 key TEXT PRIMARY KEY,
                 value TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS ratings (
-                url TEXT,
-                voter_id TEXT,
-                voter_name TEXT,
-                score INTEGER,
-                rated_at TEXT,
-                PRIMARY KEY (url, voter_id)
             )
         """)
         conn.execute("""
@@ -573,18 +563,16 @@ def increment_gmaps_usage(month: str | None = None) -> int:
 
 def get_stats() -> tuple[dict, str, int]:
     """Returns (count by verdict, current month YYYY-MM, this month's Maps calls)."""
-    month = datetime.now().strftime("%Y-%m")
+    month = _current_month()
     with _lock, _connect() as conn:
         rows = conn.execute("SELECT verdict, COUNT(*) AS cnt FROM posts GROUP BY verdict").fetchall()
-        usage_row = conn.execute("SELECT gmaps_calls FROM api_usage WHERE month = ?", (month,)).fetchone()
     counts = {row["verdict"]: row["cnt"] for row in rows}
-    gmaps_calls = usage_row["gmaps_calls"] if usage_row else 0
-    return counts, month, gmaps_calls
+    return counts, month, get_gmaps_usage(month)
 
 
 def get_group_stats() -> dict[str, dict[str, int]]:
     """group_url -> {verdict: count}, for the per-group yield breakdown in --stats
-    (flags groups with zero VERDICT_ADDED as candidates to drop from TARGET_URLS)."""
+    (flags groups with zero VERDICT_ADDED as candidates to pause in the Groups tab)."""
     with _lock, _connect() as conn:
         rows = conn.execute(
             "SELECT group_url, verdict, COUNT(*) AS cnt FROM posts "
@@ -636,16 +624,6 @@ def set_telegram_message(url: str, chat_id: str, message_id: str):
         )
 
 
-def get_telegram_message(url: str) -> tuple[str, str] | None:
-    with _lock, _connect() as conn:
-        row = conn.execute(
-            "SELECT telegram_chat_id, telegram_message_id FROM posts WHERE url = ?", (url,)
-        ).fetchone()
-    if not row or not row["telegram_message_id"]:
-        return None
-    return row["telegram_chat_id"], row["telegram_message_id"]
-
-
 def record_vote(url: str, voter_id: str, voter_name: str, vote: str):
     """Upsert — a voter can change their mind, only their latest vote counts."""
     now = datetime.now().isoformat()
@@ -666,49 +644,6 @@ def get_votes(url: str) -> list[dict]:
         rows = conn.execute(
             "SELECT voter_id, voter_name, vote, voted_at FROM votes WHERE url = ?", (url,)
         ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def record_rating(url: str, voter_id: str, voter_name: str, score: int):
-    """Upsert — a voter's latest 0-10 rating replaces their previous one for
-    that listing, same "latest tap wins" rule as record_vote."""
-    now = datetime.now().isoformat()
-    with _lock, _connect() as conn:
-        conn.execute(
-            """INSERT INTO ratings (url, voter_id, voter_name, score, rated_at)
-               VALUES (?, ?, ?, ?, ?)
-               ON CONFLICT(url, voter_id) DO UPDATE SET
-                   voter_name=excluded.voter_name,
-                   score=excluded.score,
-                   rated_at=excluded.rated_at""",
-            (url, voter_id, voter_name, score, now),
-        )
-
-
-def get_ratings(url: str) -> list[dict]:
-    with _lock, _connect() as conn:
-        rows = conn.execute(
-            "SELECT voter_id, voter_name, score, rated_at FROM ratings WHERE url = ?", (url,)
-        ).fetchall()
-    return [dict(row) for row in rows]
-
-
-def get_ratings_with_listing_data() -> list[dict]:
-    """
-    Every human 0-10 rating joined with that listing's stored fields
-    (price/rooms/distance plus the full LLM parse in parsed_json, which has
-    floor/elevator/parking/arnona/vaad/shelter/entry_date/is_agent) — the
-    training set for eventually regressing compute_fit_score()'s weights
-    against real human judgment instead of guessed weights.
-    """
-    with _lock, _connect() as conn:
-        rows = conn.execute("""
-            SELECT r.url, r.voter_id, r.voter_name, r.score, r.rated_at,
-                   p.price_val, p.rooms_val, p.address, p.distance_meters, p.distance_text,
-                   p.parsed_json
-            FROM ratings r
-            LEFT JOIN posts p ON p.url = r.url
-        """).fetchall()
     return [dict(row) for row in rows]
 
 

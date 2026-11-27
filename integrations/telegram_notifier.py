@@ -51,20 +51,20 @@ def _configured() -> bool:
     return False
 
 
-def _call(method: str, payload: dict, _retried: bool = False) -> dict | None:
+def _call(method: str, payload: dict, timeout: int = 10, _retried: bool = False) -> dict | list | None:
     url = _API_BASE.format(token=TELEGRAM_BOT_TOKEN, method=method)
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=timeout)
         data = resp.json()
         if not data.get("ok"):
-            # 429 from a burst of sends (e.g. --backfill-ratings) carries the
+            # 429 from a burst of sends carries the
             # server's own cooldown in retry_after — honor it and retry once
             # rather than dropping the message, since a single flood-control
             # hit is otherwise indistinguishable from a real failure.
             retry_after = data.get("parameters", {}).get("retry_after")
             if not _retried and data.get("error_code") == 429 and retry_after:
                 time.sleep(retry_after + 1)
-                return _call(method, payload, _retried=True)
+                return _call(method, payload, timeout, _retried=True)
             print(f"WARNING: Telegram {method} failed: {data.get('description')}")
             return None
         return data.get("result")
@@ -216,7 +216,7 @@ def build_listing_keyboard(up: int, down: int, group_id: str, post_id: str) -> d
 
 
 def send_listing_alert(post_url: str, fields: dict, score: int) -> str | None:
-    """Sends a new match to the shared Telegram chat with vote buttons.
+    """Sends a new match to the shared Telegram chat with link buttons.
     Returns the sent message_id, or None on any failure/misconfiguration."""
     if not _configured():
         return None
@@ -270,18 +270,6 @@ def send_highlight_alert(post_url: str, price: str, rooms: str, distance_km: str
         "disable_web_page_preview": True,
         "reply_markup": {"inline_keyboard": [_link_row(post_url, _maps_url({"address": address}))]},
     })
-
-
-def send_backfill_announcement(count: int):
-    """Sent once before apartment_bot.py --backfill-ratings replays every
-    sheet row, so the chat knows why a burst of old listings just showed up."""
-    if not _configured():
-        return
-    text = (
-        f"📋 גיבוי היסטורי — {count} דירות מהעבר.\n"
-        f"דרגו כל אחת (0-10) — עוזר לנו לכייל את מערכת הניקוד לפי מה שבאמת חשוב לכם."
-    )
-    _call("sendMessage", {"chat_id": TELEGRAM_CHAT_ID, "text": text})
 
 
 def send_failure_alert(summary: str):

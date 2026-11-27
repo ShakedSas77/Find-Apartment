@@ -27,6 +27,7 @@ _COL_PRICE, _COL_ROOMS, _COL_DIST_KM, _COL_ENTRY_DATE, _COL_FLOOR = 1, 2, 3, 4, 
 _COL_ELEVATOR, _COL_PARKING, _COL_ARNONA, _COL_VAAD, _COL_SHELTER, _COL_AGENT, _COL_ADDRESS = 6, 7, 8, 9, 10, 11, 13
 _COL_DIST_ACCURACY = SHEET_HEADERS.index("דיוק מרחק")
 _SCORE_COL_INDEX = SHEET_HEADERS.index("ציון התאמה")
+_TOTAL_COST_COL_INDEX = SHEET_HEADERS.index("עלות חודשית כוללת")
 
 
 def open_output():
@@ -133,7 +134,7 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         if not url:
             continue
         existing = best_by_url.get(url)
-        if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
+        if existing is None or _post_date_sort_key(row[_POST_DATE_COL_INDEX] if len(row) > _POST_DATE_COL_INDEX else "") > _post_date_sort_key(existing[_POST_DATE_COL_INDEX] if len(existing) > _POST_DATE_COL_INDEX else ""):
             best_by_url[url] = row
 
     db_data = storage.get_added_listing_data()
@@ -141,7 +142,7 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
     for row in best_by_url.values():
         key = _listing_key(row, db_data)
         existing = best_by_key.get(key)
-        if existing is None or _post_date_sort_key(row[12] if len(row) > 12 else "") > _post_date_sort_key(existing[12] if len(existing) > 12 else ""):
+        if existing is None or _post_date_sort_key(row[_POST_DATE_COL_INDEX] if len(row) > _POST_DATE_COL_INDEX else "") > _post_date_sort_key(existing[_POST_DATE_COL_INDEX] if len(existing) > _POST_DATE_COL_INDEX else ""):
             best_by_key[key] = row
 
     deduped_rows = list(best_by_key.values()) + url_less_rows
@@ -160,15 +161,15 @@ def dedupe_and_sort_sheet(sheet) -> tuple[int, int, int]:
         db_row = db_data.get(url)
         if not db_row:
             continue
-        if db_row.get("address") and len(row) > 13:
-            row[13] = db_row["address"]
-        if db_row.get("distance_text") and len(row) > 3:
-            row[3] = db_row["distance_text"]
+        if db_row.get("address") and len(row) > _COL_ADDRESS:
+            row[_COL_ADDRESS] = db_row["address"]
+        if db_row.get("distance_text") and len(row) > _COL_DIST_KM:
+            row[_COL_DIST_KM] = db_row["distance_text"]
 
-    fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[12] if len(r) > 12 else "")]
+    fresh_rows = [r for r in deduped_rows if _is_recent_post_date(r[_POST_DATE_COL_INDEX] if len(r) > _POST_DATE_COL_INDEX else "")]
     stale_removed = len(deduped_rows) - len(fresh_rows)
 
-    fresh_rows.sort(key=lambda r: _post_date_sort_key(r[12] if len(r) > 12 else ""), reverse=True)
+    fresh_rows.sort(key=lambda r: _post_date_sort_key(r[_POST_DATE_COL_INDEX] if len(r) > _POST_DATE_COL_INDEX else ""), reverse=True)
 
     # A manually-added column past the defined headers (e.g. a note) makes
     # get_all_values() pad every row to that wider width. Rewriting with a

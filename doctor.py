@@ -9,7 +9,7 @@ fix whatever's broken, instead of finding out mid-scheduled-run.
     python doctor.py --json     # the results as JSON rows (the Telegram /doctor command reads these)
 
 Deliberately does NOT call Google Geocoding or Distance Matrix — both share
-GMAPS_MONTHLY_CAP's counter (see apartment_bot.py get_walking_distance), and a
+GMAPS_MONTHLY_CAP's counter (see integrations/maps.py get_walking_distance), and a
 health check burning production quota would defeat its own purpose. Gmaps is
 therefore a presence-only check (key set), not a live call.
 """
@@ -72,7 +72,7 @@ def _check_chrome_profile():
     return ("chrome_profile/", PASS, "present", "")
 
 
-def _check_config_local():
+def _check_groups():
     # The sheet's Groups tab (mirrored in the DB's groups table) is the group list; TARGET_URLS only seeds it.
     try:
         storage.init_db()
@@ -209,7 +209,7 @@ def _check_telegram():
 
 
 _CHECKS = [
-    _check_env, _check_credentials_file, _check_chrome_profile, _check_config_local,
+    _check_env, _check_credentials_file, _check_chrome_profile, _check_groups,
     _check_db, _check_last_run, _check_gemini, _check_ollama, _check_sheets, _check_gmaps, _check_telegram,
 ]
 

@@ -21,7 +21,7 @@ from pathlib import Path
 import config
 from core import addon_setup, storage
 from core.errors import LoginRequired
-from core.local_settings import is_saved, save_secrets, save_settings
+from core.local_settings import is_saved, save_settings
 from integrations.distance_fallback import nominatim_geocode
 from integrations.groups_sync import add_groups, canonical_group_url
 from integrations.sheets import open_spreadsheet
@@ -72,9 +72,7 @@ def step_search():
         lat, lon, _ = found
         print(f"Found it at {lat:.5f}, {lon:.5f} (https://www.openstreetmap.org/?mlat={lat}&mlon={lon}&zoom=17)")
         if ask_yes_no("Is that the right place?", True):
-            # The south-of cutoff in config.py belongs to the original Tel Aviv destination.
-            settings.update(DESTINATION_ADDRESS=address, DESTINATION_LAT=lat, DESTINATION_LON=lon,
-                            EXCLUDE_SOUTH_OF_LAT=None)
+            addon_setup.save_destination(address, lat, lon)
             break
     save_settings(settings)
 
@@ -95,8 +93,7 @@ def step_ai():
         if addon_setup.gemini_key_works(key):
             break
         print("That key didn't work - check you copied all of it.")
-    save_secrets({"GEMINI_API_KEY": key})
-    save_settings({"LLM_PROVIDER": "gemini"})
+    addon_setup.use_gemini(key)
     print("Saved. (If you also install Ollama, it takes over when Gemini's free quota runs out.)")
 
 
@@ -157,9 +154,7 @@ def step_telegram():
         print("No message arrived - run `python setup_wizard.py --add telegram` to try again.")
         return
     print(f"   Got it: {chat['title']}")
-    addon_setup.telegram(token, "sendMessage", {"chat_id": chat["id"], "text": "✅ הבוט מחובר — דירות חדשות יגיעו לכאן"})
-    save_secrets({"TELEGRAM_BOT_TOKEN": token, "TELEGRAM_CHAT_ID": str(chat["id"])})
-    save_settings({"TELEGRAM_ENABLED": True})
+    addon_setup.connect_telegram(token, chat["id"])
     print("Connected - check the chat for a test message.")
     if ask_yes_no("Also answer chat commands (/scan, /status...) whenever this PC is on?", True):
         addon_setup.add_listener_to_startup()
@@ -173,15 +168,14 @@ def step_yad2():
     print("3. Create a Gmail app password (needs 2-step verification on the Google account).")
     _open("https://myaccount.google.com/apppasswords")
     user = ask("Gmail address", os.getenv("ALERTS_IMAP_USER"))
-    folder = ask("Gmail label with the Yad2 emails", os.getenv("ALERTS_IMAP_FOLDER") or "INBOX")
+    folder = ask("Gmail label with the Yad2 emails", os.getenv("ALERTS_IMAP_FOLDER") or "yad2")
     while True:
         password = ask_secret("App password (16 letters)", os.getenv("ALERTS_IMAP_PASSWORD")).replace(" ", "")
         problem = addon_setup.mailbox_problem(user, password, folder)
         if not problem:
             break
         print(f"Couldn't read the mailbox: {problem}")
-    save_secrets({"ALERTS_IMAP_USER": user, "ALERTS_IMAP_PASSWORD": password, "ALERTS_IMAP_FOLDER": folder})
-    save_settings({"ALERTS_SCAN_ENABLED": True})
+    addon_setup.enable_yad2_emails(user, password, folder)
     print("Saved - every scan now reads the Yad2 emails too, into a 'Yad2' tab.")
 
 
@@ -192,8 +186,7 @@ def step_maps():
     print("Create a key with the 'Distance Matrix API' and 'Geocoding API' enabled:")
     _open("https://console.cloud.google.com/apis/credentials")
     key = ask_secret("Paste the Google Maps key", os.getenv("GMAPS_API_KEY"))
-    save_secrets({"GMAPS_API_KEY": key})
-    save_settings({"GMAPS_ENABLED": True})
+    addon_setup.enable_google_maps(key)
 
 
 def step_schedule():
@@ -324,8 +317,7 @@ def _set_up_google_sheet():
     print(f"2. Create a Google Sheet and share it (Editor) with: {email}")
     while not (sheet_id := addon_setup.sheet_id_from_link(ask("3. Paste the sheet's link"))):
         print("  That isn't a Google Sheets link (docs.google.com/spreadsheets/d/...).")
-    save_secrets({"SHEET_ID": sheet_id})
-    save_settings({"OUTPUT_BACKEND": "sheets"})
+    addon_setup.use_google_sheet(sheet_id)
     try:
         title = open_spreadsheet().sheet1.title
         print(f"Connected to the sheet (first tab: {title}).")

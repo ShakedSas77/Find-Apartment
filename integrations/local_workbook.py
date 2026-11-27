@@ -134,12 +134,6 @@ class LocalWorksheet:
             self._write_range(range_name, values or [], value_input_option)
             self.spreadsheet.save()
 
-    def batch_update(self, data: list[dict], value_input_option: str = "RAW"):
-        with self.spreadsheet._lock:
-            for item in data:
-                self._write_range(item["range"], item["values"], value_input_option)
-            self.spreadsheet.save()
-
     def update_cell(self, row: int, col: int, value):
         self.update(rowcol_to_a1(row, col), [[value]], "USER_ENTERED")
 

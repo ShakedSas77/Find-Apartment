@@ -10,7 +10,7 @@
 ::
 :: 2. Run Options:
 ::
-::    [A] LIVE RUN (Default: headless, writes to Google Sheets, deletes dead links, updates DB):
+::    [A] LIVE RUN (Default: headless, writes the results sheet, deletes dead links, updates DB):
 ::        run_bot.bat
 ::
 ::    [B] DRY RUN (Classifies & prints to console only, NO sheet/DB writes):

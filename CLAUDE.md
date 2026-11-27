@@ -1,6 +1,6 @@
 # Project: Facebook Apartment Scraper
 
-Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.5 Flash-Lite (Ollama qwen2.5:7b fallback) to parse Hebrew posts into structured JSON, computes walking distance via Google Distance Matrix, and appends matching listings to a Google Sheet. Target: 3–3.5 room apartments, ₪5500–6700/month, within walking distance of רחוב הדוגמה 1, Tel Aviv. All user-facing text, regex patterns, and sheet headers are Hebrew; the LLM prompt's *instructions* can be English or Hebrew (`PROMPT_LANGUAGE` in config.py), but its field-rule content, examples, and all output values are always Hebrew.
+Python bot that scrapes Facebook apartment listing groups, uses Gemini 2.5 Flash-Lite (Ollama qwen2.5:7b fallback) to parse Hebrew posts into structured JSON, computes walking distance via Google Distance Matrix, and appends matching listings to a Google Sheet. Target: 2.5–3.5 room apartments, ₪5500–6700/month, within walking distance of רחוב הדוגמה 1, Tel Aviv. All user-facing text, regex patterns, and sheet headers are Hebrew; the LLM prompt's *instructions* are English, but its field-rule content, examples, and all output values are Hebrew.
 
 ## Run Commands
 
@@ -20,8 +20,8 @@ python apartment_bot.py --list-my-groups
 # First run without the wizard — headful required for manual FB login
 python apartment_bot.py --headful
 
-# Subsequent runs — headless + live is the default (--headless/--live still
-# accepted as no-ops so old scripts keep working)
+# Subsequent runs — headless + live is the default (--headless/--live are still
+# accepted as hidden no-ops for old user scripts; the repo's launchers no longer pass them)
 python apartment_bot.py
 # or
 run_bot.bat
@@ -53,8 +53,8 @@ playwright install chromium
 # Ollama fallback (if Gemini quota hit)
 ollama pull qwen2.5:7b
 
-# Health check — verifies every dependency (env, credentials.json, Sheets, Gemini,
-# Ollama, Telegram if enabled) without spending Google Maps/Distance Matrix quota
+# Health check — verifies every dependency (env, credentials.json, chrome_profile, groups, DB, last run,
+# Gemini, Ollama, Sheets, Maps, Telegram if enabled) without spending Google Maps/Distance Matrix quota
 python doctor.py
 python doctor.py --alert   # also DMs a Telegram alert if anything FAILs
 
@@ -89,7 +89,7 @@ run_*.bat run_hidden.vbs                                               launchers
 
 | File | Purpose |
 |---|---|
-| `apartment_bot.py` | CLI entrypoint only: `--stats`/`--reparse-rejected`/`--replay`/`--prune`/`--recompute-scores`/`--backfill-ratings`/`__main__` dispatch to `run_scraper()`; `--login` / `--list-my-groups` (handled before the key check, since setup runs them first) call `fb_scraper.log_in_to_facebook()` / `list_my_groups()`. As of the Phase 0-9 extraction (2026-07-26), the scraping/LLM/Sheets logic that used to all live here has moved to the modules below — see each for what it owns. |
+| `apartment_bot.py` | CLI entrypoint only: `--stats`/`--reparse-rejected`/`--replay`/`--prune`/`--recompute-scores`/`__main__` dispatch to `run_scraper()`; `--login` / `--list-my-groups` (handled before the key check, since setup runs them first) call `fb_scraper.log_in_to_facebook()` / `list_my_groups()`. As of the Phase 0-9 extraction (2026-07-26), the scraping/LLM/Sheets logic that used to all live here has moved to the modules below — see each for what it owns. |
 | `sources/fb_scraper.py` | Playwright/FB-DOM-specific: checkpoint/CAPTCHA handling, dead-link pruning, post-URL canonicalization, article selectors, "See more" expansion, `_scan_group_page`/`_scan_group`, `run_scraper()` |
 | `core/evaluate.py` | Source-agnostic listing pipeline: `process_candidate_listing()` (LLM parse → `_evaluate_post_data` → `_build_row` → queue), `_content_prefilter()` |
 | `core/llm.py` | Gemini/Ollama dual-path orchestration: `analyze_post_with_llm()`, `ApartmentData` schema, `get_gemini_client()`, `GEMINI_EXHAUSTED`. `LLM_PROVIDER = "none"` (no-AI mode) makes no model call: it returns an empty `ApartmentData` with only `core.normalize.street_from_text()`'s street (a name after רחוב/רח'/שדרות, + number, + a named city), and `_evaluate_post_data`'s regex second chance fills price and rooms (measured 2026-11-14 on 361 stored posts: 160 of the AI's 179 matches, 2 false matches) |
@@ -106,19 +106,19 @@ run_*.bat run_hidden.vbs                                               launchers
 | `sources/browser.py` | Stealth patching, Chrome launch args, `_is_visible()`, `_dismiss_popups()` — used by `sources/fb_scraper.py` |
 | `core/util.py` / `core/errors.py` | Shared low-level helpers (`_safe_print`, `_with_retries`, locks) and signal exceptions (`GmapsQuotaHalted`, `HeadlessCheckpointAbort`) — dependency-free, importable from anywhere without a cycle |
 | `env.py` | `.env` access with no import-time validation (`require_env()` is called explicitly from `apartment_bot.py`'s `__main__`, not at import) — this is what makes every other module importable/testable without credentials. `missing_env()` asks only for what the enabled features need (Gemini key for `LLM_PROVIDER = "gemini"`, `SHEET_ID` + `credentials.json` for `OUTPUT_BACKEND = "sheets"`, Maps key for `GMAPS_ENABLED`, IMAP login for `ALERTS_SCAN_ENABLED`, Telegram vars for `TELEGRAM_ENABLED`) |
-| `config.py` | All tunables: feature switches first (`OUTPUT_BACKEND` excel/sheets, `LLM_PROVIDER` gemini/ollama, `FACEBOOK_LOGIN`; Telegram, Yad2 emails and Google Maps default off), price/room filters, destination, negative keywords. Public defaults suit a new user; personal values go in gitignored `config_local.py` (the wizard writes it) |
-| `prompts.py` | `get_apartment_prompt_improved(text)` — dispatches to `get_apartment_prompt_english()` or `get_apartment_prompt_hebrew()` per `config.PROMPT_LANGUAGE` |
+| `config.py` | All tunables: feature switches first (`OUTPUT_BACKEND` excel/sheets, `LLM_PROVIDER` gemini/ollama/none, `FACEBOOK_LOGIN`; Telegram, Yad2 emails and Google Maps default off), price/room filters, destination, negative keywords. Public defaults suit a new user; personal values go in gitignored `config_local.py` (the wizard writes it) |
+| `prompts.py` | `get_apartment_prompt_improved(text)` — the LLM prompt (English instructions, Hebrew field rules and output) |
 | `core/storage.py` | SQLite persistence (`bot_data.db`, gitignored) — every scanned post's verdict + raw text, not just sheet matches |
 | `core/scoring.py` | `compute_fit_score(fields)` — 0-100 fit score (price/distance/amenities) appended as the sheet's last column |
 | `sources/mail_source.py` | Second listing source: Yad2's daily digest emails ("התראות יד2 - ריכוז מודעות יומי") from a Gmail label over **read-only** IMAP (`select(readonly=True)` + `BODY.PEEK`, never marks/moves/deletes mail). `scan_alert_emails()` runs at the start of every `run_scraper()` (before the browser; `ALERTS_SCAN_ENABLED`; a mailbox failure is only a WARNING) over the last `ALERTS_LOOKBACK_DAYS`: `parse_yad2_digest()` reads each listing (price, street, neighborhood, rooms, m²) from the text and its `yad2.co.il/realestate/item/<id>` link from the HTML (decoded out of the click-tracking redirect, never followed); the city comes from the saved search's title. A digest whose listings and links don't pair up one to one is skipped with a warning. Each listing goes through `_content_prefilter` and `process_candidate_listing(parsed=...)` — **no LLM call**, the email states the fields — so it's keyed by its Yad2 URL, deduped against Facebook listings by street/rooms/price, and alerted like a post — but written to its own **`Yad2` tab** (`YAD2_TAB_NAME`, same columns, created on the first live run via `sheets.open_listings_tab()`; dedupe/stale-prune/sort at run end like the main tab, and owed Telegram alerts are re-sent from either tab) (DB `group_url` = `YAD2_ALERTS_SOURCE`). `--mail-dump` saves raw email text to `ALERTS_DUMP_DIR` (gitignored) for when the layout changes. Replaces the removed Madlan API source (bot-protection 403) |
-| `sources/graphql_capture.py` | Passive listener on the feed's own `/api/graphql/` responses (post id, message text, exact `creation_time`; no extra requests). **Observational only** (`GRAPHQL_CAPTURE_ENABLED`): `_scan_group_page` prints per group how many DOM posts it matched and whether dates agree — proving the undocumented payload parse before any post data is taken from it. Approach from FaustRen/facebook-graphql-scraper |
+| `sources/graphql_capture.py` | Passive listener on the feed's own `/api/graphql/` responses (post id, message text, exact `creation_time`; no extra requests). **Observational only, off by default** (`GRAPHQL_CAPTURE_ENABLED`): `_scan_group_page` prints per group how many DOM posts it matched and whether dates agree — proving the undocumented payload parse before any post data is taken from it. Approach from FaustRen/facebook-graphql-scraper |
 | `core/run_log.py` | Every scrape (any entry point) tees console output to `logs/bot_<timestamp>.log`, each line `[HH:MM:SS]`-prefixed, pruned after `LOG_RETENTION_DAYS`; counts `ERROR:`/`WARNING:` lines for the end-of-run summary and the Telegram run-finished message. `apartment_bot.py` records each run in the `runs` table (`storage.start_run`/`finish_run`: mode, status ok/checkpoint/no_groups_scanned/crashed, counts, log path) — `--stats` lists the last 10, `doctor.py`'s `last run` check FAILs after `RUN_STALE_HOURS` without a successful live run |
 | `integrations/groups_sync.py` | The sheet's **Groups** tab is the source of truth for which FB groups get scanned (replaces `TARGET_URLS`, which now only seeds an empty tab). User columns: קישור לקבוצה (any link shape or bare id, canonicalized), שם הקבוצה / ערים (filled from the scanned page title only when blank), פעיל ("לא" pauses), הערות. Bot columns: posts scanned, added, match %, last added, last scan, סטטוס (תקין / לא חבר/ה בקבוצה — the scan saw FB's Join button and no posts / לא נמצאו פוסטים / ממתינה לסריקה ראשונה; `storage.set_group_status`). Adding a group needs only its link: invisible direction marks are stripped, a blank פעיל means active. Duplicates (same group under any link shape) merge into the first row — its cells win, blanks are filled from the copy — are reported and dropped on the next write. Known limit: a vanity-slug link and the numeric-id link of the same group can't be matched. `sync_groups()` runs at the start of `run_scraper()` (dry runs read-only) and after a live run's dedupe; mirrors the tab into the `groups` DB table, falling back to that mirror (then `TARGET_URLS`) when the sheet is unreachable. Standalone: `--sync-groups`, which also sorts the rows by match rate (best first, unscanned groups last; `sort_by_yield=True` — the in-run syncs keep the tab order) |
 | `integrations/distance_fallback.py` | Free Nominatim geocode + calibrated haversine estimate, used whenever Google is off (the default) or over `GMAPS_MONTHLY_CAP`; tiers by match precision (house/street/neighbourhood) and gives each estimate a ± (`estimate_error_km`), shown in the sheet's `דיוק מרחק` column and the Telegram alert |
 | `integrations/telegram_notifier.py` | Optional (`TELEGRAM_ENABLED`) — pushes new matches to a shared Telegram chat with ⭐/🗑 vote buttons |
 | `bot_listener.py` | Separate long-running process — long-polls Telegram for vote button taps (records them, updates the tally shown on the message) and chat commands (`integrations/telegram_commands.py`) |
 | `integrations/telegram_commands.py` | Chat commands from the configured chat only, fixed whitelist (`COMMANDS`), no free-form arguments, also reachable as inline buttons (`/help` menu, `cmd:<name>` callback data; `handle_button`): `/scan` `/scan_fb` `/scan_yad2` launch `apartment_bot.py` (`--source`) as a background process (refused while one runs — ours, or a Task Scheduler run seen through its `running` row under 2h old), `/scan_group` lists the active groups as buttons (`sg:<group id>` → `--group <url from the groups mirror>`), `/stop` kills the scan's process tree — ours, or the scheduled one by the pid `apartment_bot.py` records with its run id (`storage.SCAN_PID_KEY`) — and marks its run row `stopped`, `/status` (with the live progress line the scan writes to `SCAN_PROGRESS_KEY` every tick), `/new` (last 24h), `/groups` (needs-a-hand list), `/pause` `/resume` (`SCANS_PAUSED_KEY`; `run_scheduled.bat` passes `--scheduled`, which exits while paused), `/stats` (Hebrew, from storage), `/doctor` (`doctor.py --json`, Hebrew), `/sync_groups` (CLI output in `<pre>`). Commands older than 5 min (sent while the listener was down) are ignored; a button tap Telegram refuses to answer (too old) is ignored too |
-| `doctor.py` | Dependency health check (env, credentials.json, Sheets, Gemini, Ollama, Telegram) — run manually or `--alert` to DM on failure. Never calls Geocoding/Distance Matrix (shares `GMAPS_MONTHLY_CAP`'s counter) |
+| `doctor.py` | Dependency health check (env, credentials.json, chrome_profile, groups, DB, last run, Gemini, Ollama, Sheets, Maps, Telegram) — run manually or `--alert` to DM on failure. Never calls Geocoding/Distance Matrix (shares `GMAPS_MONTHLY_CAP`'s counter) |
 | `backup_db.py` | Timestamped `bot_data.db` snapshot to `backups/` (gitignored), keeps newest 14. A live `run_scraper()` calls `backup_if_stale()` at the end, so a snapshot is taken automatically once the newest is older than `BACKUP_MAX_AGE_DAYS` (7); still runnable by hand |
 | `clean_data.py` | Standalone: deletes `bot_data.db` and clears the sheet's data rows (keeps header). Run manually for a fresh slate. |
 | `credentials.json` | Google Service Account key (gitignored) |
@@ -128,7 +128,7 @@ run_*.bat run_hidden.vbs                                               launchers
 ## Data Flow
 
 1. `open_output()` — opens the Google Sheet or `listings.xlsx`, loads seen URLs for dedupe
-2. Playwright launches persistent Chromium; user logs into FB manually on first run
+2. Playwright launches persistent Chromium with the session saved by `--login` (the web app's or the wizard's Facebook step)
 3. Groups are then scanned, shuffled order for anti-bot — either in parallel (`MAX_CONCURRENT_GROUPS > 1`: worker threads, each running `_scan_group()` on its own `context.new_page()` tab) or sequentially (`MAX_CONCURRENT_GROUPS == 1`: one page, inside the same login context — see the `scraper-notes` skill)
 4. Per group (`_scan_group_page`): scroll, expand "קרא עוד"/"See more", collect `role="article"` elements
 5. Per post:
@@ -153,10 +153,6 @@ run_*.bat run_hidden.vbs                                               launchers
 | `storage-notes` | `core/storage.py`, `core/evaluate.py`, `core/dedupe.py`, `integrations/maps.py`, `apartment_bot.py` CLI flags |
 | `scoring-notes` | `core/scoring.py`, entry-date normalization, `SCORE_*` settings |
 | `telegram-notes` | `integrations/telegram_notifier.py`, `integrations/telegram_commands.py`, `bot_listener.py` |
-
-## Known Issues
-
-**Stale README** (fixed in translation): README previously claimed session doesn't persist. `launch_persistent_context` is used — session does persist via `chrome_profile/`.
 
 ## Hebrew / Locale Rules
 

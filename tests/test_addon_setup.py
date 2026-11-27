@@ -3,7 +3,8 @@ Tests for core.addon_setup's checks. Task Scheduler (subprocess) is the boundary
 """
 from types import SimpleNamespace
 
-from core import addon_setup
+import config
+from core import addon_setup, local_settings
 
 
 def test_the_service_account_email_is_read_from_its_key_file():
@@ -32,3 +33,13 @@ def test_only_the_bots_tasks_are_listed_from_task_scheduler(monkeypatch):
     monkeypatch.setattr(addon_setup.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=output))
 
     assert addon_setup.scheduled_scans() == [{"name": "ApartmentBot 2000", "next_run": "11/14/2026 8:00:00 PM"}]
+
+
+def test_a_new_destination_drops_the_example_destinations_south_cutoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(local_settings, "_CONFIG_LOCAL", tmp_path / "config_local.py")
+    for name in ("DESTINATION_ADDRESS", "DESTINATION_LAT", "DESTINATION_LON", "EXCLUDE_SOUTH_OF_LAT"):
+        monkeypatch.setattr(config, name, getattr(config, name))  # save_settings also sets the running config
+
+    addon_setup.save_destination("הרצל 1, חיפה", 32.8, 35.0)
+
+    assert "EXCLUDE_SOUTH_OF_LAT = None" in (tmp_path / "config_local.py").read_text(encoding="utf-8")

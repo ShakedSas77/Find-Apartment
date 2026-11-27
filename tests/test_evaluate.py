@@ -335,6 +335,13 @@ def test_a_google_distance_just_over_the_limit_is_rejected(monkeypatch):
     assert _verdict_at_distance(monkeypatch, config.MAX_WALKING_DISTANCE_KM + 0.3, "google_maps") == storage.VERDICT_REJECTED_DISTANCE
 
 
+def test_location_verdict_keeps_an_estimate_whose_error_could_bring_it_in():
+    fields = {"distance_source": "street_estimate", "distance_meters": int((config.MAX_WALKING_DISTANCE_KM + 0.3) * 1000),
+              "distance_error_km": 0.5}
+
+    assert evaluate._location_verdict(fields) is None
+
+
 def test_a_post_read_without_ai_is_added_with_the_rules_price_and_rooms(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "bot_data.db")
     storage.init_db()
